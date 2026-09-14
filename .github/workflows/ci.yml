@@ -9,6 +9,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Settings() (app/core/config.py) exige DATABASE_URL só pra instanciar,
+      # mesmo em testes que não tocam banco de verdade (create_engine não
+      # conecta até a primeira query). Integração contra Postgres real de
+      # CI é escopo da Sprint 6 (ver backlog-de-sprints-do-mvp.md).
+      DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

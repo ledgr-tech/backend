@@ -21,3 +21,4 @@ class Empresa(Base, TimestampMixin):
     configuracao: Mapped["Configuracao"] = relationship(  # noqa: F821
         back_populates="empresa", uselist=False
     )
+    extratos: Mapped[list["Extrato"]] = relationship(back_populates="empresa")  # noqa: F821
