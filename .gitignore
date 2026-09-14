@@ -4,3 +4,8 @@ __pycache__/
 venv/
 .venv/
 .ruff_cache/
+
+# Saída do gerador de extratos sintéticos (issue #10) — ferramenta de
+# apoio (volume/QA manual), não fonte de fixture de CI. As fixtures de
+# teste determinísticas continuam versionadas em tests/fixtures/.
+tests/fixtures/gerados/
