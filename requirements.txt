@@ -8,3 +8,4 @@ passlib[bcrypt]
 python-dotenv
 pydantic-settings
 python-multipart
+ofxtools
