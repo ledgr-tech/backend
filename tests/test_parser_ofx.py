@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app.parsers.ofx import LancamentoNormalizado, OFXInvalidoError, parse_ofx
+from app.parsers.ofx import OFXInvalidoError, parse_ofx
+from app.parsers.tipos import LancamentoNormalizado
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

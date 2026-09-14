@@ -14,11 +14,11 @@ retrabalho.
 """
 
 import io
-from dataclasses import dataclass
-from datetime import date
 from decimal import Decimal
 
 from ofxtools.Parser import OFXTree
+
+from app.parsers.tipos import LancamentoNormalizado
 
 # TRNTYPE conforme a spec OFX (seção "Banking Transaction Types"). Não é uma
 # lista exaustiva de todos os valores possíveis da spec, só dos tipos
@@ -52,16 +52,6 @@ class OFXInvalidoError(Exception):
     Levantado tanto por header/SGML/XML malformado quanto por estrutura
     fora da spec OFX. Usado pela issue #11 (teste de arquivo corrompido).
     """
-
-
-@dataclass(frozen=True)
-class LancamentoNormalizado:
-    """Lançamento em memória, já no schema comum rascunhado na arquitetura técnica."""
-
-    data: date
-    valor: Decimal
-    descricao: str
-    tipo: str  # "credito" | "debito"
 
 
 def _tipo_normalizado(trntype: str | None, valor: Decimal) -> str:
