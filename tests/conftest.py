@@ -2,16 +2,15 @@
 
 Testes que gravam no banco (issue #12 em diante — normalização grava
 lançamento de verdade) usam a fixture `db_session` abaixo, e as fábricas
-`criar_empresa`/`criar_extrato` pra montar dado de teste. Em CI, o
-DATABASE_URL configurado (.github/workflows/ci.yml) aponta pra um Postgres
-que não existe de verdade — decisão já registrada lá: "Integração contra
-Postgres real de CI é escopo da Sprint 6" (ver
-07-tecnico/backlog-de-sprints-do-mvp.md no vault). Por isso `db_session`
-PULA (não falha) o teste que depende dela quando não consegue conectar, em
-vez de quebrar a CI antes da hora — mesmo raciocínio já registrado no
-comentário do ci.yml, só aplicado agora que a issue #12 precisa de banco de
-verdade pra testar. Localmente, com um DATABASE_URL de Postgres real (ver
-.env), esses testes rodam de verdade.
+`criar_empresa`/`criar_extrato` pra montar dado de teste. A CI roda um
+service container de Postgres real desde a issue #12 (antecipado do
+Sprint 6 — ver .github/workflows/ci.yml: `ON CONFLICT DO NOTHING` é
+sintaxe de dialeto Postgres, não dava pra validar sem banco de verdade).
+`db_session` PULA (não falha) o teste que depende dela quando não consegue
+conectar — isso é só um fallback pra rodar a suíte localmente sem Postgres
+configurado (ex: só editando parser, sem tocar em normalização); em CI, com
+o service container sempre disponível, esses testes rodam de verdade, não
+aparecem como skipped.
 
 Nunca faz TRUNCATE/DELETE indiscriminado nas tabelas — `db_session` pode
 apontar pro Postgres compartilhado de desenvolvimento (Railway, ver .env);
@@ -47,9 +46,10 @@ def postgres_disponivel() -> bool:
 def db_session(postgres_disponivel):
     if not postgres_disponivel:
         pytest.skip(
-            "Postgres real não disponível — DATABASE_URL de CI aponta pra um banco "
-            "que não existe de verdade (ver comentário em .github/workflows/ci.yml). "
-            "Integração contra Postgres real de CI é escopo da Sprint 6."
+            "Postgres real não disponível — fallback pra rodar a suíte localmente "
+            "sem banco configurado. Em CI, o service container do "
+            ".github/workflows/ci.yml garante que este teste roda de verdade, não "
+            "pula (ver comentário lá)."
         )
     session = SessionLocal()
     try:

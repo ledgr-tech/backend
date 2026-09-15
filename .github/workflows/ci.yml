@@ -9,11 +9,29 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # Postgres real, antecipado do Sprint 6 (issue #12): ON CONFLICT DO
+      # NOTHING é sintaxe de dialeto Postgres, não valida contra SQLite/dummy
+      # — um teste que dá skip sem Postgres disponível deixaria a CI verde
+      # sem checar o comportamento mais crítico da normalização (dedup).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       # Settings() (app/core/config.py) exige DATABASE_URL só pra instanciar,
       # mesmo em testes que não tocam banco de verdade (create_engine não
-      # conecta até a primeira query). Integração contra Postgres real de
-      # CI é escopo da Sprint 6 (ver backlog-de-sprints-do-mvp.md).
+      # conecta até a primeira query). Credenciais batem com o service
+      # container acima — agora aponta pra um Postgres real, não um dummy.
       DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ci
     steps:
       - uses: actions/checkout@v4
@@ -24,4 +42,5 @@ jobs:
       - run: pip install pytest black ruff
       - run: black --check .
       - run: ruff check .
+      - run: alembic upgrade head
       - run: pytest
