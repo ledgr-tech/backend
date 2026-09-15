@@ -33,6 +33,17 @@ _LANCAMENTOS_ESPERADOS = [
 # Fixtures criadas à mão pra issue #9 (não existe ainda o script gerador de
 # extratos sintéticos da issue #10) — mesmo conteúdo em dois encodings, pra
 # cobrir os dois cenários do critério de aceite da issue.
+#
+# Cobertura dos critérios da issue #11 ("Testes unitários de parsing")
+# neste arquivo:
+# - CSV válido: test_parse_csv_valido_utf8_retorna_lancamentos_normalizados
+# - Encoding diferente: test_parse_csv_com_encoding_diferente_retorna_lancamentos_normalizados
+# - Arquivo corrompido: test_parse_csv_corrompido_levanta_erro_especifico
+#   (conteúdo genérico inválido), test_parse_csv_vazio_levanta_erro_especifico
+#   (arquivo vazio) e test_parse_csv_sem_colunas_obrigatorias_levanta_erro_especifico
+#   (estrutura fora do esperado)
+# Reforço com corrupção "realista" (gerada pelo script da #10, não bytes de
+# lixo hardcoded): ver tests/test_parsers_gerados.py.
 
 
 def test_parse_csv_valido_utf8_retorna_lancamentos_normalizados():
@@ -51,7 +62,7 @@ def test_parse_csv_com_encoding_diferente_retorna_lancamentos_normalizados():
     assert lancamentos == _LANCAMENTOS_ESPERADOS
 
 
-def test_parse_csv_invalido_levanta_erro_especifico():
+def test_parse_csv_corrompido_levanta_erro_especifico():
     with pytest.raises(CSVInvalidoError):
         parse_csv(b"isso claramente nao eh um csv de extrato valido")
 
