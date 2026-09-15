@@ -8,9 +8,9 @@ credito|debito) — sem tocar o banco. Formato suportado conforme ADR-001
 Por decisão confirmada com o time, esta issue cobre só a função de parsing.
 Persistir lançamento (model `Lancamento` + migration com `empresa_id`
 indexado e a constraint UNIQUE(empresa_id, extrato_id, hash_dedup) já
-especificada na ADR-004) nasce junto com a normalização via BackgroundTasks
-(Sprint 2, ver 07-tecnico/backlog-de-sprints-do-mvp.md), evitando
-retrabalho.
+especificada na ADR-004) foi implementado na issue #12
+(app/services/normalizacao.py), que chama esta função a partir de uma
+BackgroundTask agendada pelo endpoint de upload.
 """
 
 import io

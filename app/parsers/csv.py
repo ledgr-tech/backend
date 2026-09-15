@@ -28,8 +28,9 @@ algum banco/sistema real exigir formato diferente):
 
 Por decisão confirmada com o time (mesma da issue #8), esta issue cobre só
 a função de parsing. Persistir lançamento (model `Lancamento` + migration)
-nasce junto com a normalização via BackgroundTasks (Sprint 2, ver
-07-tecnico/backlog-de-sprints-do-mvp.md), evitando retrabalho.
+foi implementado na issue #12 (app/services/normalizacao.py), que chama
+esta função a partir de uma BackgroundTask agendada pelo endpoint de
+upload.
 """
 
 import csv
