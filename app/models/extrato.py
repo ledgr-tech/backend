@@ -12,8 +12,10 @@ class Extrato(Base, TimestampMixin):
 
     Por decisão da ADR-002, o arquivo bruto NUNCA é persistido — só guardamos
     metadados (nome do arquivo, formato, tamanho, status, quantidade de
-    lançamentos depois de processado). O conteúdo é lido em memória só pra
-    validar tamanho e é descartado assim que a resposta é enviada.
+    lançamentos depois de processado). O conteúdo é lido em memória pra
+    validar tamanho e, desde a issue #12, também passado pra BackgroundTask
+    de normalização (app/services/normalizacao.py); é descartado assim que
+    essa task termina de processar, nunca gravado em disco nem em coluna.
     """
 
     __tablename__ = "extratos"
@@ -36,3 +38,4 @@ class Extrato(Base, TimestampMixin):
     quantidade_lancamentos: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
+    lancamentos: Mapped[list["Lancamento"]] = relationship(back_populates="extrato")  # noqa: F821
