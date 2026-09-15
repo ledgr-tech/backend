@@ -1,8 +1,8 @@
 """Parser de extratos OFX via ofxtools (issue #8).
 
-Converte o conteúdo bruto de um arquivo OFX (bytes) numa lista de
-lançamentos normalizados em memória (data, valor, descrição, tipo
-credito|debito) — sem tocar o banco. Formato suportado conforme ADR-001
+Converte o conteúdo bruto de um arquivo OFX (bytes) num `ResultadoParsing`
+(`app.parsers.tipos`) — lançamentos válidos + erros por transação — sem
+tocar o banco. Formato suportado conforme ADR-001
 (02-decisoes/01-formatos-suportados-mvp.md).
 
 Por decisão confirmada com o time, esta issue cobre só a função de parsing.
@@ -11,6 +11,15 @@ indexado e a constraint UNIQUE(empresa_id, extrato_id, hash_dedup) já
 especificada na ADR-004) foi implementado na issue #12
 (app/services/normalizacao.py), que chama esta função a partir de uma
 BackgroundTask agendada pelo endpoint de upload.
+
+Erro estrutural do arquivo inteiro (header/SGML malformado, estrutura fora
+da spec OFX) continua abortando com `OFXInvalidoError` — a validação do
+ofxtools acontece pra todo o documento em `tree.convert()`, antes de
+qualquer transação individual ser acessada, então esse tipo de erro nunca
+chega a ser "por transação". Já uma transação que falha só na hora de
+*nós* construirmos o `LancamentoNormalizado` a partir dela (issue #13) não
+aborta mais o arquivo: vira um `ErroLinha` no resultado, e o parsing segue
+pras próximas transações.
 """
 
 import io
@@ -18,7 +27,7 @@ from decimal import Decimal
 
 from ofxtools.Parser import OFXTree
 
-from app.parsers.tipos import LancamentoNormalizado
+from app.parsers.tipos import ErroLinha, LancamentoNormalizado, ResultadoParsing
 
 # TRNTYPE conforme a spec OFX (seção "Banking Transaction Types"). Não é uma
 # lista exaustiva de todos os valores possíveis da spec, só dos tipos
@@ -65,10 +74,13 @@ def _tipo_normalizado(trntype: str | None, valor: Decimal) -> str:
     return "credito" if valor >= 0 else "debito"
 
 
-def parse_ofx(conteudo: bytes) -> list[LancamentoNormalizado]:
-    """Faz o parsing de um arquivo OFX e retorna os lançamentos normalizados.
+def parse_ofx(conteudo: bytes) -> ResultadoParsing:
+    """Faz o parsing de um arquivo OFX e retorna lançamentos válidos + erros por transação.
 
-    Levanta `OFXInvalidoError` se `conteudo` não for um OFX válido.
+    Levanta `OFXInvalidoError` se `conteudo` não for um OFX válido — erro
+    estrutural do arquivo inteiro. Uma transação que falha só na
+    construção do `LancamentoNormalizado` não levanta: vira um `ErroLinha`
+    no `ResultadoParsing` (issue #13) e o parsing continua pras próximas.
     """
     tree = OFXTree()
     try:
@@ -78,15 +90,23 @@ def parse_ofx(conteudo: bytes) -> list[LancamentoNormalizado]:
         raise OFXInvalidoError(f"Arquivo OFX inválido: {exc}") from exc
 
     lancamentos: list[LancamentoNormalizado] = []
+    erros: list[ErroLinha] = []
+    posicao = 0
     for extrato in ofx.statements:
         for transacao in extrato.transactions:
-            valor = transacao.trnamt
-            lancamentos.append(
-                LancamentoNormalizado(
-                    data=transacao.dtposted.date(),
-                    valor=valor,
-                    descricao=transacao.memo or transacao.name or "",
-                    tipo=_tipo_normalizado(transacao.trntype, valor),
+            posicao += 1
+            try:
+                valor = transacao.trnamt
+                lancamentos.append(
+                    LancamentoNormalizado(
+                        data=transacao.dtposted.date(),
+                        valor=valor,
+                        descricao=transacao.memo or transacao.name or "",
+                        tipo=_tipo_normalizado(transacao.trntype, valor),
+                    )
                 )
-            )
-    return lancamentos
+            except _ERROS_OFX_INVALIDO as exc:
+                fitid = getattr(transacao, "fitid", None)
+                identificador = fitid if fitid else f"transação {posicao}"
+                erros.append(ErroLinha(identificador=identificador, motivo=str(exc)))
+    return ResultadoParsing(lancamentos=lancamentos, erros=erros)

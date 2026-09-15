@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from app.core.database import SessionLocal, engine
-from app.models import Empresa, Extrato, Lancamento
+from app.models import Empresa, Extrato, Lancamento, LinhaInvalida
 
 
 def _postgres_disponivel() -> bool:
@@ -68,9 +68,9 @@ def _gerar_cnpj() -> str:
 @pytest.fixture
 def criar_empresa(db_session):
     """Fábrica de Empresa real no banco. A limpeza no fim do teste apaga só
-    o que essa fábrica criou: a empresa e qualquer extrato/lançamento
-    gravado contra ela durante o teste — inclusive via HTTP, não só pelos
-    outros helpers deste arquivo."""
+    o que essa fábrica criou: a empresa e qualquer extrato/lançamento/linha
+    inválida gravado contra ela durante o teste — inclusive via HTTP, não
+    só pelos outros helpers deste arquivo."""
     empresas_criadas: list[uuid.UUID] = []
 
     def _criar(razao_social: str = "Empresa de teste") -> Empresa:
@@ -90,6 +90,9 @@ def criar_empresa(db_session):
             db_session.query(Lancamento).filter(Lancamento.extrato_id.in_(extrato_ids)).delete(
                 synchronize_session=False
             )
+            db_session.query(LinhaInvalida).filter(
+                LinhaInvalida.extrato_id.in_(extrato_ids)
+            ).delete(synchronize_session=False)
             db_session.query(Extrato).filter(Extrato.id.in_(extrato_ids)).delete(
                 synchronize_session=False
             )

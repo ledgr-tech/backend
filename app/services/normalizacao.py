@@ -9,21 +9,30 @@ SQLAlchemy é síncrona e o parsing com pandas é bloqueante — `async def`
 aqui bloquearia o event loop pras outras requisições.
 
 Fluxo: seta status="processando" (commita), parseia via
-app.parsers.ofx/app.parsers.csv conforme o formato do extrato, grava os
-lançamentos via `INSERT ... ON CONFLICT (empresa_id, extrato_id,
-hash_dedup) DO NOTHING` — dedupliação em reprocessamento decidida na
-ADR-004, não checagem de duplicata na aplicação antes do insert — e seta
-status="concluido"/quantidade_lancamentos. Em erro de parsing
-(OFXInvalidoError/CSVInvalidoError), seta status="erro". O try/except
-amplo no nível mais alto da função existe porque uma exceção não tratada
-numa BackgroundTask do FastAPI é só logada pelo servidor e nunca chega no
-cliente (a resposta HTTP já foi enviada) — sem ele, um erro inesperado
-deixaria o extrato preso em "processando" pra sempre.
+app.parsers.ofx/app.parsers.csv conforme o formato do extrato — que devolve
+um `ResultadoParsing` (issue #13): lançamentos válidos + `ErroLinha` por
+linha/transação que não normalizou, sem abortar o arquivo por causa delas.
+Grava os lançamentos válidos via `INSERT ... ON CONFLICT (empresa_id,
+extrato_id, hash_dedup) DO NOTHING` — dedupliação em reprocessamento
+decidida na ADR-004, não checagem de duplicata na aplicação antes do
+insert — e um `LinhaInvalida` por `ErroLinha`. Status final:
+- "concluido" se não houve nenhum erro de linha;
+- "concluido_com_erros" se houve erro de linha mas pelo menos um lançamento
+  válido;
+- "erro" se houve erro de linha e zero lançamentos válidos (arquivo
+  estruturalmente ok, mas nenhuma linha aproveitável) — as `linhas_invalidas`
+  são persistidas de qualquer forma, é justamente o caso onde o relatório
+  mais importa.
 
-Fora de escopo aqui (issue #13, não antecipado): arquivo com linha
-quebrada falha o extrato inteiro, porque os parsers das #8/#9 abortam no
-primeiro erro de linha. Tolerância por linha com relatório de motivo é
-escopo da #13 — os parsers não são alterados por esta issue.
+Erro estrutural do arquivo inteiro (OFXInvalidoError/CSVInvalidoError, ver
+docstrings de app/parsers/ofx.py e app/parsers/csv.py) continua setando
+status="erro" sem registrar `linhas_invalidas` — não há detalhe por linha
+nesse caso, o arquivo inteiro nem chegou a ser parseado.
+
+O try/except amplo no nível mais alto da função existe porque uma exceção
+não tratada numa BackgroundTask do FastAPI é só logada pelo servidor e
+nunca chega no cliente (a resposta HTTP já foi enviada) — sem ele, um erro
+inesperado deixaria o extrato preso em "processando" pra sempre.
 """
 
 import hashlib
@@ -37,10 +46,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.models import Extrato, Lancamento
+from app.models import Extrato, Lancamento, LinhaInvalida
 from app.parsers.csv import CSVInvalidoError, parse_csv
 from app.parsers.ofx import OFXInvalidoError, parse_ofx
-from app.parsers.tipos import LancamentoNormalizado
+from app.parsers.tipos import ResultadoParsing
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +69,7 @@ def _calcular_hash_dedup(
     return hashlib.sha256(bruto.encode("utf-8")).hexdigest()
 
 
-def _parse(formato: str, conteudo: bytes) -> list[LancamentoNormalizado]:
+def _parse(formato: str, conteudo: bytes) -> ResultadoParsing:
     if formato == "ofx":
         return parse_ofx(conteudo)
     if formato == "csv":
@@ -95,7 +104,7 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
         db.commit()
 
         try:
-            lancamentos = _parse(formato, conteudo)
+            resultado = _parse(formato, conteudo)
         except (OFXInvalidoError, CSVInvalidoError) as exc:
             logger.warning(
                 "normalizar_extrato: extrato %s com conteúdo inválido: %s", extrato_id, exc
@@ -104,7 +113,7 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             _marcar_erro(db, extrato_id)
             return
 
-        for lancamento in lancamentos:
+        for lancamento in resultado.lancamentos:
             hash_dedup = _calcular_hash_dedup(
                 lancamento.valor, lancamento.data, lancamento.descricao, extrato_id
             )
@@ -124,8 +133,24 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             )
             db.execute(stmt)
 
-        extrato.status = "concluido"
-        extrato.quantidade_lancamentos = len(lancamentos)
+        for erro in resultado.erros:
+            db.add(
+                LinhaInvalida(
+                    extrato_id=extrato_id,
+                    identificador=erro.identificador,
+                    motivo=erro.motivo,
+                )
+            )
+
+        if not resultado.erros:
+            extrato.status = "concluido"
+        elif resultado.lancamentos:
+            extrato.status = "concluido_com_erros"
+        else:
+            # Arquivo estruturalmente ok, mas nenhuma linha aproveitável —
+            # as linhas_invalidas acima são persistidas de qualquer forma.
+            extrato.status = "erro"
+        extrato.quantidade_lancamentos = len(resultado.lancamentos)
         db.commit()
     except Exception:
         # Amplo de propósito — ver docstring do módulo: garante que o

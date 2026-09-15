@@ -22,7 +22,7 @@ class Extrato(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint("formato IN ('ofx', 'csv')", name="ck_extratos_formato_suportado"),
         CheckConstraint(
-            "status IN ('pendente', 'processando', 'concluido', 'erro')",
+            "status IN ('pendente', 'processando', 'concluido', 'concluido_com_erros', 'erro')",
             name="ck_extratos_status_valido",
         ),
     )
@@ -39,3 +39,6 @@ class Extrato(Base, TimestampMixin):
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
     lancamentos: Mapped[list["Lancamento"]] = relationship(back_populates="extrato")  # noqa: F821
+    linhas_invalidas: Mapped[list["LinhaInvalida"]] = relationship(  # noqa: F821
+        back_populates="extrato"
+    )
