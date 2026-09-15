@@ -1,10 +1,16 @@
 """Parser de extratos CSV via pandas, com detecção de encoding e delimitador
 (issue #9).
 
-Converte o conteúdo bruto de um arquivo CSV (bytes) numa lista de
-lançamentos normalizados em memória, no mesmo formato de saída do parser de
-OFX (`app.parsers.tipos.LancamentoNormalizado`) — sem tocar o banco. Formato
-suportado conforme ADR-001 (02-decisoes/01-formatos-suportados-mvp.md).
+Converte o conteúdo bruto de um arquivo CSV (bytes) num `ResultadoParsing`
+(`app.parsers.tipos`) — lançamentos válidos + erros por linha — no mesmo
+formato de saída do parser de OFX, sem tocar o banco. Formato suportado
+conforme ADR-001 (02-decisoes/01-formatos-suportados-mvp.md).
+
+Erro estrutural do arquivo inteiro (encoding não detectável, delimitador
+não identificável, colunas obrigatórias ausentes) continua abortando com
+`CSVInvalidoError` — nada disso tem "linha" recuperável. Já uma linha
+individual com data/valor inválido (issue #13) não aborta mais o arquivo:
+vira um `ErroLinha` no resultado, e o parsing segue pras próximas linhas.
 
 Suposições assumidas por este parser, sem ADR fechando o formato exato do
 CSV de banco/sistema de gestão (limitação conhecida do MVP, revisitar se
@@ -43,7 +49,7 @@ from charset_normalizer import from_bytes
 from dateutil.parser import ParserError
 from dateutil.parser import parse as dateutil_parse
 
-from app.parsers.tipos import LancamentoNormalizado
+from app.parsers.tipos import ErroLinha, LancamentoNormalizado, ResultadoParsing
 
 # Ver suposição de encoding no docstring do módulo.
 _ENCODINGS_CANDIDATOS = ["utf_8", "iso-8859-1", "cp1252"]
@@ -98,12 +104,15 @@ def _parse_valor(bruto: str) -> Decimal:
         raise CSVInvalidoError(f"Valor inválido no CSV: {bruto!r}") from exc
 
 
-def parse_csv(conteudo: bytes) -> list[LancamentoNormalizado]:
-    """Faz o parsing de um arquivo CSV e retorna os lançamentos normalizados.
+def parse_csv(conteudo: bytes) -> ResultadoParsing:
+    """Faz o parsing de um arquivo CSV e retorna lançamentos válidos + erros por linha.
 
     Detecta encoding (charset-normalizer) e delimitador (`csv.Sniffer`)
     automaticamente. Levanta `CSVInvalidoError` se `conteudo` não for um CSV
-    de extrato válido (ver suposições documentadas no topo do módulo).
+    de extrato válido — erro estrutural do arquivo inteiro (ver suposições
+    documentadas no topo do módulo). Uma linha individual com data/valor
+    inválido não levanta: vira um `ErroLinha` no `ResultadoParsing` (issue
+    #13) e o parsing continua pras próximas linhas.
     """
     texto = _detectar_texto(conteudo)
     if not texto.strip():
@@ -125,14 +134,23 @@ def parse_csv(conteudo: bytes) -> list[LancamentoNormalizado]:
         )
 
     lancamentos: list[LancamentoNormalizado] = []
-    for _, linha in tabela.iterrows():
-        valor = _parse_valor(linha["valor"])
+    erros: list[ErroLinha] = []
+    for indice, linha in tabela.iterrows():
+        # Linha 1 é o cabeçalho, a primeira linha de dado é a 2 — bate com
+        # o que a pessoa vê abrindo o CSV num editor de texto.
+        numero_linha = indice + 2
+        try:
+            valor = _parse_valor(linha["valor"])
+            data_lancamento = _parse_data(linha["data"])
+        except CSVInvalidoError as exc:
+            erros.append(ErroLinha(identificador=str(numero_linha), motivo=str(exc)))
+            continue
         lancamentos.append(
             LancamentoNormalizado(
-                data=_parse_data(linha["data"]),
+                data=data_lancamento,
                 valor=valor,
                 descricao=str(linha["descricao"]).strip(),
                 tipo="credito" if valor >= 0 else "debito",
             )
         )
-    return lancamentos
+    return ResultadoParsing(lancamentos=lancamentos, erros=erros)
