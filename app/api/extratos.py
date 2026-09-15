@@ -1,20 +1,29 @@
-"""Endpoint de upload de extrato (issue #7).
+"""Endpoints de extrato: upload (issue #7) e relatório de validação (issue #13).
 
-Valida extensão (.ofx/.csv, ver ADR-001) e tamanho (5MB), persiste só os
-metadados do extrato — nunca o conteúdo do arquivo (ADR-002) — e retorna
-`extrato_id` e `status="pendente"` imediatamente, sem esperar o parsing.
+`POST /extratos/upload` valida extensão (.ofx/.csv, ver ADR-001) e tamanho
+(5MB), persiste só os metadados do extrato — nunca o conteúdo do arquivo
+(ADR-002) — e retorna `extrato_id` e `status="pendente"` imediatamente, sem
+esperar o parsing.
 
 Desde a issue #12, o conteúdo lido em memória é passado pra BackgroundTask
 de normalização (`app.services.normalizacao.normalizar_extrato`), agendada
 depois do commit do Extrato — ela quem parseia (OFX/CSV, issues #8/#9) e
 grava os lançamentos, atualizando o status pra "processando"/"concluido"/
-"erro". O conteúdo continua nunca sendo persistido (ADR-002): só existe em
-memória até a task terminar de processar e descartar.
+"concluido_com_erros"/"erro" (issue #13). O conteúdo continua nunca sendo
+persistido (ADR-002): só existe em memória até a task terminar de
+processar e descartar.
+
+`GET /extratos/{extrato_id}` (issue #13) devolve o relatório de validação:
+status atual, quantidade de lançamentos válidos e a lista de linhas/
+transações que não normalizaram (identificador + motivo), pra quem chamou
+o upload acompanhar o resultado do processamento assíncrono.
 
 `empresa_id` ainda é recebido explicitamente no form porque a Sprint 1 não
 tem autenticação (isso entra na Sprint 2, que troca esse campo pelo valor
 resolvido da sessão). Schema já nasce com a coluna obrigatória e indexada
-(ADR-004), sem precisar de migração de correção depois.
+(ADR-004), sem precisar de migração de correção depois. O GET novo também
+não tem autenticação ainda — mesma situação do POST hoje, protegê-los é
+escopo da issue #14.
 """
 
 import os
@@ -40,6 +49,18 @@ TAMANHO_MAXIMO_BYTES = 5 * 1024 * 1024  # 5MB — ver issue #7, sem ADR dedicado
 class ExtratoUploadResponse(BaseModel):
     extrato_id: uuid.UUID
     status: str
+
+
+class ErroLinhaResponse(BaseModel):
+    identificador: str
+    motivo: str
+
+
+class ExtratoDetalheResponse(BaseModel):
+    extrato_id: uuid.UUID
+    status: str
+    quantidade_lancamentos: int | None
+    erros: list[ErroLinhaResponse]
 
 
 @router.post(
@@ -91,3 +112,28 @@ async def upload_extrato(
     background_tasks.add_task(normalizar_extrato, extrato.id, extrato.formato, conteudo)
 
     return ExtratoUploadResponse(extrato_id=extrato.id, status=extrato.status)
+
+
+@router.get("/{extrato_id}", response_model=ExtratoDetalheResponse)
+async def obter_extrato(
+    extrato_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> ExtratoDetalheResponse:
+    extrato = db.get(Extrato, extrato_id)
+    if extrato is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Extrato não encontrado.",
+        )
+
+    erros = [
+        ErroLinhaResponse(identificador=linha.identificador, motivo=linha.motivo)
+        for linha in extrato.linhas_invalidas
+    ]
+
+    return ExtratoDetalheResponse(
+        extrato_id=extrato.id,
+        status=extrato.status,
+        quantidade_lancamentos=extrato.quantidade_lancamentos,
+        erros=erros,
+    )
