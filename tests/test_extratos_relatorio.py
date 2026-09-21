@@ -26,6 +26,7 @@ def test_get_extrato_com_erros_retorna_relatorio_correto(db_session, criar_empre
         nome_arquivo="extrato.csv",
         formato="csv",
         tamanho_bytes=0,
+        origem="banco",
         status="pendente",
     )
     db_session.add(extrato)
@@ -44,6 +45,7 @@ def test_get_extrato_com_erros_retorna_relatorio_correto(db_session, criar_empre
     corpo = response.json()
     assert corpo["extrato_id"] == str(extrato.id)
     assert corpo["status"] == "concluido_com_erros"
+    assert corpo["origem"] == "banco"
     assert corpo["quantidade_lancamentos"] == 1
     assert corpo["erros"] == [
         {"identificador": "3", "motivo": "Valor inválido no CSV: 'NAO_E_NUMERO'"}
@@ -59,6 +61,7 @@ def test_get_extrato_sem_erros_retorna_lista_de_erros_vazia(
         nome_arquivo="extrato.csv",
         formato="csv",
         tamanho_bytes=0,
+        origem="banco",
         status="pendente",
     )
     db_session.add(extrato)

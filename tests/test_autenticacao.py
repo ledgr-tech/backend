@@ -25,6 +25,7 @@ def _upload(headers=None, nome="extrato.csv", conteudo=CSV):
     return client.post(
         "/extratos/upload",
         headers=headers or {},
+        data={"origem": "banco"},
         files={"arquivo": (nome, io.BytesIO(conteudo), "text/csv")},
     )
 
@@ -64,6 +65,7 @@ def test_secret_vazio_falha_explicitamente_em_vez_de_validar(gerar_token, monkey
         TestClient(app).post(
             "/extratos/upload",
             headers={"Authorization": f"Bearer {token}"},
+            data={"origem": "banco"},
             files={"arquivo": ("extrato.csv", io.BytesIO(CSV), "text/csv")},
         )
 

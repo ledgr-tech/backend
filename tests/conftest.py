@@ -34,7 +34,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
-from app.models import Empresa, Extrato, Lancamento, LinhaInvalida
+from app.models import Conciliacao, Empresa, Extrato, Lancamento, LinhaInvalida
 
 RAIZ = Path(__file__).resolve().parent.parent
 SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
@@ -140,6 +140,11 @@ def criar_empresa(db_session):
             row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()
         ]
         if extrato_ids:
+            # Antes de lançamentos/extratos, por causa das FKs de conciliacoes.
+            db_session.query(Conciliacao).filter(
+                Conciliacao.extrato_banco_id.in_(extrato_ids)
+                | Conciliacao.extrato_sistema_id.in_(extrato_ids)
+            ).delete(synchronize_session=False)
             db_session.query(Lancamento).filter(Lancamento.extrato_id.in_(extrato_ids)).delete(
                 synchronize_session=False
             )
@@ -159,13 +164,14 @@ def criar_extrato(db_session, criar_empresa):
     pra ele. Limpeza fica a cargo de `criar_empresa` (cascata: lançamento ->
     extrato -> empresa)."""
 
-    def _criar(formato: str, tamanho_bytes: int = 0) -> Extrato:
+    def _criar(formato: str, tamanho_bytes: int = 0, origem: str = "banco") -> Extrato:
         empresa = criar_empresa()
         extrato = Extrato(
             empresa_id=empresa.id,
             nome_arquivo=f"extrato_teste.{formato}",
             formato=formato,
             tamanho_bytes=tamanho_bytes,
+            origem=origem,
             status="pendente",
         )
         db_session.add(extrato)
