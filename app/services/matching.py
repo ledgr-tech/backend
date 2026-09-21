@@ -1,9 +1,12 @@
-"""Motor de matching exato (issue #16): concilia os lançamentos de um extrato
+"""Motor de matching (issues #16 e #22): concilia os lançamentos de um extrato
 do banco com os de um extrato do sistema, pela regra da ADR-006.
 
-Dividido em duas camadas, pra que a regra seja testável sem banco:
-- `parear_lancamentos`: núcleo puro. Recebe duas listas de lançamentos em
-  memória e devolve a lista de resultados, sem tocar em banco.
+Dividido em camadas, pra que a regra seja testável sem banco:
+- `parear_lancamentos`: núcleo puro do motor exato (ADR-006). Recebe duas
+  listas de lançamentos em memória e devolve a lista de resultados, sem tocar
+  em banco.
+- `parear_por_tolerancia`: núcleo puro da segunda passada (issue #22, ADR-008),
+  sobre o que o motor exato deixou `sem_correspondencia`.
 - `conciliar_extratos`: carrega os lançamentos (sempre filtrando por
   `empresa_id` e `extrato_id`, ADR-004), chama o núcleo e persiste em
   `conciliacoes` (schema da ADR-007).
@@ -20,11 +23,20 @@ estável, nunca como critério de similaridade (isso é da Sprint 4).
 Bucket e custo (issue #19): a chave (valor, data) é o bucket do motor exato.
 Cada lançamento cai num dict por chave, então nunca há comparação de todos
 contra todos: o custo é linear no número de lançamentos, mais a ordenação
-dentro de cada grupo (n log n só no pior caso, um grupo gigante). Não existe
-janela de datas nem buckets vizinhos aqui. Essa estrutura só passa a ser
-necessária com a tolerância de data da Sprint 4 e entra junto com ela. Os
-testes de volume (tests/test_matching_volume.py e
-tests/test_conciliacoes_volume.py) guardam esse comportamento.
+dentro de cada grupo (n log n só no pior caso, um grupo gigante). Os testes de
+volume (tests/test_matching_volume.py e tests/test_conciliacoes_volume.py)
+guardam esse comportamento.
+
+Tolerância de data (issue #22, ADR-008): segunda passada, só quando
+`Configuracao.tolerancia_dias_default` da empresa é maior que 0 (default 0
+dias corridos, sem linha de Configuracao também vale 0; sem calendário de dia
+útil/feriado). Recebe apenas os `sem_correspondencia` da passada exata; os
+`duplicado` são decisão exclusiva da ADR-006 e nunca entram. Gera os pares
+candidatos (mesmo valor, diferença de datas <= tolerância), ordena por chave
+determinística (diferença de dias, datas, descrições normalizadas,
+ocorrências) e casa greedy 1:1: `match_tolerancia`, regra `tolerancia`, score
+1 - dias/(tolerância+1). A geração de candidatos é por valor (bucket por
+valor), então não compara todos contra todos, só os de mesmo valor.
 
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
@@ -40,13 +52,15 @@ from decimal import Decimal
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
-from app.models import Conciliacao, Lancamento
+from app.models import Conciliacao, Configuracao, Lancamento
 from app.services.normalizacao import _normalizar_descricao
 
 STATUS_MATCH_EXATO = "match_exato"
 STATUS_DUPLICADO = "duplicado"
 STATUS_SEM_CORRESPONDENCIA = "sem_correspondencia"
+STATUS_MATCH_TOLERANCIA = "match_tolerancia"
 REGRA_EXATO = "exato"
+REGRA_TOLERANCIA = "tolerancia"
 SCORE_EXATO = Decimal("1.000")
 
 
@@ -125,6 +139,79 @@ def parear_lancamentos(
     return resultados
 
 
+def parear_por_tolerancia(
+    banco_sem_par: list[LancamentoParaMatching],
+    sistema_sem_par: list[LancamentoParaMatching],
+    tolerancia_dias: int,
+) -> list[ResultadoMatching]:
+    """Segunda passada (issue #22, ADR-008) sobre os `sem_correspondencia` da
+    passada exata. Pura e determinística; ver docstring do módulo."""
+
+    def _sem_correspondencia() -> list[ResultadoMatching]:
+        return [
+            ResultadoMatching(STATUS_SEM_CORRESPONDENCIA, item.id, None) for item in banco_sem_par
+        ] + [
+            ResultadoMatching(STATUS_SEM_CORRESPONDENCIA, None, item.id) for item in sistema_sem_par
+        ]
+
+    if tolerancia_dias <= 0 or not banco_sem_par or not sistema_sem_par:
+        return _sem_correspondencia()
+
+    sistema_por_valor: dict[Decimal, list[LancamentoParaMatching]] = defaultdict(list)
+    for do_sistema in sistema_sem_par:
+        sistema_por_valor[do_sistema.valor].append(do_sistema)
+
+    candidatos = []
+    for do_banco in banco_sem_par:
+        for do_sistema in sistema_por_valor.get(do_banco.valor, []):
+            dias = abs((do_banco.data - do_sistema.data).days)
+            if dias <= tolerancia_dias:
+                candidatos.append(
+                    (
+                        (
+                            dias,
+                            do_banco.data,
+                            do_sistema.data,
+                            _normalizar_descricao(do_banco.descricao),
+                            do_banco.ocorrencia,
+                            _normalizar_descricao(do_sistema.descricao),
+                            do_sistema.ocorrencia,
+                        ),
+                        do_banco,
+                        do_sistema,
+                    )
+                )
+    candidatos.sort(key=lambda candidato: candidato[0])
+
+    resultados: list[ResultadoMatching] = []
+    usados_banco: set[uuid.UUID] = set()
+    usados_sistema: set[uuid.UUID] = set()
+    for chave, do_banco, do_sistema in candidatos:
+        if do_banco.id in usados_banco or do_sistema.id in usados_sistema:
+            continue
+        usados_banco.add(do_banco.id)
+        usados_sistema.add(do_sistema.id)
+        resultados.append(
+            ResultadoMatching(
+                status=STATUS_MATCH_TOLERANCIA,
+                lancamento_banco_id=do_banco.id,
+                lancamento_sistema_id=do_sistema.id,
+                regra_aplicada=REGRA_TOLERANCIA,
+                score_confianca=round(
+                    Decimal(1) - Decimal(chave[0]) / Decimal(tolerancia_dias + 1), 3
+                ),
+            )
+        )
+
+    for item in banco_sem_par:
+        if item.id not in usados_banco:
+            resultados.append(ResultadoMatching(STATUS_SEM_CORRESPONDENCIA, item.id, None))
+    for item in sistema_sem_par:
+        if item.id not in usados_sistema:
+            resultados.append(ResultadoMatching(STATUS_SEM_CORRESPONDENCIA, None, item.id))
+    return resultados
+
+
 def _chave_lock_do_par(
     empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID, extrato_sistema_id: uuid.UUID
 ) -> int:
@@ -185,6 +272,26 @@ def conciliar_extratos(
         banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
         sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
         resultados = parear_lancamentos(banco, sistema)
+
+        tolerancia_dias = db.execute(
+            select(Configuracao.tolerancia_dias_default).where(
+                Configuracao.empresa_id == empresa_id
+            )
+        ).scalar_one_or_none()
+        if tolerancia_dias:
+            banco_por_id = {item.id: item for item in banco}
+            sistema_por_id = {item.id: item for item in sistema}
+            sem_par = [r for r in resultados if r.status == STATUS_SEM_CORRESPONDENCIA]
+            resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
+            resultados += parear_por_tolerancia(
+                [banco_por_id[r.lancamento_banco_id] for r in sem_par if r.lancamento_banco_id],
+                [
+                    sistema_por_id[r.lancamento_sistema_id]
+                    for r in sem_par
+                    if r.lancamento_sistema_id
+                ],
+                tolerancia_dias,
+            )
 
         db.execute(
             delete(Conciliacao).where(
