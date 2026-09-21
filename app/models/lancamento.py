@@ -20,9 +20,8 @@ class Lancamento(Base, TimestampMixin):
     NOTHING`, não checagem de duplicata na aplicação antes do insert.
 
     `empresa_id` é indexado (toda query real do sistema filtra por tenant,
-    mesma decisão já aplicada em Extrato/Usuario). `extrato_id` ainda não
-    tem índice próprio — índices dedicados (extrato_id/data/valor) são
-    escopo da issue #15, não antecipados aqui.
+    mesma decisão já aplicada em Extrato/Usuario). `extrato_id`, `data` e
+    `valor` também têm índice simples próprio (issue #15).
     """
 
     __tablename__ = "lancamentos"
@@ -38,10 +37,10 @@ class Lancamento(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("empresas.id"), nullable=False, index=True
     )
     extrato_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("extratos.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("extratos.id"), nullable=False, index=True
     )
-    data: Mapped[date] = mapped_column(Date, nullable=False)
-    valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    data: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, index=True)
     descricao: Mapped[str] = mapped_column(String, nullable=False)
     tipo: Mapped[str] = mapped_column(String, nullable=False)
     hash_dedup: Mapped[str] = mapped_column(String(64), nullable=False)
