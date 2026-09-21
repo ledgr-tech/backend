@@ -15,14 +15,17 @@ Uso:
     python scripts/gerar_extratos_sinteticos.py --formato csv --corromper
     python scripts/gerar_extratos_sinteticos.py --formato ofx --quantidade 20000 --saida /tmp/volume
 
-Sobreposição controlada entre dois extratos (Sprint 3, motor de matching
-exato: "extratos sintéticos com sobreposição conhecida geram o número
-esperado de matches") fica fora do escopo desta issue — não implementada
-agora pra não over-engineering em cima de um requisito que ainda não tem
-issue própria. O `--seed` já garante reprodutibilidade determinística
-(mesma seed + mesmos argumentos geram exatamente os mesmos lançamentos),
-que é a peça que a Sprint 3 vai precisar pra construir overlap controlado
-depois, sem precisar redesenhar o gerador.
+Modo de par (issue #16, motor de matching exato da Sprint 3): `--par` gera
+dois arquivos, um "banco" e um "sistema", com `--quantidade` lançamentos cada,
+e `--sobreposicao N` define quantos lançamentos são idênticos (valor, data e
+descrição) nos dois. Os lançamentos não sobrepostos nunca colidem em (valor,
+data) com nenhum lançamento do outro lado (regenera em caso de colisão,
+determinístico pela seed), então o número esperado de `match_exato` é
+exatamente N, e o script imprime esse número:
+    python scripts/gerar_extratos_sinteticos.py --formato csv --par --quantidade 50 --sobreposicao 30 --seed 7
+
+O `--seed` garante reprodutibilidade determinística (mesma seed + mesmos
+argumentos geram exatamente os mesmos lançamentos), inclusive no modo de par.
 """
 
 import argparse
@@ -229,11 +232,50 @@ def _corromper_csv(texto_valido: str) -> str:
     return f'{cabecalho}\n{data_bruta},{valor_bruto},"Descricao truncada no meio do arquivo'
 
 
-def _gerar_conteudo(
-    formato: str, quantidade: int, encoding: str, corromper: bool, rng: random.Random
-) -> bytes:
-    lancamentos = _gerar_lancamentos(quantidade, rng)
+_MAX_TENTATIVAS_SEM_COLISAO = 1000
 
+
+def _gerar_sem_colisao(
+    quantidade: int, chaves_proibidas: set[tuple[Decimal, date]], rng: random.Random
+) -> list[Lancamento]:
+    """Gera `quantidade` lançamentos cuja chave (valor, data) não está em
+    `chaves_proibidas`, regenerando o que colidir (determinístico pela seed)."""
+    gerados = []
+    for _ in range(quantidade):
+        for _ in range(_MAX_TENTATIVAS_SEM_COLISAO):
+            lancamento = _gerar_lancamento(rng)
+            if (lancamento.valor, lancamento.data) not in chaves_proibidas:
+                gerados.append(lancamento)
+                break
+        else:
+            raise RuntimeError("Não foi possível gerar lançamento sem colisão de (valor, data).")
+    return gerados
+
+
+def _gerar_par(
+    quantidade: int, sobreposicao: int, rng: random.Random
+) -> tuple[list[Lancamento], list[Lancamento]]:
+    """Gera (banco, sistema) com `quantidade` lançamentos cada e exatamente
+    `sobreposicao` idênticos nos dois. Os demais não colidem em (valor, data)
+    com nenhum lançamento do outro lado, então o número de matches exatos
+    esperado é `sobreposicao`."""
+    comuns = _gerar_lancamentos(sobreposicao, rng)
+    chaves_comuns = {(item.valor, item.data) for item in comuns}
+
+    so_banco = _gerar_sem_colisao(quantidade - sobreposicao, chaves_comuns, rng)
+    chaves_banco = chaves_comuns | {(item.valor, item.data) for item in so_banco}
+    so_sistema = _gerar_sem_colisao(quantidade - sobreposicao, chaves_banco, rng)
+
+    banco = comuns + so_banco
+    sistema = list(comuns) + so_sistema
+    rng.shuffle(banco)
+    rng.shuffle(sistema)
+    return banco, sistema
+
+
+def _serializar(
+    formato: str, lancamentos: list[Lancamento], encoding: str, corromper: bool
+) -> bytes:
     if formato == "ofx":
         texto = _montar_ofx(lancamentos)
         if corromper:
@@ -246,6 +288,23 @@ def _gerar_conteudo(
     if corromper:
         texto = _corromper_csv(texto)
     return texto.encode(_ENCODINGS[encoding])
+
+
+def _gerar_conteudo(
+    formato: str, quantidade: int, encoding: str, corromper: bool, rng: random.Random
+) -> bytes:
+    lancamentos = _gerar_lancamentos(quantidade, rng)
+    return _serializar(formato, lancamentos, encoding, corromper)
+
+
+def _nome_arquivo_par(
+    lado: str, formato: str, quantidade: int, sobreposicao: int, encoding: str, seed: int
+) -> str:
+    partes = ["extrato", "par", lado, formato, f"qtd{quantidade}", f"sobreposicao{sobreposicao}"]
+    if formato == "csv":
+        partes.append(encoding.replace("-", ""))
+    partes.append(f"seed{seed}")
+    return "_".join(partes) + f".{formato}"
 
 
 def _nome_arquivo(formato: str, quantidade: int, encoding: str, corromper: bool, seed: int) -> str:
@@ -284,6 +343,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Gera arquivo propositalmente inválido (header malformado/linha truncada), pra issue #11.",
     )
     parser.add_argument(
+        "--par",
+        action="store_true",
+        help="Gera dois arquivos (banco e sistema) com sobreposição controlada (issue #16).",
+    )
+    parser.add_argument(
+        "--sobreposicao",
+        type=int,
+        default=None,
+        help="Só com --par: quantos lançamentos são idênticos nos dois arquivos.",
+    )
+    parser.add_argument(
         "--saida",
         type=Path,
         default=Path("tests/fixtures/gerados"),
@@ -293,6 +363,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if args.quantidade < 1:
         parser.error("--quantidade deve ser >= 1")
+    if args.par:
+        if args.corromper:
+            parser.error("--corromper não se combina com --par")
+        if args.sobreposicao is None:
+            parser.error("--par exige --sobreposicao")
+        if not 0 <= args.sobreposicao <= args.quantidade:
+            parser.error("--sobreposicao deve estar entre 0 e --quantidade")
+    elif args.sobreposicao is not None:
+        parser.error("--sobreposicao só se aplica com --par")
     if args.encoding != "utf-8" and args.formato == "ofx":
         print(
             "aviso: --encoding é ignorado para --formato ofx (sempre grava em cp1252)",
@@ -306,6 +385,10 @@ def main(argv: list[str] | None = None) -> None:
     seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
     rng = random.Random(seed)
 
+    if args.par:
+        _main_par(args, seed, rng)
+        return
+
     conteudo = _gerar_conteudo(args.formato, args.quantidade, args.encoding, args.corromper, rng)
 
     args.saida.mkdir(parents=True, exist_ok=True)
@@ -318,6 +401,27 @@ def main(argv: list[str] | None = None) -> None:
         f"quantidade={args.quantidade}, encoding={args.encoding if args.formato == 'csv' else 'cp1252'}, "
         f"corrompido={args.corromper}, seed={seed})"
     )
+
+
+def _main_par(args: argparse.Namespace, seed: int, rng: random.Random) -> None:
+    banco, sistema = _gerar_par(args.quantidade, args.sobreposicao, rng)
+    args.saida.mkdir(parents=True, exist_ok=True)
+
+    caminhos = []
+    for lado, lancamentos in (("banco", banco), ("sistema", sistema)):
+        conteudo = _serializar(args.formato, lancamentos, args.encoding, corromper=False)
+        nome = _nome_arquivo_par(
+            lado, args.formato, args.quantidade, args.sobreposicao, args.encoding, seed
+        )
+        caminho = args.saida / nome
+        caminho.write_bytes(conteudo)
+        caminhos.append(caminho)
+
+    print(
+        f"Gerado par: banco={caminhos[0]} sistema={caminhos[1]} (formato={args.formato}, "
+        f"quantidade={args.quantidade}, sobreposicao={args.sobreposicao}, seed={seed})"
+    )
+    print(f"matches_esperados={args.sobreposicao}")
 
 
 if __name__ == "__main__":
