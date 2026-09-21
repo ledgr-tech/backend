@@ -10,6 +10,8 @@ upload já estão processados quando o teste continua.
 import hashlib
 import io
 import re
+import threading
+import time
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -17,7 +19,9 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.database import SessionLocal
 from app.models import Conciliacao, Extrato, Lancamento
+from app.services import matching
 from main import app
 from scripts.gerar_extratos_sinteticos import main as gerar_extratos
 
@@ -257,3 +261,57 @@ def test_par_sintetico_via_upload_gera_o_numero_esperado_de_matches(
     assert corpo["duplicado"] == 0
     assert corpo["sem_correspondencia"] == 2 * (quantidade - sobreposicao)
     assert corpo["total"] == esperado + 2 * (quantidade - sobreposicao)
+
+
+def test_duas_conciliacoes_simultaneas_do_mesmo_par_nao_duplicam_linhas(
+    db_session,
+    criar_empresa,
+    criar_extrato_da_empresa,
+    inserir_lancamentos,
+    monkeypatch,
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_lancamentos(banco, [("10.00", "a"), ("20.00", "b"), ("30.00", "c")])
+    inserir_lancamentos(sistema, [("10.00", "a"), ("20.00", "b")])
+
+    # Ids como valores simples: atributos ORM da sessão principal não podem
+    # ser lidos de dentro das threads.
+    empresa_id, banco_id, sistema_id = empresa.id, banco.id, sistema.id
+
+    esperado = matching.conciliar_extratos(db_session, empresa_id, banco_id, sistema_id)["total"]
+    assert esperado == 3
+
+    # Alarga a janela de corrida entre o delete e o insert: sem o lock, as duas
+    # threads apagam o que já existia, esperam e inserem, dobrando as linhas
+    # (o delete da segunda não enxerga o que a primeira ainda vai inserir).
+    insert_original = matching.insert
+
+    def insert_lento(*args, **kwargs):
+        time.sleep(1.5)
+        return insert_original(*args, **kwargs)
+
+    monkeypatch.setattr(matching, "insert", insert_lento)
+
+    largada = threading.Barrier(2)
+    erros: list[BaseException] = []
+
+    def conciliar_em_sessao_propria():
+        sessao = SessionLocal()
+        try:
+            largada.wait(timeout=30)
+            matching.conciliar_extratos(sessao, empresa_id, banco_id, sistema_id)
+        except BaseException as exc:  # noqa: BLE001 - reporta no thread principal
+            erros.append(exc)
+        finally:
+            sessao.close()
+
+    threads = [threading.Thread(target=conciliar_em_sessao_propria) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+
+    assert erros == []
+    assert len(_conciliacoes(db_session, banco_id, sistema_id)) == esperado

@@ -22,13 +22,14 @@ Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
 """
 
+import hashlib
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
 from app.models import Conciliacao, Lancamento
@@ -116,6 +117,15 @@ def parear_lancamentos(
     return resultados
 
 
+def _chave_lock_do_par(
+    empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID, extrato_sistema_id: uuid.UUID
+) -> int:
+    """Inteiro de 64 bits com sinal, derivado de forma determinística do par
+    (primeiros 8 bytes de um sha256 dos três ids), pra `pg_advisory_xact_lock`."""
+    bruto = f"{empresa_id}|{extrato_banco_id}|{extrato_sistema_id}".encode()
+    return int.from_bytes(hashlib.sha256(bruto).digest()[:8], "big", signed=True)
+
+
 def _carregar_lancamentos(
     db: Session, empresa_id: uuid.UUID, extrato_id: uuid.UUID
 ) -> list[LancamentoParaMatching]:
@@ -152,12 +162,22 @@ def conciliar_extratos(
     (empresa_id, extrato_banco_id, extrato_sistema_id) e grava as novas na
     mesma transação, em insert em lote. Devolve as contagens por status.
     Quem chama valida empresa, origem e status dos extratos antes.
-    """
-    banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
-    sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
-    resultados = parear_lancamentos(banco, sistema)
 
+    Concorrência: a transação começa adquirindo `pg_advisory_xact_lock` com
+    uma chave derivada do par, então duas execuções simultâneas do mesmo par
+    se enfileiram (a segunda espera a primeira dar commit e depois apaga e
+    regrava) em vez de duplicar linhas. O lock solta sozinho no commit ou
+    rollback; pares diferentes não se bloqueiam.
+    """
     try:
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:chave)"),
+            {"chave": _chave_lock_do_par(empresa_id, extrato_banco_id, extrato_sistema_id)},
+        )
+        banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
+        sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
+        resultados = parear_lancamentos(banco, sistema)
+
         db.execute(
             delete(Conciliacao).where(
                 Conciliacao.empresa_id == empresa_id,
