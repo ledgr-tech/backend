@@ -19,13 +19,60 @@ cada fábrica limpa só as linhas que ela mesma criou.
 
 import random
 import uuid
+from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
+from app.core.config import settings
 from app.core.database import SessionLocal, engine
+from app.core.rate_limit import limiter
 from app.models import Empresa, Extrato, Lancamento, LinhaInvalida
+
+SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
+
+
+@pytest.fixture(autouse=True)
+def _auth_e_rate_limit_de_teste(monkeypatch):
+    """Secret fixo pros tokens gerados nos testes (independe do .env/CI) e
+    contador do rate limit zerado entre testes (é por IP, em memória)."""
+    monkeypatch.setattr(settings, "nextauth_secret", SECRET_TESTE)
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
+@pytest.fixture
+def gerar_token():
+    """Simula o JWT que o NextAuth emite (contrato em app/core/auth.py)."""
+
+    def _gerar(
+        empresa_id: uuid.UUID | str | None,
+        secret: str = SECRET_TESTE,
+        expira_em: timedelta = timedelta(days=7),
+    ) -> str:
+        agora = datetime.now(UTC)
+        claims = {
+            "sub": str(uuid.uuid4()),
+            "email": "usuario@teste.com",
+            "iat": agora,
+            "exp": agora + expira_em,
+        }
+        if empresa_id is not None:
+            claims["empresa_id"] = str(empresa_id)
+        return jwt.encode(claims, secret, algorithm="HS256")
+
+    return _gerar
+
+
+@pytest.fixture
+def auth_headers(gerar_token):
+    def _headers(empresa_id: uuid.UUID | str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {gerar_token(empresa_id)}"}
+
+    return _headers
 
 
 def _postgres_disponivel() -> bool:

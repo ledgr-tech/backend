@@ -18,25 +18,33 @@ status atual, quantidade de lançamentos válidos e a lista de linhas/
 transações que não normalizaram (identificador + motivo), pra quem chamou
 o upload acompanhar o resultado do processamento assíncrono.
 
-`empresa_id` ainda é recebido explicitamente no form porque a Sprint 1 não
-tem autenticação (isso entra na Sprint 2, que troca esse campo pelo valor
-resolvido da sessão). Schema já nasce com a coluna obrigatória e indexada
-(ADR-004), sem precisar de migração de correção depois. O GET novo também
-não tem autenticação ainda — mesma situação do POST hoje, protegê-los é
-escopo da issue #14.
+Desde a issue #14, os dois endpoints exigem JWT (app/core/auth.py, ADR-003):
+o `empresa_id` do Extrato vem do token, nunca do form. `GET` de extrato de
+outra empresa devolve 404 (não 403) pra não confirmar a existência do ID
+(mitigação de BOLA/IDOR). O upload tem rate limit de 10/min por IP.
 """
 
 import os
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi import status as http_status
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.auth import obter_empresa_id_autenticada
 from app.core.database import get_db
+from app.core.rate_limit import LIMITE_UPLOAD, limiter
 from app.models import Extrato
 from app.services.normalizacao import normalizar_extrato
 
@@ -68,8 +76,10 @@ class ExtratoDetalheResponse(BaseModel):
     response_model=ExtratoUploadResponse,
     status_code=http_status.HTTP_201_CREATED,
 )
+@limiter.limit(LIMITE_UPLOAD)
 async def upload_extrato(
-    empresa_id: Annotated[uuid.UUID, Form()],
+    request: Request,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
     arquivo: Annotated[UploadFile, File()],
     db: Annotated[Session, Depends(get_db)],
     background_tasks: BackgroundTasks,
@@ -117,10 +127,11 @@ async def upload_extrato(
 @router.get("/{extrato_id}", response_model=ExtratoDetalheResponse)
 async def obter_extrato(
     extrato_id: uuid.UUID,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ExtratoDetalheResponse:
     extrato = db.get(Extrato, extrato_id)
-    if extrato is None:
+    if extrato is None or extrato.empresa_id != empresa_id:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Extrato não encontrado.",

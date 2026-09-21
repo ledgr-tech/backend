@@ -29,13 +29,13 @@ client = TestClient(app)
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-def test_upload_ofx_valido_normaliza_e_fica_concluido(db_session, criar_empresa):
+def test_upload_ofx_valido_normaliza_e_fica_concluido(db_session, criar_empresa, auth_headers):
     empresa = criar_empresa()
     conteudo = (FIXTURES_DIR / "extrato_valido.ofx").read_bytes()
 
     response = client.post(
         "/extratos/upload",
-        data={"empresa_id": str(empresa.id)},
+        headers=auth_headers(empresa.id),
         files={"arquivo": ("extrato.ofx", io.BytesIO(conteudo), "application/octet-stream")},
     )
 
@@ -53,13 +53,13 @@ def test_upload_ofx_valido_normaliza_e_fica_concluido(db_session, criar_empresa)
     assert len(lancamentos) == 2
 
 
-def test_upload_csv_valido_normaliza_e_fica_concluido(db_session, criar_empresa):
+def test_upload_csv_valido_normaliza_e_fica_concluido(db_session, criar_empresa, auth_headers):
     empresa = criar_empresa()
     conteudo = (FIXTURES_DIR / "extrato_valido.csv").read_bytes()
 
     response = client.post(
         "/extratos/upload",
-        data={"empresa_id": str(empresa.id)},
+        headers=auth_headers(empresa.id),
         files={"arquivo": ("extrato.csv", io.BytesIO(conteudo), "text/csv")},
     )
 
