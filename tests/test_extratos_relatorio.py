@@ -19,7 +19,7 @@ from main import app
 client = TestClient(app)
 
 
-def test_get_extrato_com_erros_retorna_relatorio_correto(db_session, criar_empresa):
+def test_get_extrato_com_erros_retorna_relatorio_correto(db_session, criar_empresa, auth_headers):
     empresa = criar_empresa()
     extrato = Extrato(
         empresa_id=empresa.id,
@@ -38,7 +38,7 @@ def test_get_extrato_com_erros_retorna_relatorio_correto(db_session, criar_empre
     )
     normalizar_extrato(extrato.id, "csv", conteudo)
 
-    response = client.get(f"/extratos/{extrato.id}")
+    response = client.get(f"/extratos/{extrato.id}", headers=auth_headers(empresa.id))
 
     assert response.status_code == 200
     corpo = response.json()
@@ -50,7 +50,9 @@ def test_get_extrato_com_erros_retorna_relatorio_correto(db_session, criar_empre
     ]
 
 
-def test_get_extrato_sem_erros_retorna_lista_de_erros_vazia(db_session, criar_empresa):
+def test_get_extrato_sem_erros_retorna_lista_de_erros_vazia(
+    db_session, criar_empresa, auth_headers
+):
     empresa = criar_empresa()
     extrato = Extrato(
         empresa_id=empresa.id,
@@ -65,7 +67,7 @@ def test_get_extrato_sem_erros_retorna_lista_de_erros_vazia(db_session, criar_em
     conteudo = b"data,valor,descricao\n2026-09-05,1500.00,Deposito ok\n"
     normalizar_extrato(extrato.id, "csv", conteudo)
 
-    response = client.get(f"/extratos/{extrato.id}")
+    response = client.get(f"/extratos/{extrato.id}", headers=auth_headers(empresa.id))
 
     assert response.status_code == 200
     corpo = response.json()
@@ -73,7 +75,7 @@ def test_get_extrato_sem_erros_retorna_lista_de_erros_vazia(db_session, criar_em
     assert corpo["erros"] == []
 
 
-def test_get_extrato_inexistente_retorna_404(db_session):
-    response = client.get(f"/extratos/{uuid.uuid4()}")
+def test_get_extrato_inexistente_retorna_404(db_session, auth_headers):
+    response = client.get(f"/extratos/{uuid.uuid4()}", headers=auth_headers(uuid.uuid4()))
 
     assert response.status_code == 404

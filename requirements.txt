@@ -12,3 +12,5 @@ ofxtools
 pandas
 charset-normalizer
 python-dateutil
+pyjwt
+slowapi
