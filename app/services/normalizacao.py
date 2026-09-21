@@ -15,7 +15,13 @@ linha/transação que não normalizou, sem abortar o arquivo por causa delas.
 Grava os lançamentos válidos via `INSERT ... ON CONFLICT (empresa_id,
 extrato_id, hash_dedup) DO NOTHING` — dedupliação em reprocessamento
 decidida na ADR-004, não checagem de duplicata na aplicação antes do
-insert — e um `LinhaInvalida` por `ErroLinha`. Linhas idênticas dentro do
+insert — e um `LinhaInvalida` por `ErroLinha`. O insert é em lote (issue
+#51): o loop de parsing só acumula os valores numa lista e, depois dele,
+grava em blocos de 1000 lançamentos por statement (`TAMANHO_BLOCO_INSERT`),
+em vez de um round trip por linha. É a mesma técnica da issue #19 em
+app/services/matching.py (`conciliar_extratos`, de 84 statements pra 1),
+mas em blocos e não num lote só, porque um extrato pode ter volume bem maior
+que uma conciliação. O cálculo de `ocorrencia`/`hash_dedup` não muda. Linhas idênticas dentro do
 mesmo arquivo recebem `ocorrencia` 1, 2... que entra no hash (ADR-006), então
 um pagamento duplicado de verdade não colapsa no ON CONFLICT. Status final:
 - "concluido" se não houve nenhum erro de linha;
@@ -57,6 +63,10 @@ from app.parsers.tipos import ResultadoParsing
 logger = logging.getLogger(__name__)
 
 _ESPACOS_INTERNOS = re.compile(r"\s+")
+
+# Lançamentos por statement de INSERT (issue #51). 1000 linhas x 9 colunas fica
+# bem abaixo do limite de 32767 parâmetros por statement do protocolo do Postgres.
+TAMANHO_BLOCO_INSERT = 1000
 
 
 def _normalizar_descricao(descricao: str) -> str:
@@ -134,6 +144,7 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
         # Número de ordem de cada linha idêntica (valor|data|descrição
         # normalizada) dentro do arquivo — ADR-006.
         contagem_por_chave: Counter[tuple[Decimal, date, str]] = Counter()
+        valores: list[dict] = []
         for lancamento in resultado.lancamentos:
             chave = (
                 lancamento.valor,
@@ -145,22 +156,29 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             hash_dedup = _calcular_hash_dedup(
                 lancamento.valor, lancamento.data, lancamento.descricao, extrato_id, ocorrencia
             )
-            stmt = (
+            valores.append(
+                {
+                    "id": uuid.uuid4(),
+                    "empresa_id": extrato.empresa_id,
+                    "extrato_id": extrato_id,
+                    "data": lancamento.data,
+                    "valor": lancamento.valor,
+                    "descricao": lancamento.descricao,
+                    "tipo": lancamento.tipo,
+                    "hash_dedup": hash_dedup,
+                    "ocorrencia": ocorrencia,
+                }
+            )
+
+        # Insert em lote (issue #51): um statement por bloco de até
+        # TAMANHO_BLOCO_INSERT linhas, não um por lançamento.
+        for inicio in range(0, len(valores), TAMANHO_BLOCO_INSERT):
+            bloco = valores[inicio : inicio + TAMANHO_BLOCO_INSERT]
+            db.execute(
                 pg_insert(Lancamento)
-                .values(
-                    id=uuid.uuid4(),
-                    empresa_id=extrato.empresa_id,
-                    extrato_id=extrato_id,
-                    data=lancamento.data,
-                    valor=lancamento.valor,
-                    descricao=lancamento.descricao,
-                    tipo=lancamento.tipo,
-                    hash_dedup=hash_dedup,
-                    ocorrencia=ocorrencia,
-                )
+                .values(bloco)
                 .on_conflict_do_nothing(index_elements=["empresa_id", "extrato_id", "hash_dedup"])
             )
-            db.execute(stmt)
 
         for erro in resultado.erros:
             db.add(
