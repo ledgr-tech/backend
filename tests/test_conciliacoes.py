@@ -375,3 +375,275 @@ def test_insert_em_lote_emite_poucos_statements_mesmo_com_padroes_intercalados(
     assert contagens["total"] == quantidade
     assert contagens["sem_correspondencia"] == quantidade // 2
     assert len(statements) <= 5, f"{len(statements)} statements de INSERT em conciliacoes"
+
+
+# GET /conciliacoes/{extrato_id} (issue #20, ADR-007)
+
+
+def _get(headers, extrato_id, **params):
+    return client.get(f"/conciliacoes/{extrato_id}", headers=headers, params=params)
+
+
+def _par_conciliado(empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers, itens):
+    """Cria extrato banco e sistema, insere os lançamentos e roda o POST.
+    `itens` = (lista do banco, lista do sistema), cada uma de (valor, descricao)."""
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_lancamentos(banco, itens[0])
+    inserir_lancamentos(sistema, itens[1])
+    assert _post(auth_headers(empresa.id), banco.id, sistema.id).status_code == 201
+    return banco, sistema
+
+
+def test_get_devolve_conciliacoes_com_lancamentos_e_pontas_nulas(
+    criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco, sistema = _par_conciliado(
+        empresa,
+        criar_extrato_da_empresa,
+        inserir_lancamentos,
+        auth_headers,
+        (
+            [("10.00", "a"), ("20.00", "b"), ("150.00", "so banco")],
+            [("10.00", "a"), ("20.00", "b"), ("77.00", "so sistema")],
+        ),
+    )
+
+    response = _get(auth_headers(empresa.id), banco.id)
+
+    assert response.status_code == 200
+    corpo = response.json()
+    assert corpo["extrato_id"] == str(banco.id)
+    assert (corpo["total"], corpo["limit"], corpo["offset"]) == (4, 100, 0)
+    # ordem: data, valor (do lançamento do banco ou, sem ele, do sistema), id
+    assert [item["status"] for item in corpo["itens"]] == [
+        "match_exato",
+        "match_exato",
+        "sem_correspondencia",
+        "sem_correspondencia",
+    ]
+    primeiro, _, so_sistema, so_banco = corpo["itens"]
+    assert primeiro["extrato_sistema_id"] == str(sistema.id)
+    assert primeiro["regra_aplicada"] == "exato"
+    assert primeiro["score_confianca"] == "1.000"  # Decimal como string
+    assert primeiro["lancamento_banco"]["valor"] == "10.00"
+    assert primeiro["lancamento_banco"]["descricao"] == "a"
+    assert primeiro["lancamento_banco"]["data"] == "2026-09-05"
+    assert primeiro["lancamento_banco"]["tipo"] == "credito"
+    assert set(primeiro["lancamento_banco"]) == {"id", "data", "valor", "descricao", "tipo"}
+    assert primeiro["lancamento_sistema"]["valor"] == "10.00"
+    assert so_sistema["lancamento_banco"] is None
+    assert so_sistema["lancamento_sistema"]["descricao"] == "so sistema"
+    assert so_sistema["regra_aplicada"] is None and so_sistema["score_confianca"] is None
+    assert so_banco["lancamento_sistema"] is None
+    assert so_banco["lancamento_banco"]["descricao"] == "so banco"
+
+
+def test_get_extrato_sem_conciliacao_devolve_lista_vazia(
+    criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+
+    response = _get(auth_headers(empresa.id), banco.id)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "extrato_id": str(banco.id),
+        "total": 0,
+        "limit": 100,
+        "offset": 0,
+        "itens": [],
+    }
+
+
+def test_get_paginacao_nao_repete_nem_perde_itens(
+    criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    valores = [(f"{indice + 1}.00", f"l{indice}") for indice in range(25)]
+    banco, _ = _par_conciliado(
+        empresa,
+        criar_extrato_da_empresa,
+        inserir_lancamentos,
+        auth_headers,
+        (valores, valores[:15]),  # 15 pares e 10 só do banco
+    )
+    headers = auth_headers(empresa.id)
+
+    tudo = _get(headers, banco.id, limit=1000).json()
+    paginas = [_get(headers, banco.id, limit=10, offset=offset).json() for offset in (0, 10, 20)]
+
+    assert tudo["total"] == 25 and len(tudo["itens"]) == 25
+    assert [len(pagina["itens"]) for pagina in paginas] == [10, 10, 5]
+    assert all(pagina["total"] == 25 and pagina["limit"] == 10 for pagina in paginas)
+    ids_paginados = [item["id"] for pagina in paginas for item in pagina["itens"]]
+    assert len(set(ids_paginados)) == 25
+    assert ids_paginados == [item["id"] for item in tudo["itens"]]  # mesma ordem estável
+    assert _get(headers, banco.id, limit=10, offset=25).json()["itens"] == []
+
+
+def test_get_filtra_por_status(
+    criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco, _ = _par_conciliado(
+        empresa,
+        criar_extrato_da_empresa,
+        inserir_lancamentos,
+        auth_headers,
+        ([("1.00", "a"), ("2.00", "b"), ("3.00", "c")], [("1.00", "a"), ("2.00", "b")]),
+    )
+
+    matches = _get(auth_headers(empresa.id), banco.id, status="match_exato").json()
+    sem_par = _get(auth_headers(empresa.id), banco.id, status="sem_correspondencia").json()
+    duplicados = _get(auth_headers(empresa.id), banco.id, status="duplicado").json()
+
+    assert matches["total"] == 2 and {i["status"] for i in matches["itens"]} == {"match_exato"}
+    assert sem_par["total"] == 1
+    assert duplicados["total"] == 0 and duplicados["itens"] == []
+
+
+def test_get_filtra_por_extrato_sistema_id_de_pares_diferentes(
+    criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema_1 = criar_extrato_da_empresa(empresa.id, "sistema")
+    sistema_2 = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_lancamentos(banco, [("1.00", "a"), ("2.00", "b")])
+    inserir_lancamentos(sistema_1, [("1.00", "a")])
+    inserir_lancamentos(sistema_2, [("2.00", "b"), ("3.00", "c")])
+    headers = auth_headers(empresa.id)
+    assert _post(headers, banco.id, sistema_1.id).status_code == 201
+    assert _post(headers, banco.id, sistema_2.id).status_code == 201
+
+    todos = _get(headers, banco.id).json()
+    do_par_1 = _get(headers, banco.id, extrato_sistema_id=str(sistema_1.id)).json()
+    do_par_2 = _get(headers, banco.id, extrato_sistema_id=str(sistema_2.id)).json()
+
+    assert todos["total"] == 5  # par 1: 2 linhas, par 2: 3 linhas
+    assert do_par_1["total"] == 2
+    assert do_par_2["total"] == 3
+    assert {i["extrato_sistema_id"] for i in do_par_1["itens"]} == {str(sistema_1.id)}
+    assert {i["extrato_sistema_id"] for i in do_par_2["itens"]} == {str(sistema_2.id)}
+
+
+def test_get_extrato_de_outra_empresa_e_inexistente_retornam_404(
+    criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    dona = criar_empresa()
+    outra = criar_empresa()
+    banco = criar_extrato_da_empresa(dona.id, "banco")
+
+    de_outra = _get(auth_headers(outra.id), banco.id)
+    inexistente = _get(auth_headers(dona.id), uuid.uuid4())
+
+    assert de_outra.status_code == inexistente.status_code == 404
+    assert de_outra.json()["detail"] == "Extrato não encontrado."
+
+
+def test_get_extrato_de_origem_sistema_retorna_422(
+    criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+
+    assert _get(auth_headers(empresa.id), sistema.id).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"limit": 0}, {"limit": 1001}, {"offset": -1}, {"status": "inexistente"}],
+    ids=["limit_0", "limit_1001", "offset_negativo", "status_invalido"],
+)
+def test_get_parametros_invalidos_retornam_422(
+    params, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+
+    assert _get(auth_headers(empresa.id), banco.id, **params).status_code == 422
+
+
+def test_get_sem_token_retorna_401():
+    assert client.get(f"/conciliacoes/{uuid.uuid4()}").status_code == 401
+
+
+def test_get_emite_poucos_selects_e_nao_cresce_com_o_tamanho_da_pagina(
+    criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    valores = [(f"{indice + 1}.00", f"l{indice}") for indice in range(30)]
+    banco, _ = _par_conciliado(
+        empresa,
+        criar_extrato_da_empresa,
+        inserir_lancamentos,
+        auth_headers,
+        (valores, valores[:20]),
+    )
+
+    def selects_da_chamada(limit):
+        selects: list[str] = []
+
+        def contar(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                selects.append(statement)
+
+        event.listen(engine, "before_cursor_execute", contar)
+        try:
+            response = _get(auth_headers(empresa.id), banco.id, limit=limit)
+        finally:
+            event.remove(engine, "before_cursor_execute", contar)
+        assert response.status_code == 200
+        assert len(response.json()["itens"]) == limit
+        return len(selects)
+
+    pequena, cheia = selects_da_chamada(5), selects_da_chamada(30)
+
+    # validação do extrato, query dos itens (com join) e contagem: sem N+1
+    assert pequena <= 4 and cheia <= 4
+    assert pequena == cheia
+
+
+def test_get_apos_par_sintetico_soma_das_paginas_bate_com_o_total_do_post(
+    criar_empresa, auth_headers, tmp_path
+):
+    quantidade, sobreposicao = 40, 25
+    gerar_extratos(
+        [
+            "--formato", "csv", "--par",
+            "--quantidade", str(quantidade),
+            "--sobreposicao", str(sobreposicao),
+            "--seed", "20",
+            "--saida", str(tmp_path),
+        ]
+    )  # fmt: skip
+    empresa = criar_empresa()
+    ids = {}
+    for origem in ("banco", "sistema"):
+        arquivo = next(tmp_path.glob(f"extrato_par_{origem}_*.csv"))
+        response = client.post(
+            "/extratos/upload",
+            headers=auth_headers(empresa.id),
+            data={"origem": origem},
+            files={"arquivo": (arquivo.name, io.BytesIO(arquivo.read_bytes()), "text/csv")},
+        )
+        assert response.status_code == 201
+        ids[origem] = response.json()["extrato_id"]
+    post = _post(auth_headers(empresa.id), ids["banco"], ids["sistema"]).json()
+
+    itens, offset = [], 0
+    while True:
+        pagina = _get(auth_headers(empresa.id), ids["banco"], limit=10, offset=offset).json()
+        assert pagina["total"] == post["total"]
+        itens += pagina["itens"]
+        if len(pagina["itens"]) < 10:
+            break
+        offset += 10
+
+    assert len(itens) == post["total"]
+    assert len({item["id"] for item in itens}) == post["total"]
+    assert sum(item["status"] == "match_exato" for item in itens) == post["match_exato"]
+    assert post["match_exato"] == sobreposicao
