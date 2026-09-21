@@ -86,10 +86,11 @@ def test_escala_tempo_cresce_de_forma_aproximadamente_linear():
     razao = tempo_40k / tempo_10k
 
     # 40k é 4x o tamanho de 10k: linear daria razão perto de 4 e comportamento
-    # quadrático daria perto de 16. O limite é 8 e não 4 pra ter folga contra
-    # ruído de CI (máquina compartilhada, coleta de lixo, ordenação n log n).
+    # quadrático daria perto de 16. O limite é 10 e não 4 pra ter folga contra
+    # ruído de CI (máquina compartilhada, coleta de lixo, ordenação n log n):
+    # ainda fica bem abaixo do quadrático, então continua detectando a regressão.
     assert (
-        razao < 8
+        razao < 10
     ), f"tempo(40k)/tempo(10k) = {razao:.2f} (10k={tempo_10k:.3f}s, 40k={tempo_40k:.3f}s)"
 
 

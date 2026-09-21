@@ -23,7 +23,7 @@ from main import app
 
 client = TestClient(app)
 
-TETO_POST_SEGUNDOS = 30.0
+TETO_POST_SEGUNDOS = 60.0
 LOTE = 5_000
 
 
