@@ -18,8 +18,9 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event, insert
 
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, engine
 from app.models import Conciliacao, Extrato, Lancamento
 from app.services import matching
 from main import app
@@ -315,3 +316,62 @@ def test_duas_conciliacoes_simultaneas_do_mesmo_par_nao_duplicam_linhas(
 
     assert erros == []
     assert len(_conciliacoes(db_session, banco_id, sistema_id)) == esperado
+
+
+def test_insert_em_lote_emite_poucos_statements_mesmo_com_padroes_intercalados(
+    db_session, criar_empresa, criar_extrato_da_empresa
+):
+    """Regressão pra um statement por bloco ou por linha, sem depender de tempo.
+
+    O bulk insert do ORM (`insert(Conciliacao)`) quebra o lote a cada mudança
+    no padrão de campos nulos (par casado, só banco, só sistema), e cada
+    statement custa uma ida e volta ao banco. Aqui os resultados saem
+    intercalados (par, só banco, par, só sistema...), o pior padrão: pelo ORM
+    seriam milhares de statements. Pelo Core tem que ser um número pequeno e
+    que não cresce com as trocas de padrão.
+    """
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    empresa_id, banco_id, sistema_id = empresa.id, banco.id, sistema.id
+
+    def linha(extrato_id, indice):
+        return {
+            "id": uuid.uuid4(),
+            "empresa_id": empresa_id,
+            "extrato_id": extrato_id,
+            "data": date(2026, 9, 5),
+            "valor": Decimal(indice + 1) / 100,  # valor único por índice: sem grupos
+            "descricao": f"Lancamento {indice}",
+            "tipo": "credito",
+            "hash_dedup": hashlib.sha256(f"{extrato_id}|{indice}".encode()).hexdigest(),
+            "ocorrencia": 1,
+        }
+
+    quantidade = 4_000
+    linhas_banco, linhas_sistema = [], []
+    for indice in range(quantidade):
+        # padrão por índice: 0 par, 1 só banco, 2 par, 3 só sistema
+        if indice % 4 in (0, 2, 1):
+            linhas_banco.append(linha(banco_id, indice))
+        if indice % 4 in (0, 2, 3):
+            linhas_sistema.append(linha(sistema_id, indice))
+    db_session.execute(insert(Lancamento.__table__), linhas_banco + linhas_sistema)
+    db_session.commit()
+
+    statements: list[str] = []
+
+    def contar(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("INSERT INTO CONCILIACOES"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", contar)
+    try:
+        contagens = matching.conciliar_extratos(db_session, empresa_id, banco_id, sistema_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", contar)
+
+    assert contagens["match_exato"] == quantidade // 2
+    assert contagens["total"] == quantidade
+    assert contagens["sem_correspondencia"] == quantidade // 2
+    assert len(statements) <= 5, f"{len(statements)} statements de INSERT em conciliacoes"

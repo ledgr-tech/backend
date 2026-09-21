@@ -15,8 +15,16 @@ n do banco e m do sistema, formam-se min(n, m) pares (`match_exato`). Os
 excedentes de qualquer lado ficam `duplicado` se o grupo formou pelo menos um
 par, e `sem_correspondencia` se não formou nenhum. Chave presente só num dos
 lados também é `sem_correspondencia`. A descrição só entra na ordenação
-estável, nunca como critério de similaridade (isso é da Sprint 4). Janela de
-data não existe aqui: a chave é a data exata (bucketing por janela é a #19).
+estável, nunca como critério de similaridade (isso é da Sprint 4).
+
+Bucket e custo (issue #19): a chave (valor, data) é o bucket do motor exato.
+Cada lançamento cai num dict por chave, então nunca há comparação de todos
+contra todos: o custo é linear no número de lançamentos, mais a ordenação
+dentro de cada grupo (n log n só no pior caso, um grupo gigante). Não existe
+janela de datas nem buckets vizinhos aqui. Essa estrutura só passa a ser
+necessária com a tolerância de data da Sprint 4 e entra junto com ela. Os
+testes de volume (tests/test_matching_volume.py e
+tests/test_conciliacoes_volume.py) guardam esse comportamento.
 
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
@@ -186,8 +194,12 @@ def conciliar_extratos(
             )
         )
         if resultados:
+            # Core na Table, não `insert(Conciliacao)` do ORM: o bulk insert do ORM
+            # quebra o lote a cada mudança no padrão de campos nulos (par casado,
+            # só banco, só sistema), gerando muitos statements, e cada um custa
+            # uma ida e volta ao banco. Pelo Core tudo vai num único executemany.
             db.execute(
-                insert(Conciliacao),
+                insert(Conciliacao.__table__),
                 [
                     {
                         "id": uuid.uuid4(),
