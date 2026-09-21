@@ -21,6 +21,8 @@ Cobertura, mapeada nos nomes:
   test_normalizar_extrato_ofx_transacao_malformada_tolera_e_marca_concluido_com_erros
 """
 
+import hashlib
+import uuid
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -28,7 +30,7 @@ from unittest.mock import patch
 
 from app.models import Extrato, Lancamento, LinhaInvalida
 from app.parsers.tipos import ErroLinha, LancamentoNormalizado, ResultadoParsing
-from app.services.normalizacao import normalizar_extrato
+from app.services.normalizacao import _calcular_hash_dedup, normalizar_extrato
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -209,3 +211,87 @@ def test_normalizar_extrato_ofx_transacao_malformada_tolera_e_marca_concluido_co
     linhas_invalidas = db_session.query(LinhaInvalida).filter_by(extrato_id=extrato.id).all()
     assert len(linhas_invalidas) == 1
     assert linhas_invalidas[0].identificador == "FIT-BROKEN"
+
+
+# Decisão de desempate de duplicidade (issue #18, ADR-006)
+
+
+def test_hash_dedup_com_ocorrencia_1_identico_ao_formato_antigo():
+    extrato_id = uuid.uuid4()
+    esperado = hashlib.sha256(
+        f"-150.00|2026-09-05|padaria central|{extrato_id}".encode()
+    ).hexdigest()
+
+    assert (
+        _calcular_hash_dedup(
+            Decimal("-150.00"), date(2026, 9, 5), "  Padaria   CENTRAL ", extrato_id
+        )
+        == esperado
+    )
+    assert (
+        _calcular_hash_dedup(
+            Decimal("-150.00"), date(2026, 9, 5), "  Padaria   CENTRAL ", extrato_id, ocorrencia=1
+        )
+        == esperado
+    )
+
+
+def test_hash_dedup_com_ocorrencia_maior_que_1_acrescenta_sufixo_e_difere():
+    extrato_id = uuid.uuid4()
+    hash_2 = _calcular_hash_dedup(
+        Decimal("-150.00"), date(2026, 9, 5), "Padaria Central", extrato_id, ocorrencia=2
+    )
+    esperado = hashlib.sha256(
+        f"-150.00|2026-09-05|padaria central|{extrato_id}|2".encode()
+    ).hexdigest()
+
+    assert hash_2 == esperado
+    assert hash_2 != _calcular_hash_dedup(
+        Decimal("-150.00"), date(2026, 9, 5), "Padaria Central", extrato_id
+    )
+
+
+CSV_COM_LINHAS_IDENTICAS = (
+    b"data,valor,descricao\n"
+    b"2026-09-05,-150.00,Pagamento fornecedor\n"
+    b"2026-09-05,-150.00,Pagamento  fornecedor\n"
+    b"2026-09-06,300.00,Deposito\n"
+)
+
+
+def test_normalizar_extrato_linhas_identicas_no_arquivo_gravam_dois_lancamentos(
+    db_session, criar_extrato
+):
+    extrato = criar_extrato("csv")
+
+    normalizar_extrato(extrato.id, "csv", CSV_COM_LINHAS_IDENTICAS)
+
+    db_session.expire_all()
+    lancamentos = (
+        db_session.query(Lancamento)
+        .filter_by(extrato_id=extrato.id)
+        .order_by(Lancamento.valor, Lancamento.ocorrencia)
+        .all()
+    )
+    assert len(lancamentos) == 3
+    identicos = [lancamento for lancamento in lancamentos if lancamento.valor == Decimal("-150.00")]
+    assert [lancamento.ocorrencia for lancamento in identicos] == [1, 2]
+    assert identicos[0].hash_dedup != identicos[1].hash_dedup
+    assert [lancamento.ocorrencia for lancamento in lancamentos if lancamento.valor > 0] == [1]
+
+    assert db_session.get(Extrato, extrato.id).quantidade_lancamentos == 3
+
+
+def test_normalizar_extrato_com_linhas_identicas_reprocessado_nao_duplica_nem_perde(
+    db_session, criar_extrato
+):
+    extrato = criar_extrato("csv")
+
+    normalizar_extrato(extrato.id, "csv", CSV_COM_LINHAS_IDENTICAS)
+    normalizar_extrato(extrato.id, "csv", CSV_COM_LINHAS_IDENTICAS)
+
+    db_session.expire_all()
+    lancamentos = db_session.query(Lancamento).filter_by(extrato_id=extrato.id).all()
+    assert len(lancamentos) == 3
+    assert sorted(lancamento.ocorrencia for lancamento in lancamentos) == [1, 1, 2]
+    assert db_session.get(Extrato, extrato.id).status == "concluido"

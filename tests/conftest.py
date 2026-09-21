@@ -17,20 +17,26 @@ apontar pro Postgres compartilhado de desenvolvimento (Railway, ver .env);
 cada fábrica limpa só as linhas que ela mesma criou.
 """
 
+import os
 import random
+import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import jwt
 import pytest
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
 from app.models import Empresa, Extrato, Lancamento, LinhaInvalida
 
+RAIZ = Path(__file__).resolve().parent.parent
 SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
 
 
@@ -167,3 +173,36 @@ def criar_extrato(db_session, criar_empresa):
         return extrato
 
     return _criar
+
+
+# Migrações: banco descartável no mesmo servidor, nunca o de desenvolvimento.
+@pytest.fixture
+def url_banco_descartavel(postgres_disponivel):
+    if not postgres_disponivel:
+        pytest.skip("Postgres real não disponível")
+    nome = f"ledgr_mig_{uuid.uuid4().hex[:8]}"
+    base = make_url(settings.database_url)
+    admin = create_engine(base, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{nome}"'))
+    except (OperationalError, ProgrammingError):
+        admin.dispose()
+        pytest.skip("Sem permissão pra criar banco descartável")
+    try:
+        yield base.set(database=nome)
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{nome}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def alembic_cli(url, *args: str) -> None:
+    env = {**os.environ, "DATABASE_URL": url.render_as_string(hide_password=False)}
+    subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=RAIZ,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
