@@ -36,6 +36,7 @@ def test_upload_ofx_valido_normaliza_e_fica_concluido(db_session, criar_empresa,
     response = client.post(
         "/extratos/upload",
         headers=auth_headers(empresa.id),
+        data={"origem": "banco"},
         files={"arquivo": ("extrato.ofx", io.BytesIO(conteudo), "application/octet-stream")},
     )
 
@@ -60,6 +61,7 @@ def test_upload_csv_valido_normaliza_e_fica_concluido(db_session, criar_empresa,
     response = client.post(
         "/extratos/upload",
         headers=auth_headers(empresa.id),
+        data={"origem": "banco"},
         files={"arquivo": ("extrato.csv", io.BytesIO(conteudo), "text/csv")},
     )
 

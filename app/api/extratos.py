@@ -1,6 +1,8 @@
 """Endpoints de extrato: upload (issue #7) e relatório de validação (issue #13).
 
-`POST /extratos/upload` valida extensão (.ofx/.csv, ver ADR-001) e tamanho
+`POST /extratos/upload` exige o Form field `origem` ("banco" ou "sistema",
+issue #17), sem default: ausente ou inválido devolve 422 do FastAPI. Valida
+extensão (.ofx/.csv, ver ADR-001) e tamanho
 (5MB), persiste só os metadados do extrato — nunca o conteúdo do arquivo
 (ADR-002) — e retorna `extrato_id` e `status="pendente"` imediatamente, sem
 esperar o parsing.
@@ -26,13 +28,14 @@ outra empresa devolve 404 (não 403) pra não confirmar a existência do ID
 
 import os
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
     File,
+    Form,
     HTTPException,
     Request,
     UploadFile,
@@ -67,6 +70,7 @@ class ErroLinhaResponse(BaseModel):
 class ExtratoDetalheResponse(BaseModel):
     extrato_id: uuid.UUID
     status: str
+    origem: str
     quantidade_lancamentos: int | None
     erros: list[ErroLinhaResponse]
 
@@ -81,6 +85,7 @@ async def upload_extrato(
     request: Request,
     empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
     arquivo: Annotated[UploadFile, File()],
+    origem: Annotated[Literal["banco", "sistema"], Form()],
     db: Annotated[Session, Depends(get_db)],
     background_tasks: BackgroundTasks,
 ) -> ExtratoUploadResponse:
@@ -103,6 +108,7 @@ async def upload_extrato(
         nome_arquivo=arquivo.filename,
         formato=extensao.lstrip("."),
         tamanho_bytes=len(conteudo),
+        origem=origem,
         status="pendente",
     )
 
@@ -145,6 +151,7 @@ async def obter_extrato(
     return ExtratoDetalheResponse(
         extrato_id=extrato.id,
         status=extrato.status,
+        origem=extrato.origem,
         quantidade_lancamentos=extrato.quantidade_lancamentos,
         erros=erros,
     )

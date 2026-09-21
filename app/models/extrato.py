@@ -16,6 +16,11 @@ class Extrato(Base, TimestampMixin):
     validar tamanho e, desde a issue #12, também passado pra BackgroundTask
     de normalização (app/services/normalizacao.py); é descartado assim que
     essa task termina de processar, nunca gravado em disco nem em coluna.
+
+    `origem` diz de que lado da conciliação o extrato vem: 'banco' (extrato
+    bancário) ou 'sistema' (exportação do sistema de gestão). É obrigatória
+    no upload e sem default no model nem no banco (issue #17); o motor de
+    matching (ADR-006) usa pra saber qual extrato é de qual lado.
     """
 
     __tablename__ = "extratos"
@@ -25,6 +30,7 @@ class Extrato(Base, TimestampMixin):
             "status IN ('pendente', 'processando', 'concluido', 'concluido_com_erros', 'erro')",
             name="ck_extratos_status_valido",
         ),
+        CheckConstraint("origem IN ('banco', 'sistema')", name="ck_extratos_origem_valida"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -35,6 +41,7 @@ class Extrato(Base, TimestampMixin):
     formato: Mapped[str] = mapped_column(String(3), nullable=False)
     tamanho_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="pendente")
+    origem: Mapped[str] = mapped_column(String, nullable=False)
     quantidade_lancamentos: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
