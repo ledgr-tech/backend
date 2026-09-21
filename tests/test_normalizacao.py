@@ -19,18 +19,28 @@ Cobertura, mapeada nos nomes:
   test_normalizar_extrato_csv_linha_invalida_no_meio_status_concluido_com_erros
   test_normalizar_extrato_csv_todas_linhas_invalidas_status_erro_mas_persiste_linhas_invalidas
   test_normalizar_extrato_ofx_transacao_malformada_tolera_e_marca_concluido_com_erros
+- Insert em lote, issue #51 (conta statements, não mede tempo):
+  test_normalizar_extrato_com_volume_emite_um_insert_por_bloco_e_nao_um_por_linha
 """
 
 import hashlib
+import math
 import uuid
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import event
+
+from app.core.database import engine
 from app.models import Extrato, Lancamento, LinhaInvalida
 from app.parsers.tipos import ErroLinha, LancamentoNormalizado, ResultadoParsing
-from app.services.normalizacao import _calcular_hash_dedup, normalizar_extrato
+from app.services.normalizacao import (
+    TAMANHO_BLOCO_INSERT,
+    _calcular_hash_dedup,
+    normalizar_extrato,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -295,3 +305,32 @@ def test_normalizar_extrato_com_linhas_identicas_reprocessado_nao_duplica_nem_pe
     assert len(lancamentos) == 3
     assert sorted(lancamento.ocorrencia for lancamento in lancamentos) == [1, 1, 2]
     assert db_session.get(Extrato, extrato.id).status == "concluido"
+
+
+def test_normalizar_extrato_com_volume_emite_um_insert_por_bloco_e_nao_um_por_linha(
+    db_session, criar_extrato
+):
+    total = 2_500
+    extrato = criar_extrato("csv")
+    linhas = ["Data,Valor,Descricao"] + [
+        f"2026-09-{1 + indice % 28:02d},{indice + 1}.00,Lancamento {indice}"
+        for indice in range(total)
+    ]
+    conteudo = "\n".join(linhas).encode("utf-8")
+
+    inserts: list[str] = []
+
+    def _contar(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("INSERT INTO LANCAMENTOS"):
+            inserts.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _contar)
+    try:
+        normalizar_extrato(extrato.id, "csv", conteudo)
+    finally:
+        event.remove(engine, "before_cursor_execute", _contar)
+
+    db_session.expire_all()
+    assert db_session.get(Extrato, extrato.id).quantidade_lancamentos == total
+    assert db_session.query(Lancamento).filter_by(extrato_id=extrato.id).count() == total
+    assert len(inserts) == math.ceil(total / TAMANHO_BLOCO_INSERT) == 3
