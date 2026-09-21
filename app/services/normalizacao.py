@@ -15,7 +15,9 @@ linha/transação que não normalizou, sem abortar o arquivo por causa delas.
 Grava os lançamentos válidos via `INSERT ... ON CONFLICT (empresa_id,
 extrato_id, hash_dedup) DO NOTHING` — dedupliação em reprocessamento
 decidida na ADR-004, não checagem de duplicata na aplicação antes do
-insert — e um `LinhaInvalida` por `ErroLinha`. Status final:
+insert — e um `LinhaInvalida` por `ErroLinha`. Linhas idênticas dentro do
+mesmo arquivo recebem `ocorrencia` 1, 2... que entra no hash (ADR-006), então
+um pagamento duplicado de verdade não colapsa no ON CONFLICT. Status final:
 - "concluido" se não houve nenhum erro de linha;
 - "concluido_com_erros" se houve erro de linha mas pelo menos um lançamento
   válido;
@@ -39,6 +41,7 @@ import hashlib
 import logging
 import re
 import uuid
+from collections import Counter
 from datetime import date
 from decimal import Decimal
 
@@ -56,16 +59,31 @@ logger = logging.getLogger(__name__)
 _ESPACOS_INTERNOS = re.compile(r"\s+")
 
 
-def _calcular_hash_dedup(
-    valor: Decimal, data_lancamento: date, descricao: str, extrato_id: uuid.UUID
-) -> str:
-    """sha256 hexdigest de valor+data+descrição normalizada+extrato_id (ADR-004).
+def _normalizar_descricao(descricao: str) -> str:
+    """strip + casefold + espaços internos colapsados — sem stripar acento
+    (acento faz parte do valor comparado)."""
+    return _ESPACOS_INTERNOS.sub(" ", descricao.strip().casefold())
 
-    Descrição normalizada: strip + casefold + espaços internos colapsados —
-    sem stripar acento (acento faz parte do valor comparado).
+
+def _calcular_hash_dedup(
+    valor: Decimal,
+    data_lancamento: date,
+    descricao: str,
+    extrato_id: uuid.UUID,
+    ocorrencia: int = 1,
+) -> str:
+    """sha256 hexdigest de valor+data+descrição normalizada+extrato_id (ADR-004),
+    mais a ocorrência da linha idêntica no arquivo (ADR-006).
+
+    Quando `ocorrencia` == 1 a fórmula é idêntica à original
+    (`valor|data|descricao|extrato_id`), pra não invalidar os hashes de linhas
+    já gravadas; só acrescenta `|{ocorrencia}` quando for maior que 1. Assim
+    duas linhas idênticas no mesmo arquivo geram hashes distintos e não
+    colapsam no ON CONFLICT, e reprocessar o mesmo arquivo segue idempotente.
     """
-    descricao_normalizada = _ESPACOS_INTERNOS.sub(" ", descricao.strip().casefold())
-    bruto = f"{valor}|{data_lancamento.isoformat()}|{descricao_normalizada}|{extrato_id}"
+    bruto = f"{valor}|{data_lancamento.isoformat()}|{_normalizar_descricao(descricao)}|{extrato_id}"
+    if ocorrencia > 1:
+        bruto += f"|{ocorrencia}"
     return hashlib.sha256(bruto.encode("utf-8")).hexdigest()
 
 
@@ -113,9 +131,19 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             _marcar_erro(db, extrato_id)
             return
 
+        # Número de ordem de cada linha idêntica (valor|data|descrição
+        # normalizada) dentro do arquivo — ADR-006.
+        contagem_por_chave: Counter[tuple[Decimal, date, str]] = Counter()
         for lancamento in resultado.lancamentos:
+            chave = (
+                lancamento.valor,
+                lancamento.data,
+                _normalizar_descricao(lancamento.descricao),
+            )
+            contagem_por_chave[chave] += 1
+            ocorrencia = contagem_por_chave[chave]
             hash_dedup = _calcular_hash_dedup(
-                lancamento.valor, lancamento.data, lancamento.descricao, extrato_id
+                lancamento.valor, lancamento.data, lancamento.descricao, extrato_id, ocorrencia
             )
             stmt = (
                 pg_insert(Lancamento)
@@ -128,6 +156,7 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
                     descricao=lancamento.descricao,
                     tipo=lancamento.tipo,
                     hash_dedup=hash_dedup,
+                    ocorrencia=ocorrencia,
                 )
                 .on_conflict_do_nothing(index_elements=["empresa_id", "extrato_id", "hash_dedup"])
             )
