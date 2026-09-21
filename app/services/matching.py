@@ -194,8 +194,12 @@ def conciliar_extratos(
             )
         )
         if resultados:
+            # Core na Table, não `insert(Conciliacao)` do ORM: o bulk insert do ORM
+            # quebra o lote a cada mudança no padrão de campos nulos (par casado,
+            # só banco, só sistema), gerando muitos statements, e cada um custa
+            # uma ida e volta ao banco. Pelo Core tudo vai num único executemany.
             db.execute(
-                insert(Conciliacao),
+                insert(Conciliacao.__table__),
                 [
                     {
                         "id": uuid.uuid4(),

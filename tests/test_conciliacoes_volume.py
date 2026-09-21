@@ -23,7 +23,10 @@ from main import app
 
 client = TestClient(app)
 
-TETO_POST_SEGUNDOS = 60.0
+# Com o insert único (Core, um executemany) o POST leva cerca de 6 s a 20k por
+# lado no Railway, então 30 s deixa folga e ainda detecta a regressão pro
+# insert do ORM, que emitia dezenas de statements e levava cerca de 30 s.
+TETO_POST_SEGUNDOS = 30.0
 LOTE = 5_000
 
 
