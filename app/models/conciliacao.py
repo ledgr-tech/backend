@@ -25,9 +25,15 @@ class Conciliacao(Base, TimestampMixin):
     se aplicam (ex: `sem_correspondencia`). O preenchimento pelo motor exato
     vem na issue #16.
 
-    `status` segue os valores da ADR-006 (pareamento 1:1 determinístico, com
-    `duplicado` para excedentes de um grupo que formou par). A categoria de
-    tarifa bancária entra na Sprint 4, com ADR próprio.
+    `status` cobre as 5 categorias de divergência da issue #24, além dos dois
+    status de match: `match_exato`/`match_tolerancia` (par formado, ADR-006/
+    ADR-008), `duplicado` (excedente de um grupo do motor exato que já
+    formou par, decidido só na ADR-006), e a sub-classificação do que sobra
+    sem par depois de todas as passadas — `tarifa_bancaria` (descrição bate
+    termo conhecido, só lado banco), `divergente_valor` (achou algo na mesma
+    data do outro lado, valor não bate), `divergente_data` (achou o mesmo
+    valor do outro lado, data não bate) e `sem_correspondencia` (nenhum dos
+    anteriores). Ver docstring de app/services/matching.py.
 
     Sem UniqueConstraint de propósito: a idempotência de reexecutar a
     conciliação do mesmo par de extratos é responsabilidade do motor (#16).
@@ -37,7 +43,7 @@ class Conciliacao(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             "status IN ('match_exato', 'match_tolerancia', 'divergente_valor', "
-            "'divergente_data', 'sem_correspondencia', 'duplicado')",
+            "'divergente_data', 'sem_correspondencia', 'duplicado', 'tarifa_bancaria')",
             name="ck_conciliacoes_status_valido",
         ),
         CheckConstraint(

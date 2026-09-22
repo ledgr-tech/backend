@@ -107,7 +107,17 @@ def test_post_conciliacoes_com_volume_conta_matches_e_fica_abaixo_do_teto(
     assert response.status_code == 201
     corpo = response.json()
     assert corpo["match_exato"] == sobreposicao
-    assert corpo["sem_correspondencia"] == 2 * (por_lado - sobreposicao)
+    # As datas ciclam em só 28 dias (_linhas), então com milhares de "extras"
+    # de cada lado praticamente todo dia tem gente dos dois lados — os
+    # leftovers quase todos acham a data do outro lado sem o valor bater e
+    # viram divergente_valor (issue #24), não sem_correspondencia. A soma das
+    # 4 categorias de "não casou" é que é invariante.
+    assert (
+        corpo["sem_correspondencia"]
+        + corpo["tarifa_bancaria"]
+        + corpo["divergente_valor"]
+        + corpo["divergente_data"]
+    ) == 2 * (por_lado - sobreposicao)
     assert corpo["duplicado"] == 0
     assert corpo["total"] == sobreposicao + 2 * (por_lado - sobreposicao)
     assert duracao < TETO_POST_SEGUNDOS, f"POST levou {duracao:.2f}s"

@@ -1,5 +1,5 @@
-"""Motor de matching (issues #16, #22 e #23): concilia os lançamentos de um
-extrato do banco com os de um extrato do sistema, pela regra da ADR-006.
+"""Motor de matching (issues #16, #22, #23 e #24): concilia os lançamentos de
+um extrato do banco com os de um extrato do sistema, pela regra da ADR-006.
 
 Dividido em camadas, pra que a regra seja testável sem banco:
 - `parear_lancamentos`: núcleo puro do motor exato (ADR-006), com o
@@ -8,6 +8,9 @@ Dividido em camadas, pra que a regra seja testável sem banco:
   lançamentos em memória e devolve a lista de resultados, sem tocar em banco.
 - `parear_por_tolerancia`: núcleo puro da segunda passada (issue #22, ADR-008),
   sobre o que o motor exato deixou `sem_correspondencia`.
+- `classificar_divergencias`: núcleo puro da terceira passada (issue #24,
+  ADR-007/ADR-009), sub-classifica o que ainda sobrou `sem_correspondencia`
+  depois das passadas anteriores.
 - `conciliar_extratos`: carrega os lançamentos (sempre filtrando por
   `empresa_id` e `extrato_id`, ADR-004), chama o núcleo e persiste em
   `conciliacoes` (schema da ADR-007).
@@ -65,6 +68,33 @@ inteira; os outros grupos da mesma chamada continuam usando similaridade
 normalmente (custo O(n·m) da comparação de todas as combinações não escala
 pra grupo gigante — ver docstring da constante).
 
+Classificação de divergências (issue #24, ADR-007 reserva os status desde
+`Conciliacao`, ADR-009 decide o que entra em cada categoria): terceira
+passada, sobre o que sobrou `sem_correspondencia` depois do motor exato e da
+tolerância (quando houver) — nunca sobre `duplicado`, que é decisão exclusiva
+da ADR-006 e não passa por aqui. `classificar_divergencias` sub-classifica
+cada lançamento restante, de cada lado, em uma das 5 categorias de
+divergência (as duas de match, `match_exato`/`match_tolerancia`, não contam
+como divergência):
+- `tarifa_bancaria`: descrição normalizada contém algum termo de
+  `TERMOS_TARIFA_BANCARIA` — só do lado banco, tarifa não existe do lado
+  sistema (ERP não lança tarifa que o banco cobrou).
+- `divergente_valor`: existe lançamento do outro lado na mesma data — achou
+  algo nesse dia, o valor é que não bate.
+- `divergente_data`: existe lançamento do outro lado com o mesmo valor —
+  achou o valor em outro lugar, a data é que não bate.
+- `sem_correspondencia`: nenhum dos anteriores — não achou nada parecido.
+Prioridade fixa (tarifa > divergente_valor > divergente_data): quando um
+lançamento seria elegível pra mais de uma categoria, a primeira da lista
+ganha. Parcelamento e transferência entre contas (ADR-009) não ganham
+categoria própria nesta versão, ficam em `sem_correspondencia` como hoje —
+só tarifa bancária tem tratamento especial. Custo linear: um set de datas e
+um set de valores por lado, montados uma vez antes do loop, então cada
+lançamento é O(1) pra checar os dois lados (nunca compara todos contra
+todos). `regra_aplicada` fica NULL nas 3 categorias novas, igual já era pra
+`sem_correspondencia`/`duplicado` — não é um par decidido por uma regra, é
+classificação de item solto.
+
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
 """
@@ -87,9 +117,31 @@ STATUS_MATCH_EXATO = "match_exato"
 STATUS_DUPLICADO = "duplicado"
 STATUS_SEM_CORRESPONDENCIA = "sem_correspondencia"
 STATUS_MATCH_TOLERANCIA = "match_tolerancia"
+STATUS_TARIFA_BANCARIA = "tarifa_bancaria"
+STATUS_DIVERGENTE_VALOR = "divergente_valor"
+STATUS_DIVERGENTE_DATA = "divergente_data"
 REGRA_EXATO = "exato"
 REGRA_TOLERANCIA = "tolerancia"
 SCORE_EXATO = Decimal("1.000")
+
+# Termos de descrição (já passados por _normalizar_descricao: casefold, sem
+# stripar acento de propósito) que classificam um lançamento do banco sem par
+# como tarifa bancária (issue #24). Ponto de partida, não lista fechada — vale
+# revisar/ampliar com base em extratos reais de bancos diferentes.
+TERMOS_TARIFA_BANCARIA = (
+    "tarifa",
+    "tar pacote",
+    "manutencao de conta",
+    "manutenção de conta",
+    "cesta de servicos",
+    "cesta de serviços",
+    "anuidade",
+    "iof",
+    "pacote de servicos",
+    "pacote de serviços",
+    "taxa de manutencao",
+    "taxa de manutenção",
+)
 
 # Cap de ESCALA, não de produto — não confundir com os thresholds de
 # similaridade/tolerância da ADR-008 (esses decidem SE/COMO um par casa; este
@@ -325,6 +377,59 @@ def parear_por_tolerancia(
     return resultados
 
 
+def _contem_termo_tarifa(descricao_normalizada: str) -> bool:
+    return any(termo in descricao_normalizada for termo in TERMOS_TARIFA_BANCARIA)
+
+
+def _classificar_remanescente(
+    item: LancamentoParaMatching,
+    datas_do_outro_lado: set[date],
+    valores_do_outro_lado: set[Decimal],
+    permitir_tarifa: bool,
+) -> str:
+    """Prioridade fixa: tarifa (só quando `permitir_tarifa`, ou seja, lado
+    banco) > divergente_valor > divergente_data > sem_correspondencia."""
+    if permitir_tarifa and _contem_termo_tarifa(_normalizar_descricao(item.descricao)):
+        return STATUS_TARIFA_BANCARIA
+    if item.data in datas_do_outro_lado:
+        return STATUS_DIVERGENTE_VALOR
+    if item.valor in valores_do_outro_lado:
+        return STATUS_DIVERGENTE_DATA
+    return STATUS_SEM_CORRESPONDENCIA
+
+
+def classificar_divergencias(
+    banco_restantes: list[LancamentoParaMatching],
+    sistema_restantes: list[LancamentoParaMatching],
+) -> list[ResultadoMatching]:
+    """Terceira passada (issue #24, ADR-007/ADR-009) sobre o que sobrou
+    `sem_correspondencia` das passadas anteriores. Pura; ver docstring do
+    módulo. `regra_aplicada`/`score_confianca` ficam NULL: classificação de
+    item solto, não um par decidido por regra."""
+    datas_sistema = {item.data for item in sistema_restantes}
+    valores_sistema = {item.valor for item in sistema_restantes}
+    datas_banco = {item.data for item in banco_restantes}
+    valores_banco = {item.valor for item in banco_restantes}
+
+    resultados = [
+        ResultadoMatching(
+            _classificar_remanescente(item, datas_sistema, valores_sistema, permitir_tarifa=True),
+            item.id,
+            None,
+        )
+        for item in banco_restantes
+    ]
+    resultados += [
+        ResultadoMatching(
+            _classificar_remanescente(item, datas_banco, valores_banco, permitir_tarifa=False),
+            None,
+            item.id,
+        )
+        for item in sistema_restantes
+    ]
+    return resultados
+
+
 def _chave_lock_do_par(
     empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID, extrato_sistema_id: uuid.UUID
 ) -> int:
@@ -385,6 +490,23 @@ def conciliar_extratos(
         banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
         sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
         resultados = parear_lancamentos(banco, sistema)
+        banco_por_id = {item.id: item for item in banco}
+        sistema_por_id = {item.id: item for item in sistema}
+
+        def _sobras(
+            resultados: list[ResultadoMatching],
+        ) -> tuple[list[LancamentoParaMatching], list[LancamentoParaMatching]]:
+            """Os LancamentoParaMatching originais por trás de cada
+            ResultadoMatching(status=sem_correspondencia) de `resultados`."""
+            sem_par = [r for r in resultados if r.status == STATUS_SEM_CORRESPONDENCIA]
+            return (
+                [banco_por_id[r.lancamento_banco_id] for r in sem_par if r.lancamento_banco_id],
+                [
+                    sistema_por_id[r.lancamento_sistema_id]
+                    for r in sem_par
+                    if r.lancamento_sistema_id
+                ],
+            )
 
         tolerancia_dias = db.execute(
             select(Configuracao.tolerancia_dias_default).where(
@@ -392,19 +514,15 @@ def conciliar_extratos(
             )
         ).scalar_one_or_none()
         if tolerancia_dias:
-            banco_por_id = {item.id: item for item in banco}
-            sistema_por_id = {item.id: item for item in sistema}
-            sem_par = [r for r in resultados if r.status == STATUS_SEM_CORRESPONDENCIA]
+            banco_sem_par, sistema_sem_par = _sobras(resultados)
             resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
-            resultados += parear_por_tolerancia(
-                [banco_por_id[r.lancamento_banco_id] for r in sem_par if r.lancamento_banco_id],
-                [
-                    sistema_por_id[r.lancamento_sistema_id]
-                    for r in sem_par
-                    if r.lancamento_sistema_id
-                ],
-                tolerancia_dias,
-            )
+            resultados += parear_por_tolerancia(banco_sem_par, sistema_sem_par, tolerancia_dias)
+
+        # Terceira passada (issue #24): sub-classifica o que ainda sobrou
+        # sem_correspondencia depois do motor exato e da tolerância.
+        banco_sem_par, sistema_sem_par = _sobras(resultados)
+        resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
+        resultados += classificar_divergencias(banco_sem_par, sistema_sem_par)
 
         db.execute(
             delete(Conciliacao).where(
@@ -445,4 +563,7 @@ def conciliar_extratos(
         STATUS_MATCH_EXATO: sum(r.status == STATUS_MATCH_EXATO for r in resultados),
         STATUS_DUPLICADO: sum(r.status == STATUS_DUPLICADO for r in resultados),
         STATUS_SEM_CORRESPONDENCIA: sum(r.status == STATUS_SEM_CORRESPONDENCIA for r in resultados),
+        STATUS_TARIFA_BANCARIA: sum(r.status == STATUS_TARIFA_BANCARIA for r in resultados),
+        STATUS_DIVERGENTE_VALOR: sum(r.status == STATUS_DIVERGENTE_VALOR for r in resultados),
+        STATUS_DIVERGENTE_DATA: sum(r.status == STATUS_DIVERGENTE_DATA for r in resultados),
     }

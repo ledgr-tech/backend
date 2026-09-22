@@ -116,6 +116,9 @@ def test_post_feliz_grava_linhas_e_devolve_contagens(
         "match_exato": 4,
         "duplicado": 1,
         "sem_correspondencia": 1,
+        "tarifa_bancaria": 0,
+        "divergente_valor": 0,
+        "divergente_data": 0,
     }
     linhas = _conciliacoes(db_session, banco.id, sistema.id)
     assert len(linhas) == 6
@@ -260,7 +263,18 @@ def test_par_sintetico_via_upload_gera_o_numero_esperado_de_matches(
     corpo = response.json()
     assert corpo["match_exato"] == esperado
     assert corpo["duplicado"] == 0
-    assert corpo["sem_correspondencia"] == 2 * (quantidade - sobreposicao)
+    # Os não-sobrepostos (gerados com descrição/data/valor aleatórios, ver
+    # scripts/gerar_extratos_sinteticos.py) podem cair em qualquer uma das 4
+    # categorias de "não casou" — algumas descrições de débito sintéticas são
+    # literalmente "Tarifa bancária...", e datas caem numa janela de 30 dias
+    # só, então tarifa_bancaria/divergente_valor/divergente_data (issue #24)
+    # não ficam em zero. A soma das 4, sim, é invariante.
+    assert (
+        corpo["sem_correspondencia"]
+        + corpo["tarifa_bancaria"]
+        + corpo["divergente_valor"]
+        + corpo["divergente_data"]
+    ) == 2 * (quantidade - sobreposicao)
     assert corpo["total"] == esperado + 2 * (quantidade - sobreposicao)
 
 
@@ -373,7 +387,14 @@ def test_insert_em_lote_emite_poucos_statements_mesmo_com_padroes_intercalados(
 
     assert contagens["match_exato"] == quantidade // 2
     assert contagens["total"] == quantidade
-    assert contagens["sem_correspondencia"] == quantidade // 2
+    # Todo mundo cai na mesma data (2026-09-05) — os "só banco"/"só sistema"
+    # sempre acham a data um do outro, só o valor não bate (valor é único por
+    # índice, não colide entre os dois grupos de leftover): viram
+    # divergente_valor (issue #24), não sem_correspondencia. O ponto deste
+    # teste é o número de statements, não a categoria — o padrão de campos
+    # nulos (só banco/só sistema) não muda com a categoria.
+    assert contagens["sem_correspondencia"] == 0
+    assert contagens["divergente_valor"] == quantidade // 2
     assert len(statements) <= 5, f"{len(statements)} statements de INSERT em conciliacoes"
 
 
@@ -416,12 +437,15 @@ def test_get_devolve_conciliacoes_com_lancamentos_e_pontas_nulas(
     corpo = response.json()
     assert corpo["extrato_id"] == str(banco.id)
     assert (corpo["total"], corpo["limit"], corpo["offset"]) == (4, 100, 0)
-    # ordem: data, valor (do lançamento do banco ou, sem ele, do sistema), id
+    # ordem: data, valor (do lançamento do banco ou, sem ele, do sistema), id.
+    # "so banco" e "so sistema" caem na mesma data (inserir_lancamentos usa
+    # sempre a mesma data) — cada um acha o outro nessa data sem o valor
+    # bater, então viram divergente_valor (issue #24), não sem_correspondencia.
     assert [item["status"] for item in corpo["itens"]] == [
         "match_exato",
         "match_exato",
-        "sem_correspondencia",
-        "sem_correspondencia",
+        "divergente_valor",
+        "divergente_valor",
     ]
     primeiro, _, so_sistema, so_banco = corpo["itens"]
     assert primeiro["extrato_sistema_id"] == str(sistema.id)
@@ -649,13 +673,15 @@ def test_get_apos_par_sintetico_soma_das_paginas_bate_com_o_total_do_post(
     assert post["match_exato"] == sobreposicao
 
 
-def _lancamento_em(db_session, extrato, valor: str, data: date) -> Lancamento:
+def _lancamento_em(
+    db_session, extrato, valor: str, data: date, descricao: str = "Pagamento"
+) -> Lancamento:
     lancamento = Lancamento(
         empresa_id=extrato.empresa_id,
         extrato_id=extrato.id,
         data=data,
         valor=Decimal(valor),
-        descricao="Pagamento",
+        descricao=descricao,
         tipo="credito",
         hash_dedup=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
         ocorrencia=1,
@@ -688,9 +714,12 @@ def test_post_com_tolerancia_2_grava_match_tolerancia_com_score_da_formula(
     assert linhas[0].lancamento_sistema_id == do_sistema.id
 
 
-def test_post_sem_configuracao_datas_diferentes_continuam_sem_correspondencia(
+def test_post_sem_configuracao_datas_diferentes_e_mesmo_valor_viram_divergente_data(
     db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
 ):
+    # Sem tolerância (sem Configuracao = 0, issue #22), o par não casa como
+    # match_tolerancia — mas o mesmo valor no outro lado agora classifica
+    # como divergente_data (issue #24) em vez de ficar em sem_correspondencia.
     empresa = criar_empresa()
     banco = criar_extrato_da_empresa(empresa.id, "banco")
     sistema = criar_extrato_da_empresa(empresa.id, "sistema")
@@ -701,10 +730,10 @@ def test_post_sem_configuracao_datas_diferentes_continuam_sem_correspondencia(
 
     assert response.status_code == 201
     linhas = _conciliacoes(db_session, banco.id, sistema.id)
-    assert [linha.status for linha in linhas] == ["sem_correspondencia"] * 2
+    assert [linha.status for linha in linhas] == ["divergente_data"] * 2
 
 
-def test_post_com_tolerancia_0_datas_diferentes_continuam_sem_correspondencia(
+def test_post_com_tolerancia_0_datas_diferentes_e_mesmo_valor_viram_divergente_data(
     db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
 ):
     empresa = criar_empresa()
@@ -718,4 +747,99 @@ def test_post_com_tolerancia_0_datas_diferentes_continuam_sem_correspondencia(
     _post(auth_headers(empresa.id), banco.id, sistema.id)
 
     linhas = _conciliacoes(db_session, banco.id, sistema.id)
+    assert [linha.status for linha in linhas] == ["divergente_data"] * 2
+
+
+def test_post_valor_e_data_diferentes_continua_sem_correspondencia(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    # Nem valor nem data batem do outro lado: nenhuma das categorias de
+    # divergência se aplica, continua sem_correspondencia (issue #24).
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
+    _lancamento_em(db_session, sistema, "20.00", date(2026, 9, 6))
+
+    response = _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    assert response.status_code == 201
+    linhas = _conciliacoes(db_session, banco.id, sistema.id)
     assert [linha.status for linha in linhas] == ["sem_correspondencia"] * 2
+
+
+def test_post_cobre_as_5_categorias_de_divergencia(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    """Critério de aceite da issue #24: extrato sintético com um lançamento
+    de cada categoria (mais um match, pra não deixar a contagem de match_exato
+    zerada) cai na categoria certa. Cada categoria usa uma data própria,
+    porque divergente_valor/divergente_data são decididos por sets de datas e
+    valores dos remanescentes inteiros, não por um par correlacionado
+    específico — datas repetidas entre categorias colidiriam entre si."""
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+
+    d_match = date(2026, 9, 5)
+    d_tarifa = date(2026, 9, 6)
+    d_divergente_valor = date(2026, 9, 7)
+    d_divergente_data_banco = date(2026, 9, 10)
+    d_divergente_data_sistema = date(2026, 9, 25)
+    d_sem_correspondencia = date(2026, 9, 15)
+
+    do_banco_match = _lancamento_em(db_session, banco, "10.00", d_match, "Pagamento fornecedor A")
+    do_sistema_match = _lancamento_em(
+        db_session, sistema, "10.00", d_match, "Pagamento fornecedor A"
+    )
+    do_tarifa = _lancamento_em(db_session, banco, "15.00", d_tarifa, "TARIFA PACOTE DE SERVICOS")
+    do_banco_divval = _lancamento_em(
+        db_session, banco, "30.00", d_divergente_valor, "Pagamento fornecedor B"
+    )
+    do_sistema_divval = _lancamento_em(
+        db_session, sistema, "31.00", d_divergente_valor, "Pagamento fornecedor B"
+    )
+    do_banco_divdata = _lancamento_em(
+        db_session, banco, "40.00", d_divergente_data_banco, "Pagamento fornecedor C"
+    )
+    do_sistema_divdata = _lancamento_em(
+        db_session, sistema, "40.00", d_divergente_data_sistema, "Pagamento fornecedor C"
+    )
+    do_sem_correspondencia = _lancamento_em(
+        db_session, banco, "99.99", d_sem_correspondencia, "Pagamento fornecedor D"
+    )
+
+    response = _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    assert response.status_code == 201
+    corpo = response.json()
+    assert corpo == {
+        "extrato_banco_id": str(banco.id),
+        "extrato_sistema_id": str(sistema.id),
+        "total": 8,
+        "match_exato": 2,
+        "duplicado": 0,
+        "sem_correspondencia": 1,
+        "tarifa_bancaria": 1,
+        "divergente_valor": 2,
+        "divergente_data": 2,
+    }
+
+    por_lancamento_banco = {
+        linha.lancamento_banco_id: linha.status
+        for linha in _conciliacoes(db_session, banco.id, sistema.id)
+        if linha.lancamento_banco_id is not None
+    }
+    por_lancamento_sistema = {
+        linha.lancamento_sistema_id: linha.status
+        for linha in _conciliacoes(db_session, banco.id, sistema.id)
+        if linha.lancamento_sistema_id is not None
+    }
+    assert por_lancamento_banco[do_banco_match.id] == "match_exato"
+    assert por_lancamento_sistema[do_sistema_match.id] == "match_exato"
+    assert por_lancamento_banco[do_tarifa.id] == "tarifa_bancaria"
+    assert por_lancamento_banco[do_banco_divval.id] == "divergente_valor"
+    assert por_lancamento_sistema[do_sistema_divval.id] == "divergente_valor"
+    assert por_lancamento_banco[do_banco_divdata.id] == "divergente_data"
+    assert por_lancamento_sistema[do_sistema_divdata.id] == "divergente_data"
+    assert por_lancamento_banco[do_sem_correspondencia.id] == "sem_correspondencia"

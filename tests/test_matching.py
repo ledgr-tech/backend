@@ -1,7 +1,8 @@
 """Testes unitários do núcleo puro do motor de matching exato (issue #16,
-ADR-006), da passada de tolerância de data (issue #22, ADR-008) e do
-desempate de pareamento por similaridade de descrição (issue #23, ADR-008).
-Sem banco: só listas em memória."""
+ADR-006), da passada de tolerância de data (issue #22, ADR-008), do
+desempate de pareamento por similaridade de descrição (issue #23, ADR-008) e
+da classificação de divergências (issue #24, ADR-007/ADR-009). Sem banco: só
+listas em memória."""
 
 import uuid
 from datetime import date
@@ -15,6 +16,7 @@ from app.services.matching import (
     LancamentoParaMatching,
     ResultadoMatching,
     _similaridade_descricao,
+    classificar_divergencias,
     parear_lancamentos,
     parear_por_tolerancia,
 )
@@ -306,3 +308,75 @@ def test_grupo_acima_do_limite_de_candidatos_volta_pro_pareamento_posicional():
     esperado = {(b.id, s.id) for b, s in zip(banco, sistema, strict=True)}
     assert pares == esperado
     assert all(r.status == "match_exato" for r in resultados)
+
+
+def test_classificar_tarifa_bancaria_so_no_lado_banco():
+    item_banco = _lanc("15.00", descricao="TARIFA PACOTE DE SERVICOS")
+
+    resultados = classificar_divergencias([item_banco], [])
+
+    assert resultados == [ResultadoMatching("tarifa_bancaria", item_banco.id, None)]
+
+    # O mesmo termo do lado sistema não vira tarifa — tarifa bancária só
+    # existe do lado banco (o ERP não lança tarifa que o banco cobrou).
+    item_sistema = _lanc("15.00", descricao="TARIFA PACOTE DE SERVICOS")
+    resultados_sistema = classificar_divergencias([], [item_sistema])
+    assert resultados_sistema == [ResultadoMatching("sem_correspondencia", None, item_sistema.id)]
+
+
+def test_classificar_divergente_valor_quando_data_bate_e_valor_nao():
+    dia = date(2026, 9, 5)
+    banco = _lanc("10.00", data=dia)
+    sistema = _lanc("20.00", data=dia)
+
+    resultados = classificar_divergencias([banco], [sistema])
+
+    assert {r.status for r in resultados} == {"divergente_valor"}
+    assert {(r.lancamento_banco_id, r.lancamento_sistema_id) for r in resultados} == {
+        (banco.id, None),
+        (None, sistema.id),
+    }
+    assert all(r.regra_aplicada is None and r.score_confianca is None for r in resultados)
+
+
+def test_classificar_divergente_data_quando_valor_bate_e_data_nao():
+    banco = _lanc("10.00", data=date(2026, 9, 5))
+    sistema = _lanc("10.00", data=date(2026, 10, 20))  # bem longe, nada a ver com tolerância
+
+    resultados = classificar_divergencias([banco], [sistema])
+
+    assert {r.status for r in resultados} == {"divergente_data"}
+    assert {(r.lancamento_banco_id, r.lancamento_sistema_id) for r in resultados} == {
+        (banco.id, None),
+        (None, sistema.id),
+    }
+
+
+def test_classificar_sem_correspondencia_quando_nada_parece_dos_dois_lados():
+    banco = _lanc("10.00", data=date(2026, 9, 5), descricao="Pagamento fornecedor")
+    sistema = _lanc("99.00", data=date(2026, 10, 20), descricao="Recebimento cliente")
+
+    resultados = classificar_divergencias([banco], [sistema])
+
+    assert {r.status for r in resultados} == {"sem_correspondencia"}
+
+
+def test_classificar_prioridade_divergente_valor_sobre_divergente_data():
+    dia_banco = date(2026, 9, 5)
+    banco = _lanc("10.00", data=dia_banco)
+    # mesma data do banco, valor diferente -> elegível a divergente_valor
+    sistema_mesma_data = _lanc("20.00", data=dia_banco)
+    # mesmo valor do banco, data bem diferente -> elegível a divergente_data
+    sistema_mesmo_valor = _lanc("10.00", data=date(2026, 10, 20))
+
+    resultados = classificar_divergencias([banco], [sistema_mesma_data, sistema_mesmo_valor])
+
+    resultado_banco = next(r for r in resultados if r.lancamento_banco_id == banco.id)
+    assert resultado_banco.status == "divergente_valor"
+
+
+def test_classificar_regra_aplicada_e_score_confianca_ficam_none():
+    banco = _lanc("15.00", descricao="TARIFA")
+    resultados = classificar_divergencias([banco], [])
+    assert resultados[0].regra_aplicada is None
+    assert resultados[0].score_confianca is None
