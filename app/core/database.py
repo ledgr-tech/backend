@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+# connect_timeout curto (libpq, via psycopg): sem isso, uma tentativa de
+# conectar num host inalcançável (porta não padrão bloqueada na rede de quem
+# conecta, proxy do Railway com Public Access desligado, etc.) fica pendurada
+# no timeout de TCP do SO — minutos, não segundos — em vez de falhar rápido.
+# Não muda nada pra quem já conecta normalmente (CI, Railway acessível).
+engine = create_engine(
+    settings.database_url, pool_pre_ping=True, connect_args={"connect_timeout": 10}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
