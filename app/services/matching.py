@@ -58,9 +58,12 @@ entre candidatos com a mesma diferença de dias. Em nenhum dos dois casos a
 similaridade entra em `score_confianca` ou muda `status`/`regra_aplicada` —
 valor+data exatos (ou dentro da tolerância) já são a confirmação do match, a
 similaridade só resolve qual combinação é a certa. Em `parear_lancamentos`,
-grupos com mais de `LIMITE_CANDIDATOS_PARA_SIMILARIDADE` candidatos num dos
-lados voltam pro pareamento posicional (custo O(n·m) da comparação de todas
-as combinações não escala pra grupo gigante — ver docstring da constante).
+o grupo (mesmo valor+data) que tiver mais de `LIMITE_CANDIDATOS_PARA_
+SIMILARIDADE` candidatos num dos lados volta pro pareamento posicional só
+pra ele — cap de escala, não de produto, e por grupo, não pra conciliação
+inteira; os outros grupos da mesma chamada continuam usando similaridade
+normalmente (custo O(n·m) da comparação de todas as combinações não escala
+pra grupo gigante — ver docstring da constante).
 
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
@@ -88,13 +91,21 @@ REGRA_EXATO = "exato"
 REGRA_TOLERANCIA = "tolerancia"
 SCORE_EXATO = Decimal("1.000")
 
-# Acima disso num dos lados de um grupo (mesmo valor+data), o pareamento por
-# similaridade (issue #23) comparar todas as combinações vira O(n·m) — com
-# milhares de candidatos dos dois lados isso não termina em tempo hábil (ver
-# tests/test_matching_volume.py::test_grupo_gigante_com_a_mesma_chave, 20k de
-# cada lado). Grupos assim, no mundo real, são o caso patológico do teste de
-# volume (issue #19), não um cenário de ambiguidade genuína de poucas
-# transações — acima do limite, volta pro pareamento posicional de sempre.
+# Cap de ESCALA, não de produto — não confundir com os thresholds de
+# similaridade/tolerância da ADR-008 (esses decidem SE/COMO um par casa; este
+# aqui só decide se vale a pena comparar todas as combinações de um grupo).
+# Acima desse número de candidatos num dos lados de UM grupo (mesmo
+# valor+data), comparar todas as combinações banco x sistema desse grupo
+# vira O(n·m) — com milhares de candidatos dos dois lados isso não termina em
+# tempo hábil (ver tests/test_matching_volume.py::
+# test_grupo_gigante_com_a_mesma_chave_gera_20k_matches_dentro_do_teto, 20k de
+# cada lado, motivo original da issue #19: custo linear no total de
+# lançamentos). Grupos assim são o caso patológico desse teste de volume, não
+# um cenário de ambiguidade genuína de poucas transações. O fallback é só
+# para O GRUPO que estourou o cap — cada grupo é decidido independentemente
+# em `parear_lancamentos` (ver `_parear_grupo`), então um único grupo gigante
+# num extrato não desliga a similaridade pros outros grupos da mesma
+# conciliação.
 LIMITE_CANDIDATOS_PARA_SIMILARIDADE = 200
 
 
