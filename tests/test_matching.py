@@ -1,5 +1,6 @@
 """Testes unitários do núcleo puro do motor de matching exato (issue #16,
-ADR-006). Sem banco: só listas em memória."""
+ADR-006) e da passada de tolerância de data (issue #22, ADR-008). Sem banco:
+só listas em memória."""
 
 import uuid
 from datetime import date
@@ -10,6 +11,7 @@ from app.services.matching import (
     LancamentoParaMatching,
     ResultadoMatching,
     parear_lancamentos,
+    parear_por_tolerancia,
 )
 
 DIA = date(2026, 9, 5)
@@ -128,3 +130,96 @@ def test_mesma_entrada_duas_vezes_gera_o_mesmo_pareamento():
 
     assert primeira == segunda
     assert primeira == invertida
+
+
+def test_tolerancia_par_dentro_da_janela_casa_com_score_esperado():
+    banco = _lanc("10.00", data=date(2026, 9, 5))
+    sistema = _lanc("10.00", data=date(2026, 9, 6))
+
+    resultados = parear_por_tolerancia([banco], [sistema], 2)
+
+    assert resultados == [
+        ResultadoMatching(
+            status="match_tolerancia",
+            lancamento_banco_id=banco.id,
+            lancamento_sistema_id=sistema.id,
+            regra_aplicada="tolerancia",
+            score_confianca=Decimal("0.667"),
+        )
+    ]
+
+
+def test_tolerancia_par_fora_da_janela_nao_casa():
+    banco = _lanc("10.00", data=date(2026, 9, 5))
+    sistema = _lanc("10.00", data=date(2026, 9, 9))
+
+    resultados = parear_por_tolerancia([banco], [sistema], 2)
+
+    assert {r.status for r in resultados} == {"sem_correspondencia"}
+    assert len(resultados) == 2
+
+
+def test_tolerancia_zero_nao_casa_nada():
+    banco = _lanc("10.00")
+    sistema = _lanc("10.00", data=date(2026, 9, 6))
+
+    resultados = parear_por_tolerancia([banco], [sistema], 0)
+
+    assert {r.status for r in resultados} == {"sem_correspondencia"}
+    assert len(resultados) == 2
+
+
+def test_tolerancia_valor_diferente_nao_casa():
+    resultados = parear_por_tolerancia([_lanc("10.00")], [_lanc("11.00")], 3)
+
+    assert {r.status for r in resultados} == {"sem_correspondencia"}
+
+
+def test_tolerancia_com_lado_vazio_devolve_sem_correspondencia():
+    banco = _lanc("10.00")
+
+    resultados = parear_por_tolerancia([banco], [], 2)
+
+    assert resultados == [ResultadoMatching("sem_correspondencia", banco.id, None)]
+
+
+def test_tolerancia_desempate_menor_diferenca_de_dias_ganha():
+    banco = _lanc("10.00", data=date(2026, 9, 5))
+    longe = _lanc("10.00", data=date(2026, 9, 7))
+    perto = _lanc("10.00", data=date(2026, 9, 6))
+
+    resultados = parear_por_tolerancia([banco], [longe, perto], 3)
+
+    pares = [r for r in resultados if r.status == "match_tolerancia"]
+    assert [(r.lancamento_banco_id, r.lancamento_sistema_id) for r in pares] == [
+        (banco.id, perto.id)
+    ]
+    assert pares[0].score_confianca == Decimal("0.750")
+    sobras = [r for r in resultados if r.status == "sem_correspondencia"]
+    assert [r.lancamento_sistema_id for r in sobras] == [longe.id]
+
+
+def test_tolerancia_mesma_entrada_duas_vezes_e_invertida_geram_o_mesmo_pareamento():
+    banco = [
+        _lanc("10.00", data=date(2026, 9, 5), descricao="a"),
+        _lanc("10.00", data=date(2026, 9, 5), descricao="b"),
+        _lanc("20.00", data=date(2026, 9, 6)),
+    ]
+    sistema = [
+        _lanc("10.00", data=date(2026, 9, 6), descricao="a"),
+        _lanc("10.00", data=date(2026, 9, 6), descricao="b"),
+        _lanc("20.00", data=date(2026, 9, 6)),
+    ]
+
+    def _pares(resultados):
+        return {
+            (r.lancamento_banco_id, r.lancamento_sistema_id, r.status, r.score_confianca)
+            for r in resultados
+        }
+
+    primeira = parear_por_tolerancia(banco, sistema, 2)
+    segunda = parear_por_tolerancia(list(banco), list(sistema), 2)
+    invertida = parear_por_tolerancia(list(reversed(banco)), list(reversed(sistema)), 2)
+
+    assert primeira == segunda
+    assert _pares(primeira) == _pares(invertida)

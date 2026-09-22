@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, insert
 
 from app.core.database import SessionLocal, engine
-from app.models import Conciliacao, Extrato, Lancamento
+from app.models import Conciliacao, Configuracao, Extrato, Lancamento
 from app.services import matching
 from main import app
 from scripts.gerar_extratos_sinteticos import main as gerar_extratos
@@ -647,3 +647,75 @@ def test_get_apos_par_sintetico_soma_das_paginas_bate_com_o_total_do_post(
     assert len({item["id"] for item in itens}) == post["total"]
     assert sum(item["status"] == "match_exato" for item in itens) == post["match_exato"]
     assert post["match_exato"] == sobreposicao
+
+
+def _lancamento_em(db_session, extrato, valor: str, data: date) -> Lancamento:
+    lancamento = Lancamento(
+        empresa_id=extrato.empresa_id,
+        extrato_id=extrato.id,
+        data=data,
+        valor=Decimal(valor),
+        descricao="Pagamento",
+        tipo="credito",
+        hash_dedup=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+        ocorrencia=1,
+    )
+    db_session.add(lancamento)
+    db_session.commit()
+    return lancamento
+
+
+def test_post_com_tolerancia_2_grava_match_tolerancia_com_score_da_formula(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    db_session.add(Configuracao(empresa_id=empresa.id, tolerancia_dias_default=2))
+    db_session.commit()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    do_banco = _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
+    do_sistema = _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 6))
+
+    response = _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    assert response.status_code == 201
+    linhas = _conciliacoes(db_session, banco.id, sistema.id)
+    assert len(linhas) == 1
+    assert linhas[0].status == "match_tolerancia"
+    assert linhas[0].regra_aplicada == "tolerancia"
+    assert linhas[0].score_confianca == Decimal("0.667")
+    assert linhas[0].lancamento_banco_id == do_banco.id
+    assert linhas[0].lancamento_sistema_id == do_sistema.id
+
+
+def test_post_sem_configuracao_datas_diferentes_continuam_sem_correspondencia(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
+    _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 6))
+
+    response = _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    assert response.status_code == 201
+    linhas = _conciliacoes(db_session, banco.id, sistema.id)
+    assert [linha.status for linha in linhas] == ["sem_correspondencia"] * 2
+
+
+def test_post_com_tolerancia_0_datas_diferentes_continuam_sem_correspondencia(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    db_session.add(Configuracao(empresa_id=empresa.id, tolerancia_dias_default=0))
+    db_session.commit()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
+    _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 6))
+
+    _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    linhas = _conciliacoes(db_session, banco.id, sistema.id)
+    assert [linha.status for linha in linhas] == ["sem_correspondencia"] * 2

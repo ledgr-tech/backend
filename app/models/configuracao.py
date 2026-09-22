@@ -19,7 +19,7 @@ class Configuracao(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("empresas.id"), nullable=False, unique=True
     )
     tolerancia_dias_default: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="2"
+        Integer, nullable=False, server_default="0"
     )
     similaridade_minima_default: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, server_default="85.00"
