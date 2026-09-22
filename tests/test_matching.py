@@ -1,15 +1,20 @@
 """Testes unitários do núcleo puro do motor de matching exato (issue #16,
-ADR-006) e da passada de tolerância de data (issue #22, ADR-008). Sem banco:
-só listas em memória."""
+ADR-006), da passada de tolerância de data (issue #22, ADR-008) e do
+desempate de pareamento por similaridade de descrição (issue #23, ADR-008).
+Sem banco: só listas em memória."""
 
 import uuid
 from datetime import date
 from decimal import Decimal
 
+from rapidfuzz import fuzz
+
 from app.services.matching import (
+    LIMITE_CANDIDATOS_PARA_SIMILARIDADE,
     SCORE_EXATO,
     LancamentoParaMatching,
     ResultadoMatching,
+    _similaridade_descricao,
     parear_lancamentos,
     parear_por_tolerancia,
 )
@@ -109,6 +114,9 @@ def test_datas_diferentes_nao_casam():
 
 
 def test_pareamento_ordena_por_descricao_normalizada_e_ocorrencia():
+    """Descrições idênticas (a menos de espaço/caixa) empatam a similaridade
+    em 100 dos dois lados — quem decide o pareamento é o desempate de sempre
+    (descrição normalizada, ocorrência), não a similaridade (issue #23)."""
     b_a = _lanc("50.00", descricao="  Alfa ")
     b_b = _lanc("50.00", descricao="Beta")
     s_a = _lanc("50.00", descricao="ALFA")
@@ -223,3 +231,78 @@ def test_tolerancia_mesma_entrada_duas_vezes_e_invertida_geram_o_mesmo_pareament
 
     assert primeira == segunda
     assert _pares(primeira) == _pares(invertida)
+
+
+def test_similaridade_descricao_usa_o_maior_entre_token_sort_e_token_set_ratio():
+    # token_sort_ratio ganha: mesmas palavras, ordem diferente, nenhuma sobra
+    # de um lado só (os dois ratios seriam iguais aqui, mas o cenário abaixo
+    # de token_set isola o outro caso).
+    assert _similaridade_descricao("TED MARIA OLIVEIRA", "OLIVEIRA MARIA TED") == 100.0
+
+    # token_set_ratio ganha: sistema é um subconjunto de palavras do banco
+    # (truncamento), então token_sort_ratio sozinho ficaria bem abaixo de 100.
+    banco = "PIX RECEBIDO JOAO DA SILVA"
+    sistema = "JOAO SILVA"
+    assert _similaridade_descricao(banco, sistema) == 100.0
+    assert fuzz.token_sort_ratio(banco, sistema) < 100.0
+
+
+def test_grupo_com_2_de_cada_lado_pareia_por_similaridade_nao_por_ordem_alfabetica():
+    # Construído pra que o desempate alfabético de hoje (descrição
+    # normalizada) escolheria o par errado: "maria oliveira ted" <
+    # "pix recebido..." e "joao silva" < "oliveira maria ted", então a ordem
+    # posicional pareia banco_1-sistema_a e banco_2-sistema_b — os DOIS pares
+    # errados. A similaridade (token_sort/token_set) pareia certo mesmo
+    # assim: banco_1 com sistema_b (mesmas palavras, ordem diferente) e
+    # banco_2 com sistema_a (sistema é a descrição truncada do banco).
+    banco_1 = _lanc("50.00", descricao="MARIA OLIVEIRA TED")
+    banco_2 = _lanc("50.00", descricao="PIX RECEBIDO JOAO DA SILVA")
+    sistema_a = _lanc("50.00", descricao="JOAO SILVA")
+    sistema_b = _lanc("50.00", descricao="OLIVEIRA MARIA TED")
+
+    resultados = parear_lancamentos([banco_1, banco_2], [sistema_a, sistema_b])
+
+    pares = {(r.lancamento_banco_id, r.lancamento_sistema_id) for r in resultados}
+    assert pares == {(banco_1.id, sistema_b.id), (banco_2.id, sistema_a.id)}
+    assert all(r.status == "match_exato" for r in resultados)
+
+
+def test_tolerancia_desempate_por_similaridade_quando_diferenca_de_dias_empata():
+    banco = _lanc("10.00", data=date(2026, 9, 5), descricao="PIX RECEBIDO JOAO DA SILVA")
+    # Os dois candidatos ficam a 1 dia de diferença do banco (empate na
+    # diferença de dias) — só a similaridade de descrição distingue.
+    errado = _lanc("10.00", data=date(2026, 9, 6), descricao="MARIA OLIVEIRA")
+    certo = _lanc("10.00", data=date(2026, 9, 4), descricao="JOAO SILVA")
+
+    resultados = parear_por_tolerancia([banco], [errado, certo], 3)
+
+    pares = [r for r in resultados if r.status == "match_tolerancia"]
+    assert [(r.lancamento_banco_id, r.lancamento_sistema_id) for r in pares] == [
+        (banco.id, certo.id)
+    ]
+    assert pares[0].score_confianca == Decimal("0.750")
+    sobras = [r for r in resultados if r.status == "sem_correspondencia"]
+    assert [r.lancamento_sistema_id for r in sobras] == [errado.id]
+
+
+def test_grupo_acima_do_limite_de_candidatos_volta_pro_pareamento_posicional():
+    # Descrições desenhadas pra que a similaridade escolheria um pareamento
+    # diferente do posicional (mesmo truque do teste acima) — construído
+    # LIMITE_CANDIDATOS_PARA_SIMILARIDADE + 1 vezes de cada lado pra estourar
+    # o limite e confirmar que o motor não tenta comparar todas as
+    # combinações nesse caso (custo O(n·m) não escala, issue #19 x #23).
+    tamanho = LIMITE_CANDIDATOS_PARA_SIMILARIDADE + 1
+    banco = [
+        _lanc("50.00", descricao="MARIA OLIVEIRA TED", ocorrencia=o) for o in range(1, tamanho + 1)
+    ]
+    sistema = [_lanc("50.00", descricao="JOAO SILVA", ocorrencia=o) for o in range(1, tamanho + 1)]
+
+    resultados = parear_lancamentos(banco, sistema)
+
+    # Posicional: banco[i] casa com sistema[i] na ordem de (descrição
+    # normalizada, ocorrência) — como as descrições são fixas por lado, a
+    # ordem vira só a ocorrência.
+    pares = {(r.lancamento_banco_id, r.lancamento_sistema_id) for r in resultados}
+    esperado = {(b.id, s.id) for b, s in zip(banco, sistema, strict=True)}
+    assert pares == esperado
+    assert all(r.status == "match_exato" for r in resultados)
