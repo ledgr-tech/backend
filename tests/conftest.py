@@ -34,7 +34,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
-from app.models import Conciliacao, Empresa, Extrato, Lancamento, LinhaInvalida
+from app.models import Conciliacao, Configuracao, Empresa, Extrato, Lancamento, LinhaInvalida
 
 RAIZ = Path(__file__).resolve().parent.parent
 SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
@@ -122,8 +122,8 @@ def _gerar_cnpj() -> str:
 def criar_empresa(db_session):
     """Fábrica de Empresa real no banco. A limpeza no fim do teste apaga só
     o que essa fábrica criou: a empresa e qualquer extrato/lançamento/linha
-    inválida gravado contra ela durante o teste — inclusive via HTTP, não
-    só pelos outros helpers deste arquivo."""
+    inválida/configuração gravado contra ela durante o teste — inclusive via
+    HTTP, não só pelos outros helpers deste arquivo."""
     empresas_criadas: list[uuid.UUID] = []
 
     def _criar(razao_social: str = "Empresa de teste") -> Empresa:
@@ -154,6 +154,10 @@ def criar_empresa(db_session):
             db_session.query(Extrato).filter(Extrato.id.in_(extrato_ids)).delete(
                 synchronize_session=False
             )
+        # Configuracao é 1:1 com Empresa (não passa por Extrato) — apagar
+        # antes da Empresa, senão a FK configuracoes_empresa_id_fkey barra o
+        # delete (issue #22 foi o primeiro teste a gravar Configuracao aqui).
+        db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
         db_session.query(Empresa).filter_by(id=empresa_id).delete()
     db_session.commit()
 
