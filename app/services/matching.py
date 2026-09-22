@@ -1,10 +1,11 @@
-"""Motor de matching (issues #16 e #22): concilia os lançamentos de um extrato
-do banco com os de um extrato do sistema, pela regra da ADR-006.
+"""Motor de matching (issues #16, #22 e #23): concilia os lançamentos de um
+extrato do banco com os de um extrato do sistema, pela regra da ADR-006.
 
 Dividido em camadas, pra que a regra seja testável sem banco:
-- `parear_lancamentos`: núcleo puro do motor exato (ADR-006). Recebe duas
-  listas de lançamentos em memória e devolve a lista de resultados, sem tocar
-  em banco.
+- `parear_lancamentos`: núcleo puro do motor exato (ADR-006), com o
+  pareamento dentro de cada grupo decidido por similaridade de descrição
+  quando há ambiguidade (issue #23, ADR-008). Recebe duas listas de
+  lançamentos em memória e devolve a lista de resultados, sem tocar em banco.
 - `parear_por_tolerancia`: núcleo puro da segunda passada (issue #22, ADR-008),
   sobre o que o motor exato deixou `sem_correspondencia`.
 - `conciliar_extratos`: carrega os lançamentos (sempre filtrando por
@@ -12,13 +13,17 @@ Dividido em camadas, pra que a regra seja testável sem banco:
   `conciliacoes` (schema da ADR-007).
 
 Regra (ADR-006): os lançamentos são agrupados pela chave (valor com sinal,
-data), em dict, nos dois extratos. Dentro de cada grupo, cada lado é ordenado
-por (descrição normalizada, ocorrencia) e pareado posição a posição, 1:1. Com
-n do banco e m do sistema, formam-se min(n, m) pares (`match_exato`). Os
-excedentes de qualquer lado ficam `duplicado` se o grupo formou pelo menos um
-par, e `sem_correspondencia` se não formou nenhum. Chave presente só num dos
-lados também é `sem_correspondencia`. A descrição só entra na ordenação
-estável, nunca como critério de similaridade (isso é da Sprint 4).
+data), em dict, nos dois extratos. Com n do banco e m do sistema, formam-se
+min(n, m) pares (`match_exato`). Os excedentes de qualquer lado ficam
+`duplicado` se o grupo formou pelo menos um par, e `sem_correspondencia` se
+não formou nenhum. Chave presente só num dos lados também é
+`sem_correspondencia`. Dentro de um grupo sem ambiguidade (um candidato de
+cada lado, ou um lado vazio) o par é o único possível. Com mais de um
+candidato em pelo menos um dos lados, quem casa com quem é decidido por
+similaridade de descrição (issue #23, ADR-008, ver docstring de
+`parear_lancamentos`) — valor e data exatos já bastam pra confirmar o match;
+a similaridade só desempata a ambiguidade de quem casa com quem, não entra em
+`score_confianca`.
 
 Bucket e custo (issue #19): a chave (valor, data) é o bucket do motor exato.
 Cada lançamento cai num dict por chave, então nunca há comparação de todos
@@ -36,7 +41,26 @@ candidatos (mesmo valor, diferença de datas <= tolerância), ordena por chave
 determinística (diferença de dias, datas, descrições normalizadas,
 ocorrências) e casa greedy 1:1: `match_tolerancia`, regra `tolerancia`, score
 1 - dias/(tolerância+1). A geração de candidatos é por valor (bucket por
-valor), então não compara todos contra todos, só os de mesmo valor.
+valor), então não compara todos contra todos, só os de mesmo valor. O
+desempate de candidatos com a mesma diferença de dias usa similaridade de
+descrição (issue #23) em vez de comparar a descrição como string simples.
+
+Similaridade de descrição (issue #23, ADR-008): `_similaridade_descricao` é
+max(`rapidfuzz.fuzz.token_sort_ratio`, `fuzz.token_set_ratio`) entre duas
+descrições — tolera palavras reordenadas (`token_sort_ratio`) e descrições
+truncadas/com palavras a mais de um lado (`token_set_ratio`). Usada em dois
+lugares: (1) dentro de `parear_lancamentos`, pra decidir quem casa com quem
+quando um grupo de mesmo valor+data tem mais de um candidato em algum dos
+lados — o pareamento vira guloso por similaridade decrescente, com o
+desempate de hoje (descrição normalizada, ocorrência) só entrando quando a
+similaridade empata; (2) como critério de desempate em `parear_por_tolerancia`
+entre candidatos com a mesma diferença de dias. Em nenhum dos dois casos a
+similaridade entra em `score_confianca` ou muda `status`/`regra_aplicada` —
+valor+data exatos (ou dentro da tolerância) já são a confirmação do match, a
+similaridade só resolve qual combinação é a certa. Em `parear_lancamentos`,
+grupos com mais de `LIMITE_CANDIDATOS_PARA_SIMILARIDADE` candidatos num dos
+lados voltam pro pareamento posicional (custo O(n·m) da comparação de todas
+as combinações não escala pra grupo gigante — ver docstring da constante).
 
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
@@ -49,6 +73,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from rapidfuzz import fuzz
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
@@ -62,6 +87,15 @@ STATUS_MATCH_TOLERANCIA = "match_tolerancia"
 REGRA_EXATO = "exato"
 REGRA_TOLERANCIA = "tolerancia"
 SCORE_EXATO = Decimal("1.000")
+
+# Acima disso num dos lados de um grupo (mesmo valor+data), o pareamento por
+# similaridade (issue #23) comparar todas as combinações vira O(n·m) — com
+# milhares de candidatos dos dois lados isso não termina em tempo hábil (ver
+# tests/test_matching_volume.py::test_grupo_gigante_com_a_mesma_chave, 20k de
+# cada lado). Grupos assim, no mundo real, são o caso patológico do teste de
+# volume (issue #19), não um cenário de ambiguidade genuína de poucas
+# transações — acima do limite, volta pro pareamento posicional de sempre.
+LIMITE_CANDIDATOS_PARA_SIMILARIDADE = 200
 
 
 @dataclass(frozen=True)
@@ -101,11 +135,78 @@ def _ordenar(grupo: list[LancamentoParaMatching]) -> list[LancamentoParaMatching
     return sorted(grupo, key=lambda item: (_normalizar_descricao(item.descricao), item.ocorrencia))
 
 
+def _similaridade_descricao(descricao_a: str, descricao_b: str) -> float:
+    """max(token_sort_ratio, token_set_ratio) do rapidfuzz (issue #23,
+    ADR-008): token_sort_ratio tolera palavras em ordem diferente
+    ("TED MARIA OLIVEIRA" x "OLIVEIRA MARIA TED"), token_set_ratio tolera
+    palavras a mais/truncamento de um dos lados ("PIX RECEBIDO JOAO DA
+    SILVA" x "JOAO SILVA")."""
+    return max(
+        fuzz.token_sort_ratio(descricao_a, descricao_b),
+        fuzz.token_set_ratio(descricao_a, descricao_b),
+    )
+
+
+def _parear_grupo(
+    lado_banco: list[LancamentoParaMatching], lado_sistema: list[LancamentoParaMatching]
+) -> list[tuple[LancamentoParaMatching, LancamentoParaMatching]]:
+    """Pares dentro de um grupo de mesmo valor+data (ADR-006), em ordem
+    determinística. Sem ambiguidade (um candidato de cada lado, ou um lado
+    vazio) o par é o único possível. Com mais de um candidato em algum dos
+    lados (issue #23), guloso por similaridade de descrição decrescente,
+    desempatado por (descrição normalizada, ocorrência) de cada lado — o
+    mesmo desempate de antes, que só decide quando a similaridade empata
+    (ex: descrições idênticas, sempre 100). Acima de
+    `LIMITE_CANDIDATOS_PARA_SIMILARIDADE` candidatos num dos lados, volta pro
+    pareamento posicional (ver docstring da constante)."""
+    sem_ambiguidade = len(lado_banco) <= 1 and len(lado_sistema) <= 1
+    grupo_grande_demais = (
+        len(lado_banco) > LIMITE_CANDIDATOS_PARA_SIMILARIDADE
+        or len(lado_sistema) > LIMITE_CANDIDATOS_PARA_SIMILARIDADE
+    )
+    if sem_ambiguidade or grupo_grande_demais:
+        return list(zip(lado_banco, lado_sistema, strict=False))
+
+    # índice de cada lado entra como último desempate, só pra garantir uma
+    # ordem total mesmo no caso (não esperado em dado real) de dois itens
+    # idênticos em descrição normalizada e ocorrência do mesmo lado — sem
+    # isso, a comparação cairia nos próprios objetos, que não têm ordem.
+    combinacoes = sorted(
+        (
+            (
+                -_similaridade_descricao(do_banco.descricao, do_sistema.descricao),
+                _normalizar_descricao(do_banco.descricao),
+                do_banco.ocorrencia,
+                _normalizar_descricao(do_sistema.descricao),
+                do_sistema.ocorrencia,
+                indice_banco,
+                indice_sistema,
+            ),
+            do_banco,
+            do_sistema,
+        )
+        for indice_banco, do_banco in enumerate(lado_banco)
+        for indice_sistema, do_sistema in enumerate(lado_sistema)
+    )
+
+    pares: list[tuple[LancamentoParaMatching, LancamentoParaMatching]] = []
+    usados_banco: set[uuid.UUID] = set()
+    usados_sistema: set[uuid.UUID] = set()
+    for _, do_banco, do_sistema in combinacoes:
+        if do_banco.id in usados_banco or do_sistema.id in usados_sistema:
+            continue
+        usados_banco.add(do_banco.id)
+        usados_sistema.add(do_sistema.id)
+        pares.append((do_banco, do_sistema))
+    return pares
+
+
 def parear_lancamentos(
     banco: list[LancamentoParaMatching], sistema: list[LancamentoParaMatching]
 ) -> list[ResultadoMatching]:
-    """Núcleo puro do motor exato (ADR-006). Determinístico: a mesma entrada
-    gera sempre o mesmo pareamento, e os grupos saem em ordem de (data, valor)."""
+    """Núcleo puro do motor exato (ADR-006, com o desempate de pareamento por
+    similaridade da issue #23). Determinístico: a mesma entrada gera sempre o
+    mesmo pareamento, e os grupos saem em ordem de (data, valor)."""
     grupos_banco = _agrupar(banco)
     grupos_sistema = _agrupar(sistema)
     chaves = sorted(set(grupos_banco) | set(grupos_sistema), key=lambda c: (c[1], c[0]))
@@ -114,9 +215,11 @@ def parear_lancamentos(
     for chave in chaves:
         lado_banco = _ordenar(grupos_banco.get(chave, []))
         lado_sistema = _ordenar(grupos_sistema.get(chave, []))
-        pares = min(len(lado_banco), len(lado_sistema))
+        pares = _parear_grupo(lado_banco, lado_sistema)
+        usados_banco = {do_banco.id for do_banco, _ in pares}
+        usados_sistema = {do_sistema.id for _, do_sistema in pares}
 
-        for do_banco, do_sistema in zip(lado_banco, lado_sistema, strict=False):
+        for do_banco, do_sistema in pares:
             resultados.append(
                 ResultadoMatching(
                     status=STATUS_MATCH_EXATO,
@@ -127,15 +230,13 @@ def parear_lancamentos(
                 )
             )
 
-        status_excedente = STATUS_DUPLICADO if pares > 0 else STATUS_SEM_CORRESPONDENCIA
-        for excedente in lado_banco[pares:]:
-            resultados.append(
-                ResultadoMatching(status_excedente, excedente.id, None),
-            )
-        for excedente in lado_sistema[pares:]:
-            resultados.append(
-                ResultadoMatching(status_excedente, None, excedente.id),
-            )
+        status_excedente = STATUS_DUPLICADO if pares else STATUS_SEM_CORRESPONDENCIA
+        for excedente in lado_banco:
+            if excedente.id not in usados_banco:
+                resultados.append(ResultadoMatching(status_excedente, excedente.id, None))
+        for excedente in lado_sistema:
+            if excedente.id not in usados_sistema:
+                resultados.append(ResultadoMatching(status_excedente, None, excedente.id))
     return resultados
 
 
@@ -170,6 +271,7 @@ def parear_por_tolerancia(
                     (
                         (
                             dias,
+                            -_similaridade_descricao(do_banco.descricao, do_sistema.descricao),
                             do_banco.data,
                             do_sistema.data,
                             _normalizar_descricao(do_banco.descricao),
