@@ -57,6 +57,7 @@ StatusConciliacao = Literal[
     "divergente_data",
     "sem_correspondencia",
     "duplicado",
+    "tarifa_bancaria",
 ]
 
 
@@ -72,6 +73,9 @@ class ConciliacaoResponse(BaseModel):
     match_exato: int
     duplicado: int
     sem_correspondencia: int
+    tarifa_bancaria: int
+    divergente_valor: int
+    divergente_data: int
 
 
 def _obter_extrato_da_empresa(db: Session, extrato_id: uuid.UUID, empresa_id: uuid.UUID) -> Extrato:
