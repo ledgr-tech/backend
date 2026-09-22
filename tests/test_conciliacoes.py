@@ -813,11 +813,13 @@ def test_post_cobre_as_5_categorias_de_divergencia(
 
     assert response.status_code == 201
     corpo = response.json()
+    # 8 lançamentos (5 banco + 3 sistema), mas o par exato vira 1 única linha
+    # (match_exato conta pares/linhas, não lançamentos) — daí 7 linhas, não 8.
     assert corpo == {
         "extrato_banco_id": str(banco.id),
         "extrato_sistema_id": str(sistema.id),
-        "total": 8,
-        "match_exato": 2,
+        "total": 7,
+        "match_exato": 1,
         "duplicado": 0,
         "sem_correspondencia": 1,
         "tarifa_bancaria": 1,
