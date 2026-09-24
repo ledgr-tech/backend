@@ -7,6 +7,7 @@ from app.models.base import Base
 from app.models.conciliacao import Conciliacao
 from app.models.configuracao import Configuracao
 from app.models.empresa import Empresa
+from app.models.execucao_conciliacao import ExecucaoConciliacao
 from app.models.extrato import Extrato
 from app.models.lancamento import Lancamento
 from app.models.linha_invalida import LinhaInvalida
@@ -17,6 +18,7 @@ __all__ = [
     "Conciliacao",
     "Configuracao",
     "Empresa",
+    "ExecucaoConciliacao",
     "Extrato",
     "Lancamento",
     "LinhaInvalida",

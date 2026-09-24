@@ -34,7 +34,15 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
-from app.models import Conciliacao, Configuracao, Empresa, Extrato, Lancamento, LinhaInvalida
+from app.models import (
+    Conciliacao,
+    Configuracao,
+    Empresa,
+    ExecucaoConciliacao,
+    Extrato,
+    Lancamento,
+    LinhaInvalida,
+)
 
 RAIZ = Path(__file__).resolve().parent.parent
 SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
@@ -122,8 +130,8 @@ def _gerar_cnpj() -> str:
 def criar_empresa(db_session):
     """Fábrica de Empresa real no banco. A limpeza no fim do teste apaga só
     o que essa fábrica criou: a empresa e qualquer extrato/lançamento/linha
-    inválida/configuração gravado contra ela durante o teste — inclusive via
-    HTTP, não só pelos outros helpers deste arquivo."""
+    inválida/configuração/execução de conciliação gravado contra ela durante
+    o teste — inclusive via HTTP, não só pelos outros helpers deste arquivo."""
     empresas_criadas: list[uuid.UUID] = []
 
     def _criar(razao_social: str = "Empresa de teste") -> Empresa:
@@ -140,10 +148,15 @@ def criar_empresa(db_session):
             row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()
         ]
         if extrato_ids:
-            # Antes de lançamentos/extratos, por causa das FKs de conciliacoes.
+            # Antes de lançamentos/extratos, por causa das FKs de
+            # conciliacoes/execucoes_conciliacao (issue #27, ADR-010).
             db_session.query(Conciliacao).filter(
                 Conciliacao.extrato_banco_id.in_(extrato_ids)
                 | Conciliacao.extrato_sistema_id.in_(extrato_ids)
+            ).delete(synchronize_session=False)
+            db_session.query(ExecucaoConciliacao).filter(
+                ExecucaoConciliacao.extrato_banco_id.in_(extrato_ids)
+                | ExecucaoConciliacao.extrato_sistema_id.in_(extrato_ids)
             ).delete(synchronize_session=False)
             db_session.query(Lancamento).filter(Lancamento.extrato_id.in_(extrato_ids)).delete(
                 synchronize_session=False

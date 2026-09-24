@@ -71,6 +71,7 @@ class ConciliacaoResponse(BaseModel):
     extrato_sistema_id: uuid.UUID
     total: int
     match_exato: int
+    match_tolerancia: int
     duplicado: int
     sem_correspondencia: int
     tarifa_bancaria: int

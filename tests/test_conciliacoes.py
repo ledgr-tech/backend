@@ -5,6 +5,13 @@ por scripts/gerar_extratos_sinteticos.py --par, enviado via upload.
 O TestClient roda as BackgroundTasks antes de devolver a resposta (ver
 tests/test_extratos_upload_normalizacao.py), então os extratos enviados pelo
 upload já estão processados quando o teste continua.
+
+Também cobre a issue #27/ADR-010: o POST grava uma linha em
+`execucoes_conciliacao` e o response passa a trazer `match_tolerancia` — a
+correção do bug em que `total` (que já contava os pares por tolerância) não
+batia com a soma das categorias devolvidas quando `tolerancia_dias` > 0. O
+resto do histórico (GET /execucoes) tem testes próprios em
+tests/test_execucoes.py.
 """
 
 import hashlib
@@ -21,7 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, insert
 
 from app.core.database import SessionLocal, engine
-from app.models import Conciliacao, Configuracao, Extrato, Lancamento
+from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Extrato, Lancamento
 from app.services import matching
 from main import app
 from scripts.gerar_extratos_sinteticos import main as gerar_extratos
@@ -114,6 +121,7 @@ def test_post_feliz_grava_linhas_e_devolve_contagens(
         "extrato_sistema_id": str(sistema.id),
         "total": 6,
         "match_exato": 4,
+        "match_tolerancia": 0,
         "duplicado": 1,
         "sem_correspondencia": 1,
         "tarifa_bancaria": 0,
@@ -714,6 +722,90 @@ def test_post_com_tolerancia_2_grava_match_tolerancia_com_score_da_formula(
     assert linhas[0].lancamento_sistema_id == do_sistema.id
 
 
+def _execucoes(db_session, banco_id, sistema_id):
+    db_session.expire_all()
+    return (
+        db_session.query(ExecucaoConciliacao)
+        .filter_by(extrato_banco_id=banco_id, extrato_sistema_id=sistema_id)
+        .all()
+    )
+
+
+def test_post_grava_1_execucao_com_as_contagens_certas_e_response_traz_match_tolerancia(
+    db_session, criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_lancamentos(banco, [("10.00", "a"), ("20.00", "b"), ("150.00", "c"), ("150.00", "c")])
+    inserir_lancamentos(sistema, [("10.00", "a"), ("20.00", "b"), ("150.00", "c")])
+
+    response = _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    assert response.status_code == 201
+    corpo = response.json()
+    assert corpo["match_tolerancia"] == 0  # campo novo, sem Configuracao com tolerância
+    execucoes = _execucoes(db_session, banco.id, sistema.id)
+    assert len(execucoes) == 1
+    execucao = execucoes[0]
+    assert execucao.empresa_id == empresa.id
+    assert execucao.tolerancia_dias == 0
+    for campo in (
+        "total",
+        "match_exato",
+        "match_tolerancia",
+        "duplicado",
+        "sem_correspondencia",
+        "tarifa_bancaria",
+        "divergente_valor",
+        "divergente_data",
+    ):
+        assert getattr(execucao, campo) == corpo[campo]
+
+
+def test_post_com_tolerancia_e_par_por_tolerancia_total_bate_com_soma_das_7_categorias(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    """Regressão da issue #27/ADR-010: antes desta correção, `total` contava
+    os pares por tolerância mas o retorno do motor não incluía
+    `match_tolerancia`, então a soma das categorias devolvidas ficava menor
+    que `total` sempre que `tolerancia_dias` > 0 e havia pelo menos um par
+    casado por tolerância."""
+    empresa = criar_empresa()
+    db_session.add(Configuracao(empresa_id=empresa.id, tolerancia_dias_default=2))
+    db_session.commit()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    # 1 par por tolerância (data com 1 dia de diferença, dentro dos 2 de tolerância)
+    _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
+    _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 6))
+    # 1 tarifa bancária (só banco, descrição bate termo conhecido)
+    _lancamento_em(db_session, banco, "15.00", date(2026, 9, 7), "TARIFA PACOTE DE SERVICOS")
+    # 1 par de divergente_valor (mesma data dos dois lados, valor não bate)
+    _lancamento_em(db_session, banco, "30.00", date(2026, 9, 8), "Pagamento fornecedor")
+    _lancamento_em(db_session, sistema, "31.00", date(2026, 9, 8), "Pagamento fornecedor")
+
+    response = _post(auth_headers(empresa.id), banco.id, sistema.id)
+
+    assert response.status_code == 201
+    corpo = response.json()
+    categorias = (
+        "match_exato",
+        "match_tolerancia",
+        "duplicado",
+        "sem_correspondencia",
+        "tarifa_bancaria",
+        "divergente_valor",
+        "divergente_data",
+    )
+    assert corpo["total"] == sum(corpo[categoria] for categoria in categorias)
+    assert corpo["match_tolerancia"] == 1
+    assert corpo["total"] == 4
+
+    execucao = _execucoes(db_session, banco.id, sistema.id)[0]
+    assert execucao.total == sum(getattr(execucao, categoria) for categoria in categorias)
+
+
 def test_post_sem_configuracao_datas_diferentes_e_mesmo_valor_viram_divergente_data(
     db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
 ):
@@ -820,6 +912,7 @@ def test_post_cobre_as_5_categorias_de_divergencia(
         "extrato_sistema_id": str(sistema.id),
         "total": 7,
         "match_exato": 1,
+        "match_tolerancia": 0,
         "duplicado": 0,
         "sem_correspondencia": 1,
         "tarifa_bancaria": 1,
