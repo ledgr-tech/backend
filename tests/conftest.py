@@ -17,12 +17,14 @@ apontar pro Postgres compartilhado de desenvolvimento (Railway, ver .env);
 cada fábrica limpa só as linhas que ela mesma criou.
 """
 
+import hashlib
 import os
 import random
 import subprocess
 import sys
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import jwt
@@ -196,6 +198,59 @@ def criar_extrato(db_session, criar_empresa):
         return extrato
 
     return _criar
+
+
+@pytest.fixture
+def criar_extrato_da_empresa(db_session):
+    """Extrato com status/origem à escolha numa empresa já existente (ao
+    contrário de `criar_extrato` acima, que cria uma empresa nova a cada
+    chamada) — usado pelos testes de POST/GET/exportação de conciliações
+    (tests/test_conciliacoes.py, tests/test_conciliacoes_exportacao.py)."""
+
+    def _criar(empresa_id, origem: str, status: str = "concluido") -> Extrato:
+        extrato = Extrato(
+            empresa_id=empresa_id,
+            nome_arquivo="extrato.csv",
+            formato="csv",
+            tamanho_bytes=0,
+            origem=origem,
+            status=status,
+        )
+        db_session.add(extrato)
+        db_session.commit()
+        return extrato
+
+    return _criar
+
+
+@pytest.fixture
+def inserir_lancamentos(db_session):
+    """Lançamentos em lote, sempre na mesma data (2026-09-05) — usado pelos
+    mesmos testes que `criar_extrato_da_empresa` acima."""
+
+    def _inserir(extrato: Extrato, itens: list[tuple[str, str]]) -> list[Lancamento]:
+        """itens: (valor, descricao), sempre na mesma data. Cada item repetido
+        recebe a próxima ocorrência, como faz a normalização (ADR-006)."""
+        vistos: dict[tuple[str, str], int] = {}
+        criados = []
+        for valor, descricao in itens:
+            vistos[(valor, descricao)] = vistos.get((valor, descricao), 0) + 1
+            lancamento = Lancamento(
+                empresa_id=extrato.empresa_id,
+                extrato_id=extrato.id,
+                data=date(2026, 9, 5),
+                valor=Decimal(valor),
+                descricao=descricao,
+                tipo="credito" if Decimal(valor) > 0 else "debito",
+                hash_dedup=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+                ocorrencia=vistos[(valor, descricao)],
+            )
+            db_session.add(lancamento)
+            criados.append(lancamento)
+        db_session.commit()
+        return criados
+
+    return _inserir
 
 
 # Migrações: banco descartável no mesmo servidor, nunca o de desenvolvimento.

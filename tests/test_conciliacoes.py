@@ -35,53 +35,9 @@ from scripts.gerar_extratos_sinteticos import main as gerar_extratos
 
 client = TestClient(app)
 
-
-@pytest.fixture
-def criar_extrato_da_empresa(db_session):
-    """Extrato com status/origem à escolha numa empresa já existente (a
-    fábrica `criar_extrato` do conftest cria uma empresa nova a cada chamada)."""
-
-    def _criar(empresa_id, origem: str, status: str = "concluido") -> Extrato:
-        extrato = Extrato(
-            empresa_id=empresa_id,
-            nome_arquivo="extrato.csv",
-            formato="csv",
-            tamanho_bytes=0,
-            origem=origem,
-            status=status,
-        )
-        db_session.add(extrato)
-        db_session.commit()
-        return extrato
-
-    return _criar
-
-
-@pytest.fixture
-def inserir_lancamentos(db_session):
-    def _inserir(extrato: Extrato, itens: list[tuple[str, str]]) -> list[Lancamento]:
-        """itens: (valor, descricao), sempre na mesma data. Cada item repetido
-        recebe a próxima ocorrência, como faz a normalização (ADR-006)."""
-        vistos: dict[tuple[str, str], int] = {}
-        criados = []
-        for valor, descricao in itens:
-            vistos[(valor, descricao)] = vistos.get((valor, descricao), 0) + 1
-            lancamento = Lancamento(
-                empresa_id=extrato.empresa_id,
-                extrato_id=extrato.id,
-                data=date(2026, 9, 5),
-                valor=Decimal(valor),
-                descricao=descricao,
-                tipo="credito" if Decimal(valor) > 0 else "debito",
-                hash_dedup=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
-                ocorrencia=vistos[(valor, descricao)],
-            )
-            db_session.add(lancamento)
-            criados.append(lancamento)
-        db_session.commit()
-        return criados
-
-    return _inserir
+# `criar_extrato_da_empresa` e `inserir_lancamentos` moveram pra
+# tests/conftest.py (issue #26), pra tests/test_conciliacoes_exportacao.py
+# poder reusá-las sem duplicar código.
 
 
 def _post(headers, banco_id, sistema_id):
