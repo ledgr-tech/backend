@@ -2,17 +2,24 @@
 
 Sem SDK oficial: só `httpx`, que já é dependência do projeto — uma única
 chamada HTTP não justifica dependência nova. Sem retry automático: qualquer
-falha (timeout, erro de rede, status HTTP != 200 ou resposta inesperada)
-sempre levanta `ProvedorIAIndisponivel`, categorizada por motivo, pra quem
-chama decidir o fallback (PR B).
+falha (timeout, erro de rede/URL, status HTTP != 200 ou resposta
+inesperada) sempre levanta `ProvedorIAIndisponivel`, categorizada por
+motivo, pra quem chama decidir o fallback (PR B).
 
 Nunca loga prompt, resposta do modelo, descrição nem a chave — só provedor,
 modelo, código HTTP, duração em ms e contagem de tokens, em nível INFO,
 tanto em sucesso quanto em falha.
+
+Parsing defensivo (`_extrair_texto_e_tokens`): a API é de terceiro, então
+qualquer formato inesperado no corpo com status 200 — JSON que não é
+objeto, "choices"/"message"/"usage" com o tipo errado, "content" que não é
+string, contagem de tokens que não é inteiro — vira `resposta_invalida`,
+nunca `AttributeError`/`TypeError`/`KeyError` escapando pra quem chamou.
 """
 
 import logging
 import time
+from typing import Any
 
 import httpx
 
@@ -20,6 +27,52 @@ from app.services.ia.base import ContextoDivergencia, ProvedorIAIndisponivel, Re
 from app.services.ia.prompt import montar_mensagens
 
 logger = logging.getLogger(__name__)
+
+
+def _inteiro_ou_zero(valor: Any) -> int:
+    # bool é subclasse de int em Python; um `true`/`false` de JSON não conta
+    # como contagem de tokens válida.
+    if isinstance(valor, int) and not isinstance(valor, bool):
+        return valor
+    return 0
+
+
+def _extrair_texto_e_tokens(corpo_resposta: Any) -> tuple[str, int, int, str | None] | None:
+    """(texto, tokens_entrada, tokens_saida, modelo) a partir do corpo já
+    decodificado como JSON, ou `None` se o formato não é o esperado —
+    nunca levanta por causa do shape (ver docstring do módulo)."""
+    if not isinstance(corpo_resposta, dict):
+        return None
+
+    escolhas = corpo_resposta.get("choices")
+    if not isinstance(escolhas, list) or not escolhas:
+        return None
+
+    primeira = escolhas[0]
+    if not isinstance(primeira, dict) or primeira.get("finish_reason") == "length":
+        return None
+
+    mensagem = primeira.get("message")
+    if not isinstance(mensagem, dict):
+        return None
+
+    conteudo = mensagem.get("content")
+    if not isinstance(conteudo, str):
+        return None
+    texto = conteudo.strip()
+    if not texto:
+        return None
+
+    uso = corpo_resposta.get("usage")
+    if not isinstance(uso, dict):
+        uso = {}
+    tokens_entrada = _inteiro_ou_zero(uso.get("prompt_tokens", 0))
+    tokens_saida = _inteiro_ou_zero(uso.get("completion_tokens", 0))
+
+    modelo_bruto = corpo_resposta.get("model")
+    modelo = modelo_bruto if isinstance(modelo_bruto, str) and modelo_bruto else None
+
+    return texto, tokens_entrada, tokens_saida, modelo
 
 
 class ProvedorOpenAI:
@@ -76,7 +129,10 @@ class ProvedorOpenAI:
         except httpx.TimeoutException as exc:
             self._logar(status_http=None, duracao_ms=self._duracao_ms(inicio))
             raise ProvedorIAIndisponivel("timeout") from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # httpx.InvalidURL não é subclasse de HTTPError (levantada ao
+            # montar a URL, não ao enviar a requisição); UnsupportedProtocol
+            # já é HTTPError, listado aqui só por explicitude.
             self._logar(status_http=None, duracao_ms=self._duracao_ms(inicio))
             raise ProvedorIAIndisponivel("http") from exc
         finally:
@@ -95,25 +151,12 @@ class ProvedorOpenAI:
             self._logar(status_http=resposta.status_code, duracao_ms=duracao_ms)
             raise ProvedorIAIndisponivel("resposta_invalida") from exc
 
-        escolhas = corpo_resposta.get("choices") or []
-        if not escolhas:
+        resultado = _extrair_texto_e_tokens(corpo_resposta)
+        if resultado is None:
             self._logar(status_http=resposta.status_code, duracao_ms=duracao_ms)
             raise ProvedorIAIndisponivel("resposta_invalida")
-
-        primeira = escolhas[0]
-        if primeira.get("finish_reason") == "length":
-            self._logar(status_http=resposta.status_code, duracao_ms=duracao_ms)
-            raise ProvedorIAIndisponivel("resposta_invalida")
-
-        texto = ((primeira.get("message") or {}).get("content") or "").strip()
-        if not texto:
-            self._logar(status_http=resposta.status_code, duracao_ms=duracao_ms)
-            raise ProvedorIAIndisponivel("resposta_invalida")
-
-        uso = corpo_resposta.get("usage") or {}
-        tokens_entrada = uso.get("prompt_tokens", 0)
-        tokens_saida = uso.get("completion_tokens", 0)
-        modelo_resposta = corpo_resposta.get("model") or self._modelo
+        texto, tokens_entrada, tokens_saida, modelo_bruto = resultado
+        modelo_resposta = modelo_bruto or self._modelo
 
         self._logar(
             status_http=resposta.status_code,

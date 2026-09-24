@@ -249,6 +249,151 @@ def test_finish_reason_length_levanta_indisponivel_com_motivo_resposta_invalida(
     assert exc_info.value.motivo == "resposta_invalida"
 
 
+# parsing defensivo: qualquer shape inesperado com status 200 vira
+# resposta_invalida, nunca AttributeError/TypeError/KeyError
+
+
+@pytest.mark.parametrize(
+    "corpo_bruto",
+    [b"[1, 2, 3]", b'"apenas uma string"', b"42", b"null"],
+    ids=["lista", "string", "numero", "null"],
+)
+def test_corpo_json_que_nao_e_objeto_levanta_resposta_invalida(corpo_bruto):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=corpo_bruto)
+
+    provedor = _provedor(handler)
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "resposta_invalida"
+
+
+@pytest.mark.parametrize(
+    "choices",
+    ["nao e uma lista", {"tambem nao": "e lista"}, 42],
+    ids=["string", "dict", "numero"],
+)
+def test_choices_que_nao_e_lista_levanta_resposta_invalida(choices):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_resposta_sucesso(choices=choices))
+
+    provedor = _provedor(handler)
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "resposta_invalida"
+
+
+def test_choices_0_que_nao_e_objeto_levanta_resposta_invalida():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_resposta_sucesso(choices=["nao e um objeto"]))
+
+    provedor = _provedor(handler)
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "resposta_invalida"
+
+
+@pytest.mark.parametrize(
+    "mensagem", ["nao e objeto", 42, ["lista"]], ids=["string", "numero", "lista"]
+)
+def test_message_que_nao_e_objeto_levanta_resposta_invalida(mensagem):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_resposta_sucesso(choices=[{"message": mensagem, "finish_reason": "stop"}]),
+        )
+
+    provedor = _provedor(handler)
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "resposta_invalida"
+
+
+@pytest.mark.parametrize(
+    "conteudo", [42, ["lista"], {"dict": True}, None], ids=["numero", "lista", "dict", "null"]
+)
+def test_content_que_nao_e_string_levanta_resposta_invalida(conteudo):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_resposta_sucesso(
+                choices=[{"message": {"content": conteudo}, "finish_reason": "stop"}]
+            ),
+        )
+
+    provedor = _provedor(handler)
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "resposta_invalida"
+
+
+@pytest.mark.parametrize("usage", ["nao e objeto", [1, 2], 42], ids=["string", "lista", "numero"])
+def test_usage_que_nao_e_objeto_nao_quebra_e_zera_tokens(usage):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_resposta_sucesso(usage=usage))
+
+    provedor = _provedor(handler)
+    resposta = provedor.explicar_divergencia(_contexto())
+
+    assert resposta.tokens_entrada == 0
+    assert resposta.tokens_saida == 0
+
+
+@pytest.mark.parametrize(
+    "prompt_tokens,completion_tokens", [("700", "42"), (7.5, 4.2), (None, None), (True, False)]
+)
+def test_tokens_que_nao_sao_int_usam_zero_sem_levantar(prompt_tokens, completion_tokens):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_resposta_sucesso(
+                usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+            ),
+        )
+
+    provedor = _provedor(handler)
+    resposta = provedor.explicar_divergencia(_contexto())
+
+    assert resposta.tokens_entrada == 0
+    assert resposta.tokens_saida == 0
+
+
+def test_invalid_url_levanta_indisponivel_com_motivo_http():
+    # caractere não-imprimível na URL: httpx.InvalidURL, levantada ao montar
+    # a URL — não chega a chamar o transporte (mock não é sequer invocado).
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("não deveria chegar a fazer a requisição")
+
+    provedor = _provedor(handler, base_url="https://api.openai.com/v1/\x00bad")
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "http"
+    assert exc_info.value.status_http is None
+
+
+def test_unsupported_protocol_levanta_indisponivel_com_motivo_http():
+    # httpx.UnsupportedProtocol é levantada pelo próprio httpx.Client ao
+    # escolher o transporte, antes de qualquer I/O real — não precisa (e
+    # não pode) passar por httpx.MockTransport, então usa o cliente padrão
+    # (cliente_http=None) só pra este teste.
+    provedor = _provedor(
+        lambda request: httpx.Response(200),
+        base_url="ftp://exemplo-invalido.test",
+        cliente_http=None,
+    )
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        provedor.explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "http"
+    assert exc_info.value.status_http is None
+
+
 def test_sem_chave_levanta_nao_configurado_sem_requisicao():
     chamadas = []
 
