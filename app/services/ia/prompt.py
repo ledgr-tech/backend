@@ -18,7 +18,12 @@ VERSAO_PROMPT = "v1"
 # Texto fixo por status (ADR-011) — mesmos textos usados como fallback
 # determinístico pelo PR B quando o recurso está desligado ou o provedor
 # falha. Uma ou duas frases, factuais, sem números (os números só entram no
-# contexto enviado à IA, quando o recurso está ligado e responde).
+# contexto enviado à IA, quando o recurso está ligado e responde). Cada
+# texto descreve só o que app/services/matching.py de fato garante pra
+# aquele status — "tarifa_bancaria", por exemplo, não afirma ausência de
+# contrapartida no sistema, porque a prioridade fixa de
+# _classificar_remanescente pode classificar um item como tarifa mesmo
+# quando existe correspondência de data/valor do outro lado.
 _MOTIVOS_DETERMINISTICOS: dict[str, str] = {
     "duplicado": (
         "Este lançamento é um excedente: o grupo de mesmo valor e data já formou "
@@ -29,8 +34,7 @@ _MOTIVOS_DETERMINISTICOS: dict[str, str] = {
         "a mesma data que justifique associar este item a um par."
     ),
     "tarifa_bancaria": (
-        "A descrição deste lançamento do banco corresponde a um termo conhecido "
-        "de tarifa bancária, que normalmente não tem contrapartida no sistema."
+        "A descrição deste lançamento do banco corresponde a um termo conhecido de tarifa bancária."
     ),
     "divergente_valor": (
         "Existe um lançamento do outro lado na mesma data, mas o valor não "
