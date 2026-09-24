@@ -4,10 +4,15 @@ ADR-011).
 `obter_provedor` decide, a partir da configuração, se e qual provedor
 instanciar. Hoje só existe "openai" (GPT-6 Luna) — o Sabiazinho entra aqui
 numa issue própria, atrás da mesma interface `ProvedorDeIA`.
+
+Import de `settings` é preguiçoso, dentro de `obter_provedor` — importar
+este pacote (ou o script manual, scripts/testar_llm.py) não deve exigir
+`DATABASE_URL` nem `.env`, já que nada aqui toca banco. `Settings` só entra
+como tipo, sob `TYPE_CHECKING`, sem custo de import em tempo de execução.
 """
 
-from app.core.config import Settings
-from app.core.config import settings as _settings_padrao
+from typing import TYPE_CHECKING
+
 from app.services.ia.base import (
     CandidatoContexto,
     ContextoDivergencia,
@@ -17,6 +22,9 @@ from app.services.ia.base import (
     RespostaIA,
 )
 from app.services.ia.openai_provider import ProvedorOpenAI
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 __all__ = [
     "CandidatoContexto",
@@ -30,11 +38,15 @@ __all__ = [
 ]
 
 
-def obter_provedor(settings: Settings | None = None) -> ProvedorDeIA | None:
+def obter_provedor(settings: "Settings | None" = None) -> ProvedorDeIA | None:
     """Nenhum provedor (`None`) quando `llm_habilitado` é falso, a chave
     configurada está vazia, ou `llm_provedor` não é reconhecido — só
     "openai" existe hoje."""
-    config = settings if settings is not None else _settings_padrao
+    if settings is not None:
+        config = settings
+    else:
+        from app.core.config import settings as config  # import preguiçoso
+
     if not config.llm_habilitado:
         return None
     if config.llm_provedor != "openai":

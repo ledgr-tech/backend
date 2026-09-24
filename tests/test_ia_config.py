@@ -4,8 +4,15 @@ ambiente/`.env`, nunca conecta em nada; `obter_provedor` só decide qual
 implementação instanciar, sem chamar a API.
 """
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from app.core.config import Settings
 from app.services.ia import ProvedorOpenAI, obter_provedor
+
+RAIZ = Path(__file__).resolve().parent.parent
 
 _VARIAVEIS_LLM = (
     "LLM_HABILITADO",
@@ -88,3 +95,33 @@ def test_obter_provedor_instancia_quando_tudo_configurado(monkeypatch):
     provedor = obter_provedor(config)
 
     assert isinstance(provedor, ProvedorOpenAI)
+
+
+# import preguiçoso de settings (issue #28): importar app.services.ia não
+# pode exigir DATABASE_URL nem .env, já que nada nesse pacote toca banco —
+# só obter_provedor(), quando de fato chamado sem settings explícito, lê a
+# configuração (import lazy dentro da função).
+
+
+def test_importar_camada_de_ia_nao_exige_database_url_nem_env(tmp_path):
+    """Roda num subprocesso, com cwd num diretório sem `.env` e sem
+    `DATABASE_URL` no ambiente, pra garantir que nada em
+    app.services.ia.{base,openai_provider,prompt} importa app.core.config
+    no nível do módulo."""
+    ambiente_limpo = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(RAIZ)}
+    codigo = (
+        "import app.services.ia.base\n"
+        "import app.services.ia.openai_provider\n"
+        "import app.services.ia.prompt\n"
+    )
+    resultado = subprocess.run(
+        [sys.executable, "-c", codigo],
+        cwd=tmp_path,
+        env=ambiente_limpo,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert resultado.returncode == 0, resultado.stderr
