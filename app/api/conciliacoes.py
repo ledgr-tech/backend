@@ -28,6 +28,14 @@ saem numa única query com outer join nos dois lançamentos, sempre filtrando po
 ou a do sistema quando não há do banco), valor e id da conciliação. `valor` e
 `score_confianca` são Decimal e vão como string no JSON, pra o cliente não
 tratar dinheiro como float.
+
+`GET /conciliacoes/{extrato_id}/exportar` (issue #26): exporta em CSV (Excel
+BR — formato em app/services/exportacao.py) o mesmo recorte da listagem
+acima, sem paginação (exporta todas as linhas do filtro). Reusa a validação
+do extrato (`_validar_extrato_banco`) e a montagem da query
+(`_construir_consulta_itens`) da listagem — mesmas validações, mesmos
+códigos, mesmos filtros e mesma ordenação; o que muda é que a exportação não
+pagina e devolve CSV em vez de JSON.
 """
 
 import uuid
@@ -35,15 +43,16 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi import status as http_status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.auth import obter_empresa_id_autenticada
 from app.core.database import get_db
 from app.models import Conciliacao, Extrato, Lancamento
+from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.matching import conciliar_extratos
 
 router = APIRouter(prefix="/conciliacoes", tags=["conciliacoes"])
@@ -170,23 +179,33 @@ def _lancamento_ou_none(linha, prefixo: str) -> LancamentoResponse | None:
     )
 
 
-@router.get("/{extrato_id}", response_model=ConciliacaoListaResponse)
-def listar_conciliacoes(
-    extrato_id: uuid.UUID,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
-    db: Annotated[Session, Depends(get_db)],
-    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    status: StatusConciliacao | None = None,
-    extrato_sistema_id: uuid.UUID | None = None,
-) -> ConciliacaoListaResponse:
+def _validar_extrato_banco(db: Session, extrato_id: uuid.UUID, empresa_id: uuid.UUID) -> Extrato:
+    """Extrato do banco validado (issue #20, reusado pela exportação da
+    issue #26): existe, é da empresa do token (404 igual pros dois casos,
+    sem confirmar a existência do ID de outra empresa) e tem origem
+    diferente de "sistema" (422)."""
     extrato = _obter_extrato_da_empresa(db, extrato_id, empresa_id)
     if extrato.origem == "sistema":
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="A consulta deve usar o extrato do banco, não o do sistema.",
         )
+    return extrato
 
+
+def _construir_consulta_itens(
+    empresa_id: uuid.UUID,
+    extrato_id: uuid.UUID,
+    status: StatusConciliacao | None,
+    extrato_sistema_id: uuid.UUID | None,
+) -> tuple[Select, list]:
+    """Query compartilhada entre a listagem (issue #20) e a exportação CSV
+    (issue #26): mesmos filtros (sempre por `empresa_id` e
+    `extrato_banco_id`, ADR-004), os mesmos dois outer joins nos lançamentos
+    e a mesma ordenação estável (data do lançamento, valor, id da
+    conciliação) — sem `limit`/`offset`, que cada endpoint aplica (ou não)
+    do seu jeito. Devolve a `Select` e a lista de filtros, essa última
+    reusada pelo `count()` da listagem."""
     filtros = [
         Conciliacao.empresa_id == empresa_id,
         Conciliacao.extrato_banco_id == extrato_id,
@@ -225,10 +244,25 @@ def listar_conciliacoes(
             func.coalesce(lanc_banco.valor, lanc_sistema.valor),
             Conciliacao.id,
         )
-        .limit(limit)
-        .offset(offset)
     )
-    linhas = db.execute(consulta).all()
+    return consulta, filtros
+
+
+@router.get("/{extrato_id}", response_model=ConciliacaoListaResponse)
+def listar_conciliacoes(
+    extrato_id: uuid.UUID,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status: StatusConciliacao | None = None,
+    extrato_sistema_id: uuid.UUID | None = None,
+) -> ConciliacaoListaResponse:
+    _validar_extrato_banco(db, extrato_id, empresa_id)
+    consulta, filtros = _construir_consulta_itens(
+        empresa_id, extrato_id, status, extrato_sistema_id
+    )
+    linhas = db.execute(consulta.limit(limit).offset(offset)).all()
     total = db.scalar(select(func.count()).select_from(Conciliacao).where(*filtros))
 
     itens = [
@@ -245,4 +279,47 @@ def listar_conciliacoes(
     ]
     return ConciliacaoListaResponse(
         extrato_id=extrato_id, total=total, limit=limit, offset=offset, itens=itens
+    )
+
+
+@router.get("/{extrato_id}/exportar")
+def exportar_conciliacoes(
+    extrato_id: uuid.UUID,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    db: Annotated[Session, Depends(get_db)],
+    status: StatusConciliacao | None = None,
+    extrato_sistema_id: uuid.UUID | None = None,
+) -> Response:
+    """Exportação CSV do relatório de conciliação (issue #26): mesmo recorte
+    de `listar_conciliacoes` (mesma validação, mesmos filtros, mesma
+    ordenação — ver `_validar_extrato_banco`/`_construir_consulta_itens`),
+    sem paginação. Formatação e neutralização de injeção de fórmula em
+    app/services/exportacao.py."""
+    _validar_extrato_banco(db, extrato_id, empresa_id)
+    consulta, _ = _construir_consulta_itens(empresa_id, extrato_id, status, extrato_sistema_id)
+    linhas = db.execute(consulta).all()
+
+    linhas_exportacao = [
+        LinhaExportacao(
+            status=linha.status,
+            regra_aplicada=linha.regra_aplicada,
+            score_confianca=linha.score_confianca,
+            banco_data=linha.banco_data,
+            banco_valor=linha.banco_valor,
+            banco_descricao=linha.banco_descricao,
+            sistema_data=linha.sistema_data,
+            sistema_valor=linha.sistema_valor,
+            sistema_descricao=linha.sistema_descricao,
+        )
+        for linha in linhas
+    ]
+    conteudo = gerar_csv_conciliacoes(linhas_exportacao)
+
+    return Response(
+        content=conteudo,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="conciliacao-{str(extrato_id)[:8]}.csv"',
+            "Cache-Control": "no-store",
+        },
     )
