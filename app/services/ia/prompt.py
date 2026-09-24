@@ -79,7 +79,14 @@ def serializar_contexto(contexto: ContextoDivergencia) -> str:
     casas, data em ISO. Único caminho do dado até o prompt (e até o hash da
     chave de cache do PR B) — a máscara é aplicada aqui, em toda descrição,
     tanto do lançamento quanto de cada candidato, na ordem em que os
-    candidatos foram recebidos (nunca reordenados)."""
+    candidatos foram recebidos (nunca reordenados).
+
+    `<` e `>` saem escapados como `\\u003c`/`\\u003e` — o JSON continua
+    válido e equivalente (`json.loads` decodifica de volta pra `<`/`>` sem
+    diferença nenhuma pra quem lê o dado), mas nenhuma descrição consegue
+    conter o delimitador `<dados>`/`</dados>` literal que `montar_mensagens`
+    usa pra envolver este texto. Determinístico: a mesma entrada sempre
+    produz a mesma string, inclusive pro hash da chave de cache do PR B."""
     corpo = {
         "status": contexto.status,
         "motivo": contexto.motivo,
@@ -88,7 +95,8 @@ def serializar_contexto(contexto: ContextoDivergencia) -> str:
         "quantidade_mesmo_lado": contexto.quantidade_mesmo_lado,
         "quantidade_outro_lado": contexto.quantidade_outro_lado,
     }
-    return json.dumps(corpo, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    texto = json.dumps(corpo, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return texto.replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 _INSTRUCAO_SISTEMA = (
