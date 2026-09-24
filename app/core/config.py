@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     llm_timeout_segundos: float = 20.0
     llm_max_tokens_saida: int = 300
+    llm_limite_diario_empresa: int = 50
+    llm_limite_diario_global: int = 300
 
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.
