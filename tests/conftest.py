@@ -41,6 +41,7 @@ from app.models import (
     Configuracao,
     Empresa,
     ExecucaoConciliacao,
+    ExplicacaoDivergencia,
     Extrato,
     Lancamento,
     LinhaInvalida,
@@ -169,10 +170,12 @@ def criar_empresa(db_session):
             db_session.query(Extrato).filter(Extrato.id.in_(extrato_ids)).delete(
                 synchronize_session=False
             )
-        # Configuracao é 1:1 com Empresa (não passa por Extrato) — apagar
-        # antes da Empresa, senão a FK configuracoes_empresa_id_fkey barra o
-        # delete (issue #22 foi o primeiro teste a gravar Configuracao aqui).
+        # Configuracao e ExplicacaoDivergencia são FK direta de Empresa (não
+        # passam por Extrato) — apagar antes da Empresa, senão a FK barra o
+        # delete (issue #22 foi o primeiro teste a gravar Configuracao aqui;
+        # issue #28/ADR-011 acrescenta o cache de explicações).
         db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
+        db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
         db_session.query(Empresa).filter_by(id=empresa_id).delete()
     db_session.commit()
 
