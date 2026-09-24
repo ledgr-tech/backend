@@ -110,7 +110,7 @@ from rapidfuzz import fuzz
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
-from app.models import Conciliacao, Configuracao, Lancamento
+from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Lancamento
 from app.services.normalizacao import _normalizar_descricao
 
 STATUS_MATCH_EXATO = "match_exato"
@@ -473,14 +473,21 @@ def conciliar_extratos(
 
     Idempotente (ADR-007): apaga as conciliações anteriores do par
     (empresa_id, extrato_banco_id, extrato_sistema_id) e grava as novas na
-    mesma transação, em insert em lote. Devolve as contagens por status.
-    Quem chama valida empresa, origem e status dos extratos antes.
+    mesma transação, em insert em lote. Devolve as contagens por status
+    (incluindo `match_tolerancia`, issue #27 — ver comentário no cálculo de
+    `contagens` abaixo). Quem chama valida empresa, origem e status dos
+    extratos antes.
 
     Concorrência: a transação começa adquirindo `pg_advisory_xact_lock` com
     uma chave derivada do par, então duas execuções simultâneas do mesmo par
     se enfileiram (a segunda espera a primeira dar commit e depois apaga e
     regrava) em vez de duplicar linhas. O lock solta sozinho no commit ou
     rollback; pares diferentes não se bloqueiam.
+
+    Histórico (issue #27, ADR-010): grava também uma linha em
+    `execucoes_conciliacao`, na mesma transação/lock — ao contrário de
+    `conciliacoes`, essa tabela é só de inserção e nunca é apagada, então o
+    histórico sobrevive a reconciliações futuras do mesmo par.
     """
     try:
         db.execute(
@@ -524,6 +531,24 @@ def conciliar_extratos(
         resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
         resultados += classificar_divergencias(banco_sem_par, sistema_sem_par)
 
+        # Contagens calculadas uma única vez (issue #27, ADR-010): antes, o
+        # retorno do motor não incluía match_tolerancia, então a soma das
+        # categorias devolvidas ficava menor que `total` sempre que
+        # tolerancia_dias > 0. O mesmo dict grava `execucoes_conciliacao` e
+        # volta pro response de `POST /conciliacoes`, pra nunca mais divergir.
+        contagens = {
+            "total": len(resultados),
+            STATUS_MATCH_EXATO: sum(r.status == STATUS_MATCH_EXATO for r in resultados),
+            STATUS_MATCH_TOLERANCIA: sum(r.status == STATUS_MATCH_TOLERANCIA for r in resultados),
+            STATUS_DUPLICADO: sum(r.status == STATUS_DUPLICADO for r in resultados),
+            STATUS_SEM_CORRESPONDENCIA: sum(
+                r.status == STATUS_SEM_CORRESPONDENCIA for r in resultados
+            ),
+            STATUS_TARIFA_BANCARIA: sum(r.status == STATUS_TARIFA_BANCARIA for r in resultados),
+            STATUS_DIVERGENTE_VALOR: sum(r.status == STATUS_DIVERGENTE_VALOR for r in resultados),
+            STATUS_DIVERGENTE_DATA: sum(r.status == STATUS_DIVERGENTE_DATA for r in resultados),
+        }
+
         db.execute(
             delete(Conciliacao).where(
                 Conciliacao.empresa_id == empresa_id,
@@ -553,17 +578,26 @@ def conciliar_extratos(
                     for resultado in resultados
                 ],
             )
+
+        # Histórico da execução (issue #27, ADR-010): uma linha por chamada
+        # bem-sucedida, na mesma transação/lock do motor, nunca editada nem
+        # apagada depois — ao contrário de `conciliacoes`, que é idempotente.
+        db.execute(
+            insert(ExecucaoConciliacao.__table__),
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "empresa_id": empresa_id,
+                    "extrato_banco_id": extrato_banco_id,
+                    "extrato_sistema_id": extrato_sistema_id,
+                    "tolerancia_dias": tolerancia_dias or 0,
+                    **contagens,
+                }
+            ],
+        )
         db.commit()
     except Exception:
         db.rollback()
         raise
 
-    return {
-        "total": len(resultados),
-        STATUS_MATCH_EXATO: sum(r.status == STATUS_MATCH_EXATO for r in resultados),
-        STATUS_DUPLICADO: sum(r.status == STATUS_DUPLICADO for r in resultados),
-        STATUS_SEM_CORRESPONDENCIA: sum(r.status == STATUS_SEM_CORRESPONDENCIA for r in resultados),
-        STATUS_TARIFA_BANCARIA: sum(r.status == STATUS_TARIFA_BANCARIA for r in resultados),
-        STATUS_DIVERGENTE_VALOR: sum(r.status == STATUS_DIVERGENTE_VALOR for r in resultados),
-        STATUS_DIVERGENTE_DATA: sum(r.status == STATUS_DIVERGENTE_DATA for r in resultados),
-    }
+    return contagens
