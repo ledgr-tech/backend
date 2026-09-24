@@ -36,6 +36,16 @@ e a transação é encerrada (`db.rollback()`, já que só leu) antes de
 `provedor.explicar_divergencia(...)`; só depois disso abre outra pro
 INSERT do passo (i).
 
+Consequência importante: `rollback()`/`commit()` expiram os objetos ORM
+carregados na sessão, então qualquer acesso a atributo deles DEPOIS disso
+dispara um SELECT novo por id — e `POST /conciliacoes` apaga e reescreve
+as linhas do par a cada rodada (ADR-007), então a linha pode não existir
+mais se o par for reconciliado durante a chamada ao provedor. Por isso
+`status_conciliacao` (e, no cache hit, o texto do cache) são copiados pra
+variável local logo após a leitura, antes do primeiro `rollback()` — nada
+mais no corpo da função lê atributo de `conciliacao`/`cache_existente`
+depois disso.
+
 O provedor entra por dependência do FastAPI (`obter_provedor_dependencia`)
 pra testes substituírem por um provedor falso via
 `app.dependency_overrides`, sem chamar a API real.
@@ -115,6 +125,16 @@ def criar_explicacao(
             detail="Conciliação não encontrada.",
         )
 
+    # Captura tudo que o resto da função precisa da linha, antes de
+    # qualquer rollback/commit — a sessão expira os objetos por padrão em
+    # ambos, e um acesso a atributo depois disso dispara um SELECT novo por
+    # id. Como POST /conciliacoes apaga e reescreve as linhas do par a cada
+    # rodada, se o par for reconciliado durante a chamada ao provedor essa
+    # linha pode não existir mais, e o refresh levantaria
+    # `ObjectDeletedError` (500) depois da explicação já ter sido gerada
+    # (e paga). Daqui em diante, nada mais lê atributo de `conciliacao`.
+    status_conciliacao = conciliacao.status
+
     try:
         contexto = montar_contexto_divergencia(db, conciliacao)
     except ValueError as exc:
@@ -127,7 +147,7 @@ def criar_explicacao(
         db.rollback()
         return ExplicacaoResponse(
             conciliacao_id=corpo.conciliacao_id,
-            status=conciliacao.status,
+            status=status_conciliacao,
             explicacao=contexto.motivo,
             gerada_por_ia=False,
             em_cache=False,
@@ -143,11 +163,12 @@ def criar_explicacao(
         )
     ).scalar_one_or_none()
     if cache_existente is not None:
+        texto_cache = cache_existente.texto  # antes do rollback, mesmo motivo do comentário acima
         db.rollback()
         return ExplicacaoResponse(
             conciliacao_id=corpo.conciliacao_id,
-            status=conciliacao.status,
-            explicacao=cache_existente.texto,
+            status=status_conciliacao,
+            explicacao=texto_cache,
             gerada_por_ia=True,
             em_cache=True,
             indisponibilidade=None,
@@ -174,7 +195,7 @@ def criar_explicacao(
         db.rollback()
         return ExplicacaoResponse(
             conciliacao_id=corpo.conciliacao_id,
-            status=conciliacao.status,
+            status=status_conciliacao,
             explicacao=contexto.motivo,
             gerada_por_ia=False,
             em_cache=False,
@@ -195,7 +216,7 @@ def criar_explicacao(
         logger.info("explicacoes motivo=%s status_http=%s", exc.motivo, exc.status_http)
         return ExplicacaoResponse(
             conciliacao_id=corpo.conciliacao_id,
-            status=conciliacao.status,
+            status=status_conciliacao,
             explicacao=contexto.motivo,
             gerada_por_ia=False,
             em_cache=False,
@@ -205,7 +226,7 @@ def criar_explicacao(
         logger.info("explicacoes erro_inesperado classe=%s", type(exc).__name__)
         return ExplicacaoResponse(
             conciliacao_id=corpo.conciliacao_id,
-            status=conciliacao.status,
+            status=status_conciliacao,
             explicacao=contexto.motivo,
             gerada_por_ia=False,
             em_cache=False,
@@ -219,7 +240,7 @@ def criar_explicacao(
                 id=uuid.uuid4(),
                 empresa_id=empresa_id,
                 chave=chave,
-                status=conciliacao.status,
+                status=status_conciliacao,
                 provedor=settings.llm_provedor,
                 modelo=settings.openai_modelo,
                 versao_prompt=VERSAO_PROMPT,
@@ -236,7 +257,7 @@ def criar_explicacao(
 
     return ExplicacaoResponse(
         conciliacao_id=corpo.conciliacao_id,
-        status=conciliacao.status,
+        status=status_conciliacao,
         explicacao=resposta_ia.texto,
         gerada_por_ia=True,
         em_cache=False,

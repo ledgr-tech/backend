@@ -18,6 +18,7 @@ from test_ia_contexto import _conciliacao
 from app.api import explicacoes as explicacoes_module
 from app.api.explicacoes import obter_provedor_dependencia
 from app.core.config import settings
+from app.core.database import SessionLocal
 from app.core.database import engine as app_engine
 from app.models import Conciliacao, ExplicacaoDivergencia
 from app.services.ia import cache as cache_module
@@ -71,6 +72,33 @@ class ProvedorFalso:
             tokens_saida=self.tokens_saida,
             modelo="gpt-6-luna-falso",
         )
+
+
+class ProvedorQueApagaConciliacaoDurante:
+    """Regressão: apaga a linha de `conciliacoes` numa sessão/conexão
+    SEPARADA e comita, de dentro de `explicar_divergencia` — simula uma
+    reconciliação concorrente (`POST /conciliacoes` apaga e reescreve as
+    linhas do par a cada rodada, ADR-007) acontecendo durante a chamada ao
+    provedor. O endpoint não pode 500 nem perder a explicação já gerada."""
+
+    def __init__(self, conciliacao_id: uuid.UUID, texto: str | None = None, excecao=None):
+        self.conciliacao_id = conciliacao_id
+        self.texto = texto or "Explicação gerada mesmo com a linha já apagada."
+        self.excecao = excecao
+        self.chamadas: list[tuple] = []
+
+    def explicar_divergencia(self, contexto, *, identificador_anonimo=None):
+        self.chamadas.append((contexto, identificador_anonimo))
+        sessao_separada = SessionLocal()
+        try:
+            sessao_separada.query(Conciliacao).filter_by(id=self.conciliacao_id).delete()
+            sessao_separada.commit()
+        finally:
+            sessao_separada.close()
+
+        if self.excecao is not None:
+            raise self.excecao
+        return RespostaIA(texto=self.texto, tokens_entrada=11, tokens_saida=22, modelo="m")
 
 
 @pytest.fixture
@@ -576,6 +604,56 @@ def test_linha_de_conciliacoes_nao_muda(db_session, cenario, provedor_falso):
     recarregada = db_session.get(Conciliacao, linha.id)
     assert recarregada.status == status_antes
     assert recarregada.lancamento_banco_id == banco_id_antes
+
+
+# regressão: linha de conciliacoes apagada por reconciliação concorrente
+# durante a chamada ao provedor (não pode 500)
+
+
+def test_conciliacao_apagada_durante_chamada_ao_provedor_sucesso_nao_da_500(db_session, cenario):
+    _empresa, linha, headers = cenario
+    linha_id = linha.id
+    status_original = linha.status
+    db_session.rollback()  # materializa os atributos acima antes de soltar a sessão de setup
+
+    fake = ProvedorQueApagaConciliacaoDurante(
+        linha_id, texto="Explicação gerada com a linha já apagada (sucesso)."
+    )
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    try:
+        resposta = _explicar(headers, linha_id)
+    finally:
+        app.dependency_overrides.pop(obter_provedor_dependencia, None)
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["gerada_por_ia"] is True
+    assert corpo["em_cache"] is False
+    assert corpo["indisponibilidade"] is None
+    assert corpo["explicacao"] == fake.texto
+    assert corpo["status"] == status_original
+    assert len(fake.chamadas) == 1
+
+
+def test_conciliacao_apagada_durante_chamada_ao_provedor_falha_nao_da_500(db_session, cenario):
+    _empresa, linha, headers = cenario
+    linha_id = linha.id
+    status_original = linha.status
+    db_session.rollback()
+
+    fake = ProvedorQueApagaConciliacaoDurante(linha_id, excecao=ProvedorIAIndisponivel("timeout"))
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    try:
+        resposta = _explicar(headers, linha_id)
+    finally:
+        app.dependency_overrides.pop(obter_provedor_dependencia, None)
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["indisponibilidade"] == "erro_provedor"
+    assert corpo["gerada_por_ia"] is False
+    assert corpo["em_cache"] is False
+    assert corpo["status"] == status_original
 
 
 def test_logs_nunca_contem_descricao_texto_ou_chave(
