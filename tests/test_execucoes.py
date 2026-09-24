@@ -9,7 +9,7 @@ tests/test_conciliacoes.py, junto dos outros testes do POST.
 
 import hashlib
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -197,6 +197,20 @@ def test_percentual_acerto_no_json_e_null_quando_total_zero(
     assert item["contagens"]["total"] == 0
     assert item["nome_arquivo_banco"] == banco.nome_arquivo
     assert item["nome_arquivo_sistema"] == sistema.nome_arquivo
+
+
+def test_executada_em_sai_em_utc_explicito(criar_empresa, criar_extrato_da_empresa, auth_headers):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    assert _post_conciliacao(auth_headers, empresa.id, banco.id, sistema.id).status_code == 201
+
+    executada_em_str = _get(auth_headers(empresa.id)).json()["itens"][0]["executada_em"]
+
+    assert executada_em_str.endswith(("Z", "+00:00"))
+    executada_em = datetime.fromisoformat(executada_em_str)
+    assert executada_em.tzinfo is not None
+    assert abs(datetime.now(UTC) - executada_em) < timedelta(seconds=10)
 
 
 def test_reconciliar_o_mesmo_par_gera_2_execucoes_e_atual_so_na_mais_recente(

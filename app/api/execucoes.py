@@ -16,12 +16,19 @@ drill-down (`GET /conciliacoes/{extrato_id}`) de uma execução antiga mostra
 o estado atual do par, não o daquela rodada, e este campo sinaliza isso pro
 frontend. Os nomes de arquivo vêm de join com `extratos`.
 
+`executada_em` sai em UTC explícito (sufixo `Z`/`+00:00` no JSON): a coluna
+`criado_em` é `TIMESTAMP` sem timezone e o `now()` do Postgres está em UTC
+(confirmado com `SHOW timezone`), mas sem o sufixo o navegador do frontend
+interpretaria a string como horário local, adiantando/atrasando a hora
+mostrada. `linha.criado_em` vem "naive" do driver; marcamos `tzinfo=UTC`
+explicitamente antes de devolver, sem tocar no schema do banco.
+
 Nunca loga descrição, valor nem nome de arquivo (mesma regra de
 app/services/matching.py).
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
 
@@ -142,7 +149,7 @@ def listar_execucoes(
             extrato_sistema_id=linha.extrato_sistema_id,
             nome_arquivo_banco=linha.nome_arquivo_banco,
             nome_arquivo_sistema=linha.nome_arquivo_sistema,
-            executada_em=linha.criado_em,
+            executada_em=linha.criado_em.replace(tzinfo=UTC),
             tolerancia_dias=linha.tolerancia_dias,
             contagens=ContagensResponse(
                 **{categoria: getattr(linha, categoria) for categoria in CATEGORIAS_CONTAGEM}
