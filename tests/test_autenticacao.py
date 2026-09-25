@@ -107,3 +107,27 @@ def test_upload_acima_de_10_por_minuto_retorna_429_na_11a(auth_headers):
 
     assert codigos[:10] == [400] * 10
     assert codigos[10] == 429
+
+
+def _upload_pelo_proxy(headers, x_forwarded_for):
+    return _upload({**headers, "X-Forwarded-For": x_forwarded_for}, nome="extrato.pdf")
+
+
+def test_rate_limit_separa_clientes_pelo_ip_anotado_pelo_proxy(auth_headers):
+    headers = auth_headers(EMPRESA_ID)
+    for _ in range(10):
+        _upload_pelo_proxy(headers, "203.0.113.10")
+
+    assert _upload_pelo_proxy(headers, "203.0.113.10").status_code == 429
+    assert _upload_pelo_proxy(headers, "203.0.113.20").status_code == 400
+
+
+def test_rate_limit_ignora_ip_forjado_pelo_cliente_no_x_forwarded_for(auth_headers):
+    headers = auth_headers(EMPRESA_ID)
+
+    # O cliente inventa o primeiro IP a cada envio; o proxy anota o real no fim.
+    codigos = [
+        _upload_pelo_proxy(headers, f"10.0.0.{i}, 203.0.113.10").status_code for i in range(11)
+    ]
+
+    assert codigos[10] == 429
