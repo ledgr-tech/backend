@@ -4,7 +4,8 @@ httpx
 sqlalchemy>=2.0
 alembic
 psycopg[binary]
-passlib[bcrypt]
+bcrypt>=4
+email-validator
 python-dotenv
 pydantic-settings
 python-multipart

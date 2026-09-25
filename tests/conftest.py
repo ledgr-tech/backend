@@ -33,6 +33,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from app.core.cnpj import digito_verificador
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
@@ -124,9 +125,15 @@ def db_session(postgres_disponivel):
 
 
 def _gerar_cnpj() -> str:
-    # CNPJ de teste: 14 dígitos aleatórios, sem validação de dígito
-    # verificador (o schema só exige VARCHAR(14) — ver app/models/empresa.py).
-    return str(random.randint(10**13, 10**14 - 1))
+    """CNPJ fictício com dígitos verificadores válidos (passa no /register)."""
+    base = f"{random.randint(0, 10**8 - 1):08d}0001"
+    base += digito_verificador(base)
+    return base + digito_verificador(base)
+
+
+@pytest.fixture
+def gerar_cnpj():
+    return _gerar_cnpj
 
 
 @pytest.fixture
