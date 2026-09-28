@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import status as http_status
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -26,14 +26,26 @@ router = APIRouter(tags=["autenticacao"])
 TAMANHO_MINIMO_SENHA = 8
 
 
-def _normalizar_email(email: str) -> str:
+def normalizar_email(email: str) -> str:
     return email.strip().lower()
+
+
+def _senha_cabe_no_bcrypt(valor: str) -> str:
+    if len(valor.encode()) > senha.TAMANHO_MAXIMO_BYTES:
+        raise ValueError(f"não pode passar de {senha.TAMANHO_MAXIMO_BYTES} bytes")
+    return valor
+
+
+# Regra de senha nova, a mesma no cadastro e na redefinição (issue #66).
+SenhaNova = Annotated[
+    str, Field(min_length=TAMANHO_MINIMO_SENHA), AfterValidator(_senha_cabe_no_bcrypt)
+]
 
 
 class CadastroRequest(BaseModel):
     nome: str = Field(min_length=1)
     email: EmailStr
-    senha: str = Field(min_length=TAMANHO_MINIMO_SENHA)
+    senha: SenhaNova
     razao_social: str = Field(min_length=1)
     cnpj: str
 
@@ -43,13 +55,6 @@ class CadastroRequest(BaseModel):
         valor = valor.strip()
         if not valor:
             raise ValueError("não pode ser vazio")
-        return valor
-
-    @field_validator("senha")
-    @classmethod
-    def _senha_cabe_no_bcrypt(cls, valor: str) -> str:
-        if len(valor.encode()) > senha.TAMANHO_MAXIMO_BYTES:
-            raise ValueError(f"não pode passar de {senha.TAMANHO_MAXIMO_BYTES} bytes")
         return valor
 
     @field_validator("cnpj")
@@ -88,7 +93,7 @@ def cadastrar(
     dados: CadastroRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> UsuarioResponse:
-    email = _normalizar_email(dados.email)
+    email = normalizar_email(dados.email)
     if db.scalar(select(Usuario.id).where(Usuario.email == email)):
         raise _conflito("E-mail já cadastrado.")
     if db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj)):
@@ -121,7 +126,7 @@ def login(
     dados: LoginRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> UsuarioResponse:
-    usuario = db.scalar(select(Usuario).where(Usuario.email == _normalizar_email(dados.email)))
+    usuario = db.scalar(select(Usuario).where(Usuario.email == normalizar_email(dados.email)))
     senha_hash = usuario.senha_hash if usuario else None
 
     if not senha.verificar(dados.senha, senha_hash):
