@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     llm_limite_diario_empresa: int = 50
     llm_limite_diario_global: int = 300
 
+    # E-mail transacional (issue #66, ADR-012): link de recuperação de senha
+    # e de aprovação da troca de e-mail, pelo Resend. Desligado por padrão,
+    # como a IA — ligar em produção depende de domínio verificado (SPF,
+    # DKIM, DMARC) e do DPA do provedor (#37). A ausência destas variáveis
+    # não bloqueia o boot nem os testes. `frontend_url` é a base dos links:
+    # vazio deixa o envio indisponível, pra nunca mandar link quebrado.
+    email_habilitado: bool = False
+    email_provedor: str = "resend"
+    resend_api_key: str = ""
+    resend_base_url: str = "https://api.resend.com"
+    email_remetente: str = ""
+    email_responder_para: str = ""
+    email_timeout_segundos: float = 10.0
+    frontend_url: str = ""
+
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.
 

@@ -33,6 +33,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from app.core import senha
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
@@ -46,10 +47,14 @@ from app.models import (
     Extrato,
     Lancamento,
     LinhaInvalida,
+    Usuario,
 )
+from app.services.email import MensagemEmail
 
 RAIZ = Path(__file__).resolve().parent.parent
 SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
+SENHA_USUARIO_TESTE = "senha-atual-123"
+FRONTEND_URL_TESTE = "https://app.ledgr.com.br"
 
 
 @pytest.fixture(autouse=True)
@@ -70,10 +75,13 @@ def gerar_token():
         empresa_id: uuid.UUID | str | None,
         secret: str = SECRET_TESTE,
         expira_em: timedelta = timedelta(days=7),
+        usuario_id: uuid.UUID | str | None = None,
     ) -> str:
         agora = datetime.now(UTC)
         claims = {
-            "sub": str(uuid.uuid4()),
+            # `sub` aleatório basta pras rotas que só leem `empresa_id`; as
+            # rotas por usuário (issue #66) precisam do id de um usuário real.
+            "sub": str(usuario_id or uuid.uuid4()),
             "email": "usuario@teste.com",
             "iat": agora,
             "exp": agora + expira_em,
@@ -184,6 +192,63 @@ def criar_empresa(db_session):
         db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
         db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
         db_session.query(Empresa).filter_by(id=empresa_id).delete()
+    db_session.commit()
+
+
+class ProvedorEmailFalso:
+    """Guarda as mensagens em vez de chamar o Resend (issue #66). Com
+    `falha`, levanta essa exceção em todo envio."""
+
+    def __init__(self, falha: Exception | None = None) -> None:
+        self.enviadas: list[MensagemEmail] = []
+        self._falha = falha
+
+    def enviar(self, mensagem: MensagemEmail) -> None:
+        if self._falha is not None:
+            raise self._falha
+        self.enviadas.append(mensagem)
+
+
+@pytest.fixture
+def provedor(monkeypatch):
+    """Troca o provedor de e-mail das rotas por um `ProvedorEmailFalso` e
+    fixa `FRONTEND_URL`, que o envio exige."""
+    from app.api.senha import obter_provedor_email_dependencia
+    from main import app
+
+    falso = ProvedorEmailFalso()
+    app.dependency_overrides[obter_provedor_email_dependencia] = lambda: falso
+    monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
+    yield falso
+    app.dependency_overrides.pop(obter_provedor_email_dependencia, None)
+
+
+@pytest.fixture
+def criar_usuario(db_session, criar_empresa):
+    """Usuário real no banco, numa empresa nova, com a senha
+    `SENHA_USUARIO_TESTE` (ou sem senha, como conta do Google). Apaga só os
+    que criou, antes da limpeza de `criar_empresa` (os tokens de
+    `tokens_email` caem junto, pelo ON DELETE CASCADE)."""
+    criados: list[uuid.UUID] = []
+
+    def _criar(com_senha: bool = True) -> Usuario:
+        empresa = criar_empresa()
+        usuario = Usuario(
+            empresa_id=empresa.id,
+            nome="Maria Financeiro",
+            email=f"{uuid.uuid4().hex[:12]}@teste.com",
+            senha_hash=senha.gerar_hash(SENHA_USUARIO_TESTE) if com_senha else None,
+            google_sub=None if com_senha else f"google-{uuid.uuid4().hex}",
+        )
+        db_session.add(usuario)
+        db_session.commit()
+        criados.append(usuario.id)
+        return usuario
+
+    yield _criar
+
+    db_session.rollback()
+    db_session.query(Usuario).filter(Usuario.id.in_(criados)).delete(synchronize_session=False)
     db_session.commit()
 
 

@@ -12,6 +12,7 @@ from app.models.explicacao_divergencia import ExplicacaoDivergencia
 from app.models.extrato import Extrato
 from app.models.lancamento import Lancamento
 from app.models.linha_invalida import LinhaInvalida
+from app.models.token_email import TokenEmail
 from app.models.usuario import Usuario
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "Extrato",
     "Lancamento",
     "LinhaInvalida",
+    "TokenEmail",
     "Usuario",
 ]
