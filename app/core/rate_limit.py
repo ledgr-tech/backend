@@ -26,6 +26,9 @@ LIMITE_REDEFINICAO_SENHA = "10/minute"
 # pra testar senhas com um token roubado. Por usuário, não por IP: o IP que
 # chega é o da Vercel, o mesmo pra todos.
 LIMITE_TROCA_SENHA_POR_USUARIO = "5/minute"
+# GET /me (issue #81): só leitura, sem risco de força bruta, mas o front
+# consulta a cada carregamento de tela — limite bem mais alto que o da troca.
+LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 
 
 def chave_por_usuario(request: Request) -> str:
