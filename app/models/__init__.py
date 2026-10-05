@@ -6,6 +6,7 @@ Sempre que um model novo for criado, importar aqui também.
 from app.models.base import Base
 from app.models.conciliacao import Conciliacao
 from app.models.configuracao import Configuracao
+from app.models.decisao_linha import DecisaoLinha
 from app.models.empresa import Empresa
 from app.models.execucao_conciliacao import ExecucaoConciliacao
 from app.models.explicacao_divergencia import ExplicacaoDivergencia
@@ -19,6 +20,7 @@ __all__ = [
     "Base",
     "Conciliacao",
     "Configuracao",
+    "DecisaoLinha",
     "Empresa",
     "ExecucaoConciliacao",
     "ExplicacaoDivergencia",
