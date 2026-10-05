@@ -37,6 +37,17 @@ docstrings de app/parsers/ofx.py e app/parsers/csv.py) continua setando
 status="erro" sem registrar `linhas_invalidas` — não há detalhe por linha
 nesse caso, o arquivo inteiro nem chegou a ser parseado.
 
+Período do extrato (issue #82): `periodo_inicio`/`periodo_fim` são a menor e
+a maior `data` entre `resultado.lancamentos`, gravados na mesma transação
+do status final e de `quantidade_lancamentos` — nunca um commit separado.
+Vale pros dois lados, banco e sistema (quem lê só o do banco é
+`app/api/execucoes.py` e `app/api/extratos.py`). Sem nenhum lançamento
+válido (zero `resultado.lancamentos`, com ou sem erro estrutural), o
+período fica `NULL`, e também fica `NULL` enquanto o extrato está
+"pendente" ou "processando" — as colunas só são escritas aqui, no fim do
+fluxo. Reprocessar o mesmo arquivo dá o mesmo período, porque o cálculo é
+determinístico a partir do mesmo `resultado.lancamentos`.
+
 O try/except amplo no nível mais alto da função existe porque uma exceção
 não tratada numa BackgroundTask do FastAPI é só logada pelo servidor e
 nunca chega no cliente (a resposta HTTP já foi enviada) — sem ele, um erro
@@ -198,6 +209,18 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             # as linhas_invalidas acima são persistidas de qualquer forma.
             extrato.status = "erro"
         extrato.quantidade_lancamentos = len(resultado.lancamentos)
+        # Período (issue #82): menor e maior data dos lançamentos válidos,
+        # gravado na mesma transação do status final. Vale pros dois lados
+        # (banco e sistema) — só o lado do banco é lido depois, por
+        # GET /execucoes e GET /extratos/{id}. Sem lançamento válido, fica
+        # NULL (ver CHECK ck_extratos_periodo_consistente).
+        if resultado.lancamentos:
+            datas = [lancamento.data for lancamento in resultado.lancamentos]
+            extrato.periodo_inicio = min(datas)
+            extrato.periodo_fim = max(datas)
+        else:
+            extrato.periodo_inicio = None
+            extrato.periodo_fim = None
         db.commit()
     except Exception:
         # Amplo de propósito — ver docstring do módulo: garante que o
