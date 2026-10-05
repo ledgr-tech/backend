@@ -31,8 +31,13 @@ def upgrade() -> None:
         sa.Column("autor_nome", sa.String(), nullable=False),
         sa.Column("rodada", sa.Integer(), nullable=False),
         sa.Column("extrato_sistema_id", sa.UUID(), nullable=False),
+        # clock_timestamp(), não now(): now() é a hora de início da transação,
+        # e a ordem dos eventos precisa ser a do INSERT, feito depois do lock.
         sa.Column(
-            "em", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "em",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("clock_timestamp()"),
+            nullable=False,
         ),
         sa.CheckConstraint(
             "tipo IN ('conferida', 'conferencia_desfeita', 'justificada', "

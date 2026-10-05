@@ -27,7 +27,9 @@ class DecisaoLinha(Base):
     decisão foi tomada, para auditoria.
 
     Não usa o `TimestampMixin`: `em` é `timestamptz` (o mixin grava
-    `DateTime` sem fuso), porque o front lê a hora com fuso.
+    `DateTime` sem fuso), porque o front lê a hora com fuso. O default é
+    `clock_timestamp()`, a hora real do INSERT, porque a decisão em vigor
+    depende da ordem por `em`.
     """
 
     __tablename__ = "decisoes_linha"
@@ -70,6 +72,9 @@ class DecisaoLinha(Base):
     extrato_sistema_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("extratos.id"), nullable=False
     )
+    # clock_timestamp(), não now(): now() é a hora de início da transação, e o
+    # POST só pega o advisory lock depois de outras consultas. A ordem de "em"
+    # precisa ser a do INSERT, que acontece depois do lock.
     em: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
+        DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )

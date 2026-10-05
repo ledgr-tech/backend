@@ -115,3 +115,20 @@ def test_checks_recusam_evento_invalido(banco_migrado, campos):
     engine, ids = banco_migrado
     with pytest.raises(IntegrityError):
         _inserir(engine, ids, **campos)
+
+
+def test_em_e_a_hora_do_insert_e_cresce_dentro_da_mesma_transacao(banco_migrado):
+    # Com now() os dois "em" seriam iguais (hora de início da transação).
+    engine, ids = banco_migrado
+    inserir = text(
+        "INSERT INTO decisoes_linha (id, empresa_id, extrato_banco_id, chave, tipo, "
+        "texto, usuario_id, autor_nome, rodada, extrato_sistema_id) VALUES "
+        "(gen_random_uuid(), :e, :b, 'mesma', :tipo, NULL, :u, 'Maria', 1, :s) "
+        "RETURNING em"
+    )
+    params = {"e": ids["empresa"], "b": ids["banco"], "u": ids["usuario"], "s": ids["sistema"]}
+    with engine.begin() as conn:
+        primeiro = conn.execute(inserir, {**params, "tipo": "conferida"}).scalar_one()
+        segundo = conn.execute(inserir, {**params, "tipo": "conferencia_desfeita"}).scalar_one()
+
+    assert segundo > primeiro
