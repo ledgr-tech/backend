@@ -103,7 +103,7 @@ def carregar_eventos(
         .where(
             DecisaoLinha.empresa_id == empresa_id,
             DecisaoLinha.extrato_banco_id == extrato_banco_id,
-            DecisaoLinha.chave.in_(chaves),
+            DecisaoLinha.chave.in_(sorted(chaves)),
         )
         .order_by(DecisaoLinha.em, DecisaoLinha.id)
     ).all()
@@ -168,7 +168,7 @@ def contar_justificadas(
         .where(
             Conciliacao.empresa_id == empresa_id,
             tuple_(Conciliacao.extrato_banco_id, Conciliacao.extrato_sistema_id).in_(list(pares)),
-            Conciliacao.status.not_in(STATUS_RESOLVIDOS),
+            Conciliacao.status.not_in(sorted(STATUS_RESOLVIDOS)),
         )
     ).all()
     chaves_por_par: dict[tuple[uuid.UUID, uuid.UUID], list[str]] = defaultdict(list)
@@ -191,8 +191,8 @@ def contar_justificadas(
         select(DecisaoLinha)
         .where(
             DecisaoLinha.empresa_id == empresa_id,
-            DecisaoLinha.extrato_banco_id.in_(bancos),
-            DecisaoLinha.chave.in_(chaves),
+            DecisaoLinha.extrato_banco_id.in_(list(bancos)),
+            DecisaoLinha.chave.in_(sorted(chaves)),
         )
         .order_by(DecisaoLinha.em, DecisaoLinha.id)
     ).all()
