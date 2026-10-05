@@ -36,24 +36,45 @@ do extrato (`_validar_extrato_banco`) e a montagem da query
 (`_construir_consulta_itens`) da listagem — mesmas validações, mesmos
 códigos, mesmos filtros e mesma ordenação; o que muda é que a exportação não
 pagina e devolve CSV em vez de JSON.
+
+Decisões por linha (issue #83, regras em app/services/decisoes.py): cada
+item da listagem traz `chave` (identifica a linha em todas as rodadas),
+`decisao` (a decisão em vigor ou `null`, SEMPRE presente — o front liga a
+caixa de conferir e o "Justificar" pela presença dela) e `eventos` (o
+histórico completo da chave, em ordem cronológica, `[]` quando não há).
+Os eventos da página saem de UMA consulta, qualquer que seja o tamanho da
+página. A decisão é por `(empresa_id, extrato_banco_id, chave)`, então vale
+para a mesma linha em qualquer rodada; sem `extrato_sistema_id` na query e
+com várias rodadas, a mesma chave aparece uma vez por par, com a mesma
+decisão (o front sempre filtra por par). A exportação CSV não traz decisões.
+
+`POST /conciliacoes/{extrato_id}/decisoes` grava um evento (conferir,
+justificar ou desfazer) na rodada mais recente do extrato do banco e devolve
+a decisão em vigor depois dele. Autentica o usuário (`sub` do token), que vira
+o autor. Segura o mesmo `pg_advisory_xact_lock` de `conciliar_extratos` para
+o par, para não decidir sobre uma linha enquanto uma rodada nova a substitui.
+Erros de regra saem como 422 com `detail` em texto, porque o front só mostra
+o motivo quando `detail` é string. Nunca loga o texto da justificativa nem a
+descrição de lançamento.
 """
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi import status as http_status
 from pydantic import BaseModel
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session, aliased
 
-from app.core.auth import obter_empresa_id_autenticada
+from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
 from app.core.database import get_db
-from app.models import Conciliacao, Extrato, Lancamento
+from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento, Usuario
+from app.services import decisoes
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
-from app.services.matching import conciliar_extratos
+from app.services.matching import _chave_lock_do_par, conciliar_extratos
 
 router = APIRouter(prefix="/conciliacoes", tags=["conciliacoes"])
 
@@ -148,6 +169,20 @@ class LancamentoResponse(BaseModel):
     tipo: str
 
 
+class DecisaoResponse(BaseModel):
+    tipo: str
+    texto: str | None
+    autor: str
+    em: datetime
+    rodada: int
+
+
+def _decisao_response(evento: DecisaoLinha | None) -> DecisaoResponse | None:
+    if evento is None:
+        return None
+    return DecisaoResponse(**vars(decisoes.como_evento(evento)))
+
+
 class ItemConciliacaoResponse(BaseModel):
     id: uuid.UUID
     extrato_sistema_id: uuid.UUID
@@ -156,6 +191,9 @@ class ItemConciliacaoResponse(BaseModel):
     score_confianca: Decimal | None
     lancamento_banco: LancamentoResponse | None
     lancamento_sistema: LancamentoResponse | None
+    chave: str
+    decisao: DecisaoResponse | None
+    eventos: list[DecisaoResponse]
 
 
 class ConciliacaoListaResponse(BaseModel):
@@ -176,6 +214,16 @@ def _lancamento_ou_none(linha, prefixo: str) -> LancamentoResponse | None:
         valor=getattr(linha, f"{prefixo}_valor"),
         descricao=getattr(linha, f"{prefixo}_descricao"),
         tipo=getattr(linha, f"{prefixo}_tipo"),
+    )
+
+
+def _chave(linha) -> str:
+    return decisoes.chave_da_linha(
+        linha.banco_id,
+        linha.sistema_valor,
+        linha.sistema_data,
+        linha.sistema_descricao,
+        linha.sistema_ocorrencia,
     )
 
 
@@ -234,6 +282,7 @@ def _construir_consulta_itens(
             lanc_sistema.valor.label("sistema_valor"),
             lanc_sistema.descricao.label("sistema_descricao"),
             lanc_sistema.tipo.label("sistema_tipo"),
+            lanc_sistema.ocorrencia.label("sistema_ocorrencia"),
         )
         .select_from(Conciliacao)
         .outerjoin(lanc_banco, Conciliacao.lancamento_banco_id == lanc_banco.id)
@@ -265,18 +314,26 @@ def listar_conciliacoes(
     linhas = db.execute(consulta.limit(limit).offset(offset)).all()
     total = db.scalar(select(func.count()).select_from(Conciliacao).where(*filtros))
 
-    itens = [
-        ItemConciliacaoResponse(
-            id=linha.id,
-            extrato_sistema_id=linha.extrato_sistema_id,
-            status=linha.status,
-            regra_aplicada=linha.regra_aplicada,
-            score_confianca=linha.score_confianca,
-            lancamento_banco=_lancamento_ou_none(linha, "banco"),
-            lancamento_sistema=_lancamento_ou_none(linha, "sistema"),
+    chaves = [_chave(linha) for linha in linhas]
+    eventos_por_chave = decisoes.carregar_eventos(db, empresa_id, extrato_id, set(chaves))
+
+    itens = []
+    for linha, chave in zip(linhas, chaves, strict=True):
+        eventos = eventos_por_chave.get(chave, [])
+        itens.append(
+            ItemConciliacaoResponse(
+                id=linha.id,
+                extrato_sistema_id=linha.extrato_sistema_id,
+                status=linha.status,
+                regra_aplicada=linha.regra_aplicada,
+                score_confianca=linha.score_confianca,
+                lancamento_banco=_lancamento_ou_none(linha, "banco"),
+                lancamento_sistema=_lancamento_ou_none(linha, "sistema"),
+                chave=chave,
+                decisao=_decisao_response(decisoes.decisao_vigente(eventos)),
+                eventos=[_decisao_response(evento) for evento in eventos],
+            )
         )
-        for linha in linhas
-    ]
     return ConciliacaoListaResponse(
         extrato_id=extrato_id, total=total, limit=limit, offset=offset, itens=itens
     )
@@ -323,3 +380,108 @@ def exportar_conciliacoes(
             "Cache-Control": "no-store",
         },
     )
+
+
+TAMANHO_MAXIMO_JUSTIFICATIVA = 1000
+
+TipoDecisao = Literal["conferida", "conferencia_desfeita", "justificada", "justificativa_desfeita"]
+
+
+class DecisaoRequest(BaseModel):
+    chave: str
+    tipo: TipoDecisao
+    texto: str | None = None
+
+
+def _regra_violada(detalhe: str) -> HTTPException:
+    return HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detalhe)
+
+
+def _linha_da_chave(
+    db: Session,
+    empresa_id: uuid.UUID,
+    extrato_banco_id: uuid.UUID,
+    extrato_sistema_id: uuid.UUID,
+    chave: str,
+):
+    """A linha do par com essa chave, ou `None`. Chave em formato de UUID só
+    pode ser de linha com lançamento do banco, então filtra por ele; senão,
+    calcula a chave das linhas só do sistema do par."""
+    consulta, _ = _construir_consulta_itens(empresa_id, extrato_banco_id, None, extrato_sistema_id)
+    try:
+        lancamento_banco_id = uuid.UUID(chave)
+    except ValueError:
+        consulta = consulta.where(Conciliacao.lancamento_banco_id.is_(None))
+    else:
+        if str(lancamento_banco_id) != chave:
+            return None
+        consulta = consulta.where(Conciliacao.lancamento_banco_id == lancamento_banco_id)
+    return next((linha for linha in db.execute(consulta) if _chave(linha) == chave), None)
+
+
+@router.post("/{extrato_id}/decisoes", response_model=DecisaoResponse | None)
+def registrar_decisao(
+    extrato_id: uuid.UUID,
+    corpo: DecisaoRequest,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+) -> DecisaoResponse | None:
+    empresa_id = usuario.empresa_id
+    _validar_extrato_banco(db, extrato_id, empresa_id)
+
+    rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_id)
+    if rodada is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Este extrato ainda não foi conciliado.",
+        )
+
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:chave)"),
+        {"chave": _chave_lock_do_par(empresa_id, extrato_id, rodada.extrato_sistema_id)},
+    )
+
+    linha = _linha_da_chave(db, empresa_id, extrato_id, rodada.extrato_sistema_id, corpo.chave)
+    if linha is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Esta linha não está mais nesta conciliação.",
+        )
+    if not decisoes.diverge(linha.status):
+        raise _regra_violada("Só é possível decidir sobre uma linha que diverge.")
+
+    texto = None
+    if corpo.tipo == "justificada":
+        texto = (corpo.texto or "").strip()
+        if not texto:
+            raise _regra_violada("A justificativa precisa de um texto.")
+        if len(texto) > TAMANHO_MAXIMO_JUSTIFICATIVA:
+            raise _regra_violada(
+                f"A justificativa pode ter até {TAMANHO_MAXIMO_JUSTIFICATIVA} caracteres."
+            )
+    elif corpo.tipo in decisoes.TIPOS_DESFAZER:
+        eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
+        vigente = decisoes.decisao_vigente(eventos.get(corpo.chave, []))
+        if vigente is None or vigente.tipo != decisoes.TIPOS_DESFAZER[corpo.tipo]:
+            if corpo.tipo == "conferencia_desfeita":
+                raise _regra_violada("Não há conferência para desfazer nesta linha.")
+            raise _regra_violada("Não há justificativa para desfazer nesta linha.")
+
+    evento = DecisaoLinha(
+        empresa_id=empresa_id,
+        extrato_banco_id=extrato_id,
+        chave=corpo.chave,
+        tipo=corpo.tipo,
+        texto=texto,
+        usuario_id=usuario.id,
+        autor_nome=usuario.nome,
+        rodada=rodada.numero,
+        extrato_sistema_id=rodada.extrato_sistema_id,
+    )
+    db.add(evento)
+    db.commit()
+
+    if corpo.tipo in decisoes.TIPOS_DESFAZER:
+        return None
+    db.refresh(evento)
+    return _decisao_response(evento)

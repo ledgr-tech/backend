@@ -41,6 +41,17 @@ a maior data dos lançamentos daquele extrato, gravadas por
 extrato do banco não tem período (ainda pendente/processando, ou sem
 lançamento válido).
 
+`contagens.justificadas` (issue #83): nas execuções com `atual: true`, o
+número de linhas DIVERGENTES do par em `conciliacoes` cuja decisão em vigor é
+`justificada` — de qualquer rodada, porque a justificativa sobrevive à
+rodada nova (regras em app/services/decisoes.py). Nas execuções com
+`atual: false` é 0 (decisão de 05/10): `conciliacoes` só tem a última rodada
+de cada par, então não há como saber o que estava justificado naquela época.
+Fica FORA de `total`, que continua a soma das sete categorias (não é coluna,
+o CHECK da tabela não muda). Custo: duas consultas a mais por página, não
+por item — as linhas divergentes dos pares atuais da página e os eventos dos
+extratos do banco envolvidos (`contar_justificadas`).
+
 Nunca loga descrição, valor nem nome de arquivo (mesma regra de
 app/services/matching.py).
 """
@@ -59,6 +70,7 @@ from sqlalchemy.orm import Session, aliased
 from app.core.auth import obter_empresa_id_autenticada
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
+from app.services.decisoes import contar_justificadas
 from app.services.execucoes import calcular_percentual_acerto
 
 router = APIRouter(prefix="/execucoes", tags=["execucoes"])
@@ -84,6 +96,7 @@ class ContagensResponse(BaseModel):
     tarifa_bancaria: int
     divergente_valor: int
     divergente_data: int
+    justificadas: int
 
 
 class ItemExecucaoResponse(BaseModel):
@@ -177,6 +190,11 @@ def listar_execucoes(
     )
     linhas = db.execute(consulta).all()
     total = db.scalar(select(func.count()).select_from(ExecucaoConciliacao).where(*filtros))
+    justificadas = contar_justificadas(
+        db,
+        empresa_id,
+        {(linha.extrato_banco_id, linha.extrato_sistema_id) for linha in linhas if linha.rn == 1},
+    )
 
     itens = [
         ItemExecucaoResponse(
@@ -188,7 +206,12 @@ def listar_execucoes(
             executada_em=linha.criado_em.replace(tzinfo=UTC),
             tolerancia_dias=linha.tolerancia_dias,
             contagens=ContagensResponse(
-                **{categoria: getattr(linha, categoria) for categoria in CATEGORIAS_CONTAGEM}
+                **{categoria: getattr(linha, categoria) for categoria in CATEGORIAS_CONTAGEM},
+                justificadas=(
+                    justificadas.get((linha.extrato_banco_id, linha.extrato_sistema_id), 0)
+                    if linha.rn == 1
+                    else 0
+                ),
             ),
             percentual_acerto=calcular_percentual_acerto(
                 linha.match_exato, linha.match_tolerancia, linha.total

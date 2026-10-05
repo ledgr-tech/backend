@@ -466,3 +466,66 @@ def test_check_total_diferente_da_soma_das_categorias_levanta_integrity_error(
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()  # limpa a sessão pra teardown do criar_empresa funcionar
+
+
+# contagens.justificadas (issue #83)
+
+
+def test_justificadas_conta_so_divergentes_justificadas_e_zero_nas_nao_atuais(
+    db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancamentos, gerar_token
+):
+    usuario = criar_usuario()
+    headers = {"Authorization": f"Bearer {gerar_token(usuario.empresa_id, usuario_id=usuario.id)}"}
+    banco = criar_extrato_da_empresa(usuario.empresa_id, "banco")
+    sistema = criar_extrato_da_empresa(usuario.empresa_id, "sistema")
+    inserir_lancamentos(banco, [("10.00", "a"), ("20.00", "b"), ("30.00", "c")], date(2026, 9, 5))
+    inserir_lancamentos(sistema, [("10.00", "a")], date(2026, 9, 5))
+
+    def conciliar():
+        resposta = client.post(
+            "/conciliacoes",
+            headers=headers,
+            json={"extrato_banco_id": str(banco.id), "extrato_sistema_id": str(sistema.id)},
+        )
+        assert resposta.status_code == 201
+
+    def decidir(valor, tipo, texto=None):
+        itens = client.get(
+            f"/conciliacoes/{banco.id}",
+            headers=headers,
+            params={"extrato_sistema_id": str(sistema.id)},
+        ).json()["itens"]
+        chave = next(
+            item["chave"]
+            for item in itens
+            if item["lancamento_banco"] and item["lancamento_banco"]["valor"] == valor
+        )
+        resposta = client.post(
+            f"/conciliacoes/{banco.id}/decisoes",
+            headers=headers,
+            json={"chave": chave, "tipo": tipo, "texto": texto},
+        )
+        assert resposta.status_code == 200
+
+    def itens_execucoes():
+        return _get(headers, extrato_banco_id=str(banco.id)).json()["itens"]
+
+    conciliar()
+    decidir("20.00", "justificada", "motivo")
+    decidir("30.00", "conferida")  # conferida não conta
+
+    (item,) = itens_execucoes()
+    contagens = item["contagens"]
+    assert contagens["justificadas"] == 1
+    assert contagens["total"] == 3
+    assert contagens["total"] == sum(
+        valor for chave, valor in contagens.items() if chave not in ("total", "justificadas")
+    )
+
+    conciliar()  # a execução anterior deixa de ser atual
+    atual, anterior = itens_execucoes()
+    assert atual["atual"] is True and atual["contagens"]["justificadas"] == 1
+    assert anterior["atual"] is False and anterior["contagens"]["justificadas"] == 0
+
+    decidir("20.00", "justificativa_desfeita")
+    assert itens_execucoes()[0]["contagens"]["justificadas"] == 0
