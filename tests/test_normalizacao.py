@@ -307,6 +307,82 @@ def test_normalizar_extrato_com_linhas_identicas_reprocessado_nao_duplica_nem_pe
     assert db_session.get(Extrato, extrato.id).status == "concluido"
 
 
+# Período do extrato (issue #82)
+
+
+def test_normalizar_extrato_grava_periodo_igual_ao_menor_e_maior_data(db_session, criar_extrato):
+    extrato = criar_extrato("csv")
+    conteudo = (FIXTURES_DIR / "extrato_valido.csv").read_bytes()
+
+    normalizar_extrato(extrato.id, "csv", conteudo)
+
+    db_session.expire_all()
+    extrato_atualizado = db_session.get(Extrato, extrato.id)
+    assert extrato_atualizado.periodo_inicio == date(2026, 9, 5)
+    assert extrato_atualizado.periodo_fim == date(2026, 9, 7)
+
+
+def test_normalizar_extrato_origem_sistema_tambem_recebe_periodo(db_session, criar_extrato):
+    extrato = criar_extrato("ofx", origem="sistema")
+    conteudo = (FIXTURES_DIR / "extrato_valido.ofx").read_bytes()
+
+    normalizar_extrato(extrato.id, "ofx", conteudo)
+
+    db_session.expire_all()
+    extrato_atualizado = db_session.get(Extrato, extrato.id)
+    assert extrato_atualizado.periodo_inicio == date(2026, 9, 5)
+    assert extrato_atualizado.periodo_fim == date(2026, 9, 6)
+
+
+def test_normalizar_extrato_sem_lancamento_valido_deixa_periodo_null(db_session, criar_extrato):
+    extrato = criar_extrato("csv")
+    conteudo = (
+        b"data,valor,descricao\n"
+        b"NAO_E_DATA,100.00,Linha ruim 1\n"
+        b"2026-09-06,NAO_E_NUMERO,Linha ruim 2\n"
+    )
+
+    normalizar_extrato(extrato.id, "csv", conteudo)
+
+    db_session.expire_all()
+    extrato_atualizado = db_session.get(Extrato, extrato.id)
+    assert extrato_atualizado.status == "erro"
+    assert extrato_atualizado.periodo_inicio is None
+    assert extrato_atualizado.periodo_fim is None
+
+
+def test_normalizar_extrato_corrompido_deixa_periodo_null(db_session, criar_extrato):
+    extrato = criar_extrato("csv")
+
+    normalizar_extrato(extrato.id, "csv", b"isso claramente nao eh um csv de extrato valido")
+
+    db_session.expire_all()
+    extrato_atualizado = db_session.get(Extrato, extrato.id)
+    assert extrato_atualizado.periodo_inicio is None
+    assert extrato_atualizado.periodo_fim is None
+
+
+def test_normalizar_extrato_reprocessado_mantem_o_mesmo_periodo(db_session, criar_extrato):
+    extrato = criar_extrato("csv")
+    conteudo = (FIXTURES_DIR / "extrato_valido.csv").read_bytes()
+
+    normalizar_extrato(extrato.id, "csv", conteudo)
+    db_session.expire_all()
+    periodo_1 = (
+        db_session.get(Extrato, extrato.id).periodo_inicio,
+        db_session.get(Extrato, extrato.id).periodo_fim,
+    )
+
+    normalizar_extrato(extrato.id, "csv", conteudo)  # reprocessa o mesmo extrato
+    db_session.expire_all()
+    periodo_2 = (
+        db_session.get(Extrato, extrato.id).periodo_inicio,
+        db_session.get(Extrato, extrato.id).periodo_fim,
+    )
+
+    assert periodo_1 == periodo_2 == (date(2026, 9, 5), date(2026, 9, 7))
+
+
 def test_normalizar_extrato_com_volume_emite_um_insert_por_bloco_e_nao_um_por_linha(
     db_session, criar_extrato
 ):

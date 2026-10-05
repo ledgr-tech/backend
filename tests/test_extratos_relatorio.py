@@ -82,3 +82,75 @@ def test_get_extrato_inexistente_retorna_404(db_session, auth_headers):
     response = client.get(f"/extratos/{uuid.uuid4()}", headers=auth_headers(uuid.uuid4()))
 
     assert response.status_code == 404
+
+
+# Período do extrato (issue #82)
+
+
+def test_get_extrato_devolve_periodo_da_menor_e_maior_data(db_session, criar_empresa, auth_headers):
+    empresa = criar_empresa()
+    extrato = Extrato(
+        empresa_id=empresa.id,
+        nome_arquivo="extrato.csv",
+        formato="csv",
+        tamanho_bytes=0,
+        origem="banco",
+        status="pendente",
+    )
+    db_session.add(extrato)
+    db_session.commit()
+
+    conteudo = b"data,valor,descricao\n2026-09-07,300.00,Ultimo\n2026-09-05,1500.00,Primeiro\n"
+    normalizar_extrato(extrato.id, "csv", conteudo)
+
+    response = client.get(f"/extratos/{extrato.id}", headers=auth_headers(empresa.id))
+
+    assert response.status_code == 200
+    corpo = response.json()
+    assert corpo["periodo_inicio"] == "2026-09-05"
+    assert corpo["periodo_fim"] == "2026-09-07"
+
+
+def test_get_extrato_sem_lancamento_valido_devolve_periodo_null(
+    db_session, criar_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    extrato = Extrato(
+        empresa_id=empresa.id,
+        nome_arquivo="extrato.csv",
+        formato="csv",
+        tamanho_bytes=0,
+        origem="banco",
+        status="pendente",
+    )
+    db_session.add(extrato)
+    db_session.commit()
+
+    normalizar_extrato(extrato.id, "csv", b"isso nao eh um csv valido")
+
+    response = client.get(f"/extratos/{extrato.id}", headers=auth_headers(empresa.id))
+
+    assert response.status_code == 200
+    corpo = response.json()
+    assert corpo["status"] == "erro"
+    assert corpo["periodo_inicio"] is None
+    assert corpo["periodo_fim"] is None
+
+
+def test_get_extrato_de_outra_empresa_continua_404(db_session, criar_empresa, auth_headers):
+    empresa = criar_empresa()
+    outra_empresa = criar_empresa()
+    extrato = Extrato(
+        empresa_id=empresa.id,
+        nome_arquivo="extrato.csv",
+        formato="csv",
+        tamanho_bytes=0,
+        origem="banco",
+        status="pendente",
+    )
+    db_session.add(extrato)
+    db_session.commit()
+
+    response = client.get(f"/extratos/{extrato.id}", headers=auth_headers(outra_empresa.id))
+
+    assert response.status_code == 404
