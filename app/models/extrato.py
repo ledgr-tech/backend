@@ -1,6 +1,7 @@
 import uuid
+from datetime import date
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, Date, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +22,14 @@ class Extrato(Base, TimestampMixin):
     bancário) ou 'sistema' (exportação do sistema de gestão). É obrigatória
     no upload e sem default no model nem no banco (issue #17); o motor de
     matching (ADR-006) usa pra saber qual extrato é de qual lado.
+
+    `periodo_inicio`/`periodo_fim` (issue #82) são a menor e a maior data dos
+    lançamentos válidos deste extrato, gravadas por
+    `app/services/normalizacao.py` na mesma transação do status final.
+    Ficam `NULL` enquanto o extrato está "pendente" ou "processando", e
+    continuam `NULL` se o processamento não gerou nenhum lançamento válido
+    (status "erro"). O CHECK garante que os dois vêm juntos (ou nenhum) e que
+    `periodo_inicio` nunca é depois de `periodo_fim`.
     """
 
     __tablename__ = "extratos"
@@ -31,6 +40,12 @@ class Extrato(Base, TimestampMixin):
             name="ck_extratos_status_valido",
         ),
         CheckConstraint("origem IN ('banco', 'sistema')", name="ck_extratos_origem_valida"),
+        CheckConstraint(
+            "(periodo_inicio IS NULL AND periodo_fim IS NULL) "
+            "OR (periodo_inicio IS NOT NULL AND periodo_fim IS NOT NULL "
+            "AND periodo_inicio <= periodo_fim)",
+            name="ck_extratos_periodo_consistente",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -43,6 +58,8 @@ class Extrato(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="pendente")
     origem: Mapped[str] = mapped_column(String, nullable=False)
     quantidade_lancamentos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    periodo_inicio: Mapped[date | None] = mapped_column(Date, nullable=True)
+    periodo_fim: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
     lancamentos: Mapped[list["Lancamento"]] = relationship(back_populates="extrato")  # noqa: F821
