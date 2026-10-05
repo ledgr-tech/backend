@@ -1,5 +1,9 @@
 """Rotas da própria conta de quem está logado (issue #66, ADR-012).
 
+`GET /me` devolve os dados da conta pro cabeçalho do front (issue #81): nome
+da empresa, CNPJ e os métodos de login. Conta única no MVP, então sem campo
+de papel — sem ele, o front trata todo mundo como administrador.
+
 `POST /me/senha` troca a senha na hora, com a senha atual e a nova (mesma
 regra do cadastro). As regras vêm da issue:
 
@@ -18,6 +22,7 @@ O backend não devolve token novo: quem emite o JWT é o NextAuth, e o front
 reautentica com a senha nova. Revogar as outras sessões depende da #75.
 """
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -34,13 +39,55 @@ from app.api.senha import (
 from app.core import senha
 from app.core.auth import obter_usuario_autenticado
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_TROCA_SENHA_POR_USUARIO, chave_por_usuario, limiter
+from app.core.rate_limit import (
+    LIMITE_CONSULTA_ME_POR_USUARIO,
+    LIMITE_TROCA_SENHA_POR_USUARIO,
+    chave_por_usuario,
+    limiter,
+)
 from app.models import Usuario
 from app.services.email import ProvedorDeEmail
 
-__all__ = ["LIMITE_TROCA_SENHA_POR_USUARIO", "router"]
+__all__ = ["LIMITE_CONSULTA_ME_POR_USUARIO", "LIMITE_TROCA_SENHA_POR_USUARIO", "router"]
 
 router = APIRouter(prefix="/me", tags=["conta"])
+
+
+class MeResponse(BaseModel):
+    id: uuid.UUID
+    empresa_id: uuid.UUID
+    nome: str
+    email: str
+    razao_social: str
+    cnpj: str
+    metodos_login: list[str]
+
+
+def _metodos_login(usuario: Usuario) -> list[str]:
+    metodos = []
+    if usuario.senha_hash is not None:
+        metodos.append("senha")
+    if usuario.google_sub is not None:
+        metodos.append("google")
+    return metodos
+
+
+@router.get("", response_model=MeResponse)
+@limiter.limit(LIMITE_CONSULTA_ME_POR_USUARIO, key_func=chave_por_usuario)
+def obter_dados_da_conta(
+    request: Request,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+) -> MeResponse:
+    empresa = usuario.empresa  # única consulta extra; a dependency já carregou o usuário
+    return MeResponse(
+        id=usuario.id,
+        empresa_id=usuario.empresa_id,
+        nome=usuario.nome,
+        email=usuario.email,
+        razao_social=empresa.razao_social,
+        cnpj=empresa.cnpj,
+        metodos_login=_metodos_login(usuario),
+    )
 
 
 class TrocaSenhaRequest(BaseModel):
