@@ -185,14 +185,15 @@ def contar_justificadas(
     if not chaves_por_par:
         return {}
 
+    # Sem filtro por chave: a página pode ter chaves divergentes demais para o
+    # limite de 65535 parâmetros por statement do psycopg 3. Os eventos de
+    # chaves que não estão na página são ignorados no cálculo abaixo.
     bancos = {banco for banco, _ in chaves_por_par}
-    chaves = {chave for lista in chaves_por_par.values() for chave in lista}
     eventos = db.scalars(
         select(DecisaoLinha)
         .where(
             DecisaoLinha.empresa_id == empresa_id,
             DecisaoLinha.extrato_banco_id.in_(list(bancos)),
-            DecisaoLinha.chave.in_(sorted(chaves)),
         )
         .order_by(DecisaoLinha.em, DecisaoLinha.id)
     ).all()
