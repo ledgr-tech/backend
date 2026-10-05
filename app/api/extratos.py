@@ -18,7 +18,11 @@ processar e descartar.
 `GET /extratos/{extrato_id}` (issue #13) devolve o relatório de validação:
 status atual, quantidade de lançamentos válidos e a lista de linhas/
 transações que não normalizaram (identificador + motivo), pra quem chamou
-o upload acompanhar o resultado do processamento assíncrono.
+o upload acompanhar o resultado do processamento assíncrono. Desde a issue
+#82, também devolve `periodo_inicio`/`periodo_fim` (menor e maior data dos
+lançamentos deste extrato, gravados por `app/services/normalizacao.py`),
+sempre presentes na resposta, com `null` enquanto o extrato está
+"pendente"/"processando" ou sem nenhum lançamento válido.
 
 Desde a issue #14, os dois endpoints exigem JWT (app/core/auth.py, ADR-003):
 o `empresa_id` do Extrato vem do token, nunca do form. `GET` de extrato de
@@ -28,6 +32,7 @@ outra empresa devolve 404 (não 403) pra não confirmar a existência do ID
 
 import os
 import uuid
+from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import (
@@ -72,6 +77,8 @@ class ExtratoDetalheResponse(BaseModel):
     status: str
     origem: str
     quantidade_lancamentos: int | None
+    periodo_inicio: date | None
+    periodo_fim: date | None
     erros: list[ErroLinhaResponse]
 
 
@@ -153,5 +160,7 @@ async def obter_extrato(
         status=extrato.status,
         origem=extrato.origem,
         quantidade_lancamentos=extrato.quantidade_lancamentos,
+        periodo_inicio=extrato.periodo_inicio,
+        periodo_fim=extrato.periodo_fim,
         erros=erros,
     )

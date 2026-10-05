@@ -38,7 +38,10 @@ class ExecucaoConciliacao(Base, TimestampMixin):
 
     `empresa_id` é indexado (toda query filtra por tenant, ADR-004) e entra
     num índice composto com `criado_em` porque a listagem do `GET /execucoes`
-    é sempre "as execuções desta empresa, mais recentes primeiro".
+    é sempre "as execuções desta empresa, mais recentes primeiro". O segundo
+    índice composto, por `extrato_banco_id` (issue #82, ADR-010), serve o
+    filtro `?extrato_banco_id=` de `GET /execucoes`: achar as rodadas de uma
+    conciliação sem varrer páginas.
     """
 
     __tablename__ = "execucoes_conciliacao"
@@ -55,6 +58,12 @@ class ExecucaoConciliacao(Base, TimestampMixin):
             name="ck_execucoes_conciliacao_total_e_soma_das_categorias",
         ),
         Index("ix_execucoes_conciliacao_empresa_id_criado_em", "empresa_id", "criado_em"),
+        Index(
+            "ix_execucoes_conciliacao_empresa_id_extrato_banco_id_criado_em",
+            "empresa_id",
+            "extrato_banco_id",
+            "criado_em",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

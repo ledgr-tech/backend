@@ -62,7 +62,13 @@ def _get(headers, **params):
 
 @pytest.fixture
 def criar_extrato_da_empresa(db_session):
-    def _criar(empresa_id, origem: str, nome_arquivo: str = "extrato.csv") -> Extrato:
+    def _criar(
+        empresa_id,
+        origem: str,
+        nome_arquivo: str = "extrato.csv",
+        periodo_inicio: date | None = None,
+        periodo_fim: date | None = None,
+    ) -> Extrato:
         extrato = Extrato(
             empresa_id=empresa_id,
             nome_arquivo=nome_arquivo,
@@ -70,6 +76,8 @@ def criar_extrato_da_empresa(db_session):
             tamanho_bytes=0,
             origem=origem,
             status="concluido",
+            periodo_inicio=periodo_inicio,
+            periodo_fim=periodo_fim,
         )
         db_session.add(extrato)
         db_session.commit()
@@ -273,6 +281,161 @@ def test_configuracao_com_tolerancia_grava_tolerancia_dias_na_execucao(
     assert item["tolerancia_dias"] == 2
     assert item["contagens"]["match_tolerancia"] == 1
     assert item["percentual_acerto"] == "100.00"
+
+
+# filtro ?extrato_banco_id= e período (issue #82)
+
+
+def test_filtro_extrato_banco_id_devolve_so_as_execucoes_daquele_extrato(
+    db_session, criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco_1 = criar_extrato_da_empresa(empresa.id, "banco", nome_arquivo="banco_1.csv")
+    sistema_1 = criar_extrato_da_empresa(empresa.id, "sistema", nome_arquivo="sistema_1.csv")
+    banco_2 = criar_extrato_da_empresa(empresa.id, "banco", nome_arquivo="banco_2.csv")
+    sistema_2 = criar_extrato_da_empresa(empresa.id, "sistema", nome_arquivo="sistema_2.csv")
+    inserir_lancamentos(banco_1, [("10.00", "a")], date(2026, 9, 5))
+    inserir_lancamentos(sistema_1, [("10.00", "a")], date(2026, 9, 5))
+    inserir_lancamentos(banco_2, [("20.00", "b")], date(2026, 9, 6))
+    inserir_lancamentos(sistema_2, [("20.00", "b")], date(2026, 9, 6))
+    assert _post_conciliacao(auth_headers, empresa.id, banco_1.id, sistema_1.id).status_code == 201
+    assert _post_conciliacao(auth_headers, empresa.id, banco_2.id, sistema_2.id).status_code == 201
+
+    resposta = _get(auth_headers(empresa.id), extrato_banco_id=str(banco_1.id))
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["total"] == 1
+    assert len(corpo["itens"]) == 1
+    assert corpo["itens"][0]["extrato_banco_id"] == str(banco_1.id)
+
+
+def test_filtro_total_respeita_o_filtro_com_limit_e_offset(
+    db_session, criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    for indice in range(3):
+        sistema = criar_extrato_da_empresa(
+            empresa.id, "sistema", nome_arquivo=f"sistema_{indice}.csv"
+        )
+        inserir_lancamentos(banco, [(f"{indice + 1}.00", f"a{indice}")], date(2026, 9, 5))
+        inserir_lancamentos(sistema, [(f"{indice + 1}.00", f"a{indice}")], date(2026, 9, 5))
+        assert _post_conciliacao(auth_headers, empresa.id, banco.id, sistema.id).status_code == 201
+    # execução de outro extrato do banco, na mesma empresa — não deve contar no filtro.
+    outro_banco = criar_extrato_da_empresa(empresa.id, "banco", nome_arquivo="outro_banco.csv")
+    outro_sistema = criar_extrato_da_empresa(empresa.id, "sistema", nome_arquivo="outro_s.csv")
+    inserir_lancamentos(outro_banco, [("1.00", "x")], date(2026, 9, 1))
+    inserir_lancamentos(outro_sistema, [("1.00", "x")], date(2026, 9, 1))
+    assert (
+        _post_conciliacao(auth_headers, empresa.id, outro_banco.id, outro_sistema.id).status_code
+        == 201
+    )
+
+    pagina_1 = _get(auth_headers(empresa.id), extrato_banco_id=str(banco.id), limit=2, offset=0)
+    pagina_2 = _get(auth_headers(empresa.id), extrato_banco_id=str(banco.id), limit=2, offset=2)
+
+    assert pagina_1.json()["total"] == 3
+    assert pagina_2.json()["total"] == 3
+    assert len(pagina_1.json()["itens"]) == 2
+    assert len(pagina_2.json()["itens"]) == 1
+    assert all(
+        item["extrato_banco_id"] == str(banco.id)
+        for item in pagina_1.json()["itens"] + pagina_2.json()["itens"]
+    )
+
+
+def test_filtro_atual_correto_quando_o_mesmo_par_e_reconciliado(
+    db_session, criar_empresa, criar_extrato_da_empresa, inserir_lancamentos, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    outro_banco = criar_extrato_da_empresa(empresa.id, "banco", nome_arquivo="outro.csv")
+    outro_sistema = criar_extrato_da_empresa(empresa.id, "sistema", nome_arquivo="outro_s.csv")
+    inserir_lancamentos(outro_banco, [("1.00", "x")], date(2026, 9, 1))
+    inserir_lancamentos(outro_sistema, [("1.00", "x")], date(2026, 9, 1))
+    assert (
+        _post_conciliacao(auth_headers, empresa.id, outro_banco.id, outro_sistema.id).status_code
+        == 201
+    )
+    inserir_lancamentos(banco, [("10.00", "a")], date(2026, 9, 5))
+    inserir_lancamentos(sistema, [("10.00", "a")], date(2026, 9, 5))
+    assert _post_conciliacao(auth_headers, empresa.id, banco.id, sistema.id).status_code == 201
+    inserir_lancamentos(banco, [("77.00", "novo")], date(2026, 9, 6))
+    assert _post_conciliacao(auth_headers, empresa.id, banco.id, sistema.id).status_code == 201
+
+    resposta = _get(auth_headers(empresa.id), extrato_banco_id=str(banco.id))
+    itens = resposta.json()["itens"]
+
+    assert resposta.json()["total"] == 2
+    assert len(itens) == 2
+    atuais = [item["atual"] for item in itens]
+    assert atuais.count(True) == 1
+    assert itens[atuais.index(True)]["id"] == itens[0]["id"]  # mais recente primeiro
+
+
+def test_filtro_com_uuid_invalido_da_422(criar_empresa, auth_headers):
+    empresa = criar_empresa()
+
+    resposta = _get(auth_headers(empresa.id), extrato_banco_id="nao-e-um-uuid")
+
+    assert resposta.status_code == 422
+
+
+def test_filtro_com_uuid_inexistente_da_404(criar_empresa, auth_headers):
+    empresa = criar_empresa()
+
+    resposta = _get(auth_headers(empresa.id), extrato_banco_id=str(uuid.uuid4()))
+
+    assert resposta.status_code == 404
+    assert resposta.json() == {"detail": "Extrato não encontrado."}
+
+
+def test_filtro_com_extrato_de_outra_empresa_da_404(
+    criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    outra_empresa = criar_empresa()
+    banco_de_outra_empresa = criar_extrato_da_empresa(outra_empresa.id, "banco")
+
+    resposta = _get(auth_headers(empresa.id), extrato_banco_id=str(banco_de_outra_empresa.id))
+
+    assert resposta.status_code == 404
+    assert resposta.json() == {"detail": "Extrato não encontrado."}
+
+
+def test_periodo_vem_do_extrato_do_banco_e_null_quando_o_banco_nao_tem_periodo(
+    criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(
+        empresa.id, "banco", periodo_inicio=date(2026, 9, 1), periodo_fim=date(2026, 9, 30)
+    )
+    sistema = criar_extrato_da_empresa(
+        empresa.id, "sistema", periodo_inicio=date(2026, 8, 1), periodo_fim=date(2026, 8, 31)
+    )
+    assert _post_conciliacao(auth_headers, empresa.id, banco.id, sistema.id).status_code == 201
+
+    item = _get(auth_headers(empresa.id)).json()["itens"][0]
+
+    # vem do extrato do BANCO, nunca do sistema (decisão de 05/10).
+    assert item["periodo_inicio"] == "2026-09-01"
+    assert item["periodo_fim"] == "2026-09-30"
+
+
+def test_periodo_null_quando_extrato_do_banco_nao_tem_periodo(
+    criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")  # sem período
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    assert _post_conciliacao(auth_headers, empresa.id, banco.id, sistema.id).status_code == 201
+
+    item = _get(auth_headers(empresa.id)).json()["itens"][0]
+
+    assert item["periodo_inicio"] is None
+    assert item["periodo_fim"] is None
 
 
 # CHECK ck_execucoes_conciliacao_total_e_soma_das_categorias
