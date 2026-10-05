@@ -41,6 +41,7 @@ from app.core.rate_limit import limiter
 from app.models import (
     Conciliacao,
     Configuracao,
+    DecisaoLinha,
     Empresa,
     ExecucaoConciliacao,
     ExplicacaoDivergencia,
@@ -162,6 +163,8 @@ def criar_empresa(db_session):
     yield _criar
 
     for empresa_id in empresas_criadas:
+        # Eventos de decisão (issue #83) têm FK pra extratos e usuarios.
+        db_session.query(DecisaoLinha).filter_by(empresa_id=empresa_id).delete()
         extrato_ids = [
             row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()
         ]
@@ -248,6 +251,9 @@ def criar_usuario(db_session, criar_empresa):
     yield _criar
 
     db_session.rollback()
+    db_session.query(DecisaoLinha).filter(DecisaoLinha.usuario_id.in_(criados)).delete(
+        synchronize_session=False
+    )
     db_session.query(Usuario).filter(Usuario.id.in_(criados)).delete(synchronize_session=False)
     db_session.commit()
 
