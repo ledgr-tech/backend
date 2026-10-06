@@ -9,3 +9,6 @@ venv/
 # apoio (volume/QA manual), não fonte de fixture de CI. As fixtures de
 # teste determinísticas continuam versionadas em tests/fixtures/.
 tests/fixtures/gerados/
+# Spike de PDF (issue #84): amostras reais e relatórios gerados a partir
+# delas não são versionados, mesmo anonimizados. Os sintéticos são.
+scripts/spike_pdf/amostras/
