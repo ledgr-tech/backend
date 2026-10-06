@@ -11,6 +11,7 @@ from app.models.empresa import Empresa
 from app.models.execucao_conciliacao import ExecucaoConciliacao
 from app.models.explicacao_divergencia import ExplicacaoDivergencia
 from app.models.extrato import Extrato
+from app.models.fechamento import Fechamento
 from app.models.lancamento import Lancamento
 from app.models.linha_invalida import LinhaInvalida
 from app.models.token_email import TokenEmail
@@ -25,6 +26,7 @@ __all__ = [
     "ExecucaoConciliacao",
     "ExplicacaoDivergencia",
     "Extrato",
+    "Fechamento",
     "Lancamento",
     "LinhaInvalida",
     "TokenEmail",

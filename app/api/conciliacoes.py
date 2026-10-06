@@ -13,7 +13,11 @@ do ID (mitigação de BOLA/IDOR, mesmo padrão de app/api/extratos.py).
 Validações, nesta ordem: (a) os dois extratos existem e são da empresa do
 token (404); (b) ids diferentes (422); (c) o primeiro tem origem "banco" e o
 segundo "sistema" (422); (d) ambos com status "concluido" ou
-"concluido_com_erros" (409).
+"concluido_com_erros" (409); (e) a competência do extrato do banco (mês de
+`periodo_inicio`) não está fechada (409, issue #86). A checagem (e) pega a
+trava do mês (compartilhada) e a do extrato do banco, nessa ordem
+(app/services/travas.py); extrato sem período não tem competência e segue
+liberado.
 
 `GET /conciliacoes/{extrato_id}`: o `extrato_id` é o extrato do BANCO, porque a
 consulta parte de `extrato_banco_id`, que tem índice (ADR-007). Um extrato do
@@ -51,9 +55,12 @@ decisão (o front sempre filtra por par). A exportação CSV não traz decisões
 `POST /conciliacoes/{extrato_id}/decisoes` grava um evento (conferir,
 justificar ou desfazer) na rodada mais recente do extrato do banco e devolve
 a decisão em vigor depois dele. Autentica o usuário (`sub` do token), que vira
-o autor. Segura o mesmo `pg_advisory_xact_lock` de `conciliar_extratos` para
-o par, para não decidir sobre uma linha enquanto uma rodada nova a substitui.
-Erros de regra saem como 422 com `detail` em texto, porque o front só mostra
+o autor. Pega a trava do extrato do banco (a mesma de `conciliar_extratos`,
+app/services/travas.py) ANTES de calcular a rodada mais recente, para não
+decidir sobre uma linha enquanto uma rodada nova a substitui, mesmo com outro
+extrato do sistema.
+Com a competência do extrato do banco fechada, dá 409 antes de calcular a
+rodada (issue #86). Erros de regra saem como 422 com `detail` em texto, porque o front só mostra
 o motivo quando `detail` é string. Nunca loga o texto da justificativa nem a
 descrição de lançamento.
 """
@@ -66,7 +73,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi import status as http_status
 from pydantic import BaseModel
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
@@ -74,7 +81,8 @@ from app.core.database import get_db
 from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento, Usuario
 from app.services import decisoes
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
-from app.services.matching import _chave_lock_do_par, conciliar_extratos
+from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
+from app.services.matching import conciliar_extratos
 
 router = APIRouter(prefix="/conciliacoes", tags=["conciliacoes"])
 
@@ -107,6 +115,20 @@ class ConciliacaoResponse(BaseModel):
     tarifa_bancaria: int
     divergente_valor: int
     divergente_data: int
+
+
+def _garantir_mes_aberto(db: Session, empresa_id: uuid.UUID, extrato_banco: Extrato) -> None:
+    """Travas do mês (compartilhada) e do extrato do banco, e 409 se a
+    competência do extrato do banco estiver fechada (issue #86)."""
+    try:
+        garantir_mes_aberto(db, empresa_id, extrato_banco)
+    except MesFechadoError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=(
+                f"A competência {exc.competencia} está fechada. Reabra o fechamento para alterar."
+            ),
+        ) from exc
 
 
 def _obter_extrato_da_empresa(db: Session, extrato_id: uuid.UUID, empresa_id: uuid.UUID) -> Extrato:
@@ -153,6 +175,7 @@ def criar_conciliacao(
             detail="Um dos extratos ainda não terminou de processar ou falhou.",
         )
 
+    _garantir_mes_aberto(db, empresa_id, extrato_banco)
     contagens = conciliar_extratos(db, empresa_id, corpo.extrato_banco_id, corpo.extrato_sistema_id)
     return ConciliacaoResponse(
         extrato_banco_id=corpo.extrato_banco_id,
@@ -427,7 +450,12 @@ def registrar_decisao(
     db: Annotated[Session, Depends(get_db)],
 ) -> DecisaoResponse | None:
     empresa_id = usuario.empresa_id
-    _validar_extrato_banco(db, extrato_id, empresa_id)
+    extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
+
+    # As travas (mês e extrato do banco) vêm ANTES da rodada: uma rodada nova
+    # com outro extrato do sistema espera esta decisão terminar, ou esta
+    # decisão espera a rodada; e um fechamento em andamento é esperado.
+    _garantir_mes_aberto(db, empresa_id, extrato_banco)
 
     rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_id)
     if rodada is None:
@@ -435,11 +463,6 @@ def registrar_decisao(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Este extrato ainda não foi conciliado.",
         )
-
-    db.execute(
-        text("SELECT pg_advisory_xact_lock(:chave)"),
-        {"chave": _chave_lock_do_par(empresa_id, extrato_id, rodada.extrato_sistema_id)},
-    )
 
     linha = _linha_da_chave(db, empresa_id, extrato_id, rodada.extrato_sistema_id, corpo.chave)
     if linha is None:

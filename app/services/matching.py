@@ -99,7 +99,6 @@ Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7).
 """
 
-import hashlib
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -107,11 +106,12 @@ from datetime import date
 from decimal import Decimal
 
 from rapidfuzz import fuzz
-from sqlalchemy import delete, insert, select, text
+from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
 from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Lancamento
 from app.services.normalizacao import _normalizar_descricao
+from app.services.travas import travar_extrato_banco
 
 STATUS_MATCH_EXATO = "match_exato"
 STATUS_DUPLICADO = "duplicado"
@@ -430,15 +430,6 @@ def classificar_divergencias(
     return resultados
 
 
-def _chave_lock_do_par(
-    empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID, extrato_sistema_id: uuid.UUID
-) -> int:
-    """Inteiro de 64 bits com sinal, derivado de forma determinística do par
-    (primeiros 8 bytes de um sha256 dos três ids), pra `pg_advisory_xact_lock`."""
-    bruto = f"{empresa_id}|{extrato_banco_id}|{extrato_sistema_id}".encode()
-    return int.from_bytes(hashlib.sha256(bruto).digest()[:8], "big", signed=True)
-
-
 def _carregar_lancamentos(
     db: Session, empresa_id: uuid.UUID, extrato_id: uuid.UUID
 ) -> list[LancamentoParaMatching]:
@@ -478,11 +469,14 @@ def conciliar_extratos(
     `contagens` abaixo). Quem chama valida empresa, origem e status dos
     extratos antes.
 
-    Concorrência: a transação começa adquirindo `pg_advisory_xact_lock` com
-    uma chave derivada do par, então duas execuções simultâneas do mesmo par
-    se enfileiram (a segunda espera a primeira dar commit e depois apaga e
-    regrava) em vez de duplicar linhas. O lock solta sozinho no commit ou
-    rollback; pares diferentes não se bloqueiam.
+    Concorrência: a transação começa adquirindo a trava do EXTRATO DO BANCO
+    (`app/services/travas.py`, desde a issue #86; antes era por par), então
+    duas execuções simultâneas do mesmo extrato do banco se enfileiram (a
+    segunda espera a primeira dar commit e depois apaga e regrava) em vez de
+    duplicar linhas, e uma decisão por linha nunca é gravada no meio de uma
+    rodada nova, mesmo com outro extrato do sistema. A trava solta sozinha no
+    commit ou rollback; extratos do banco diferentes não se bloqueiam. A rota
+    pode já ter pegado a mesma trava (e a do mês) antes: é reentrante.
 
     Histórico (issue #27, ADR-010): grava também uma linha em
     `execucoes_conciliacao`, na mesma transação/lock — ao contrário de
@@ -490,10 +484,7 @@ def conciliar_extratos(
     histórico sobrevive a reconciliações futuras do mesmo par.
     """
     try:
-        db.execute(
-            text("SELECT pg_advisory_xact_lock(:chave)"),
-            {"chave": _chave_lock_do_par(empresa_id, extrato_banco_id, extrato_sistema_id)},
-        )
+        travar_extrato_banco(db, empresa_id, extrato_banco_id)
         banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
         sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
         resultados = parear_lancamentos(banco, sistema)

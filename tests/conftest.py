@@ -46,6 +46,7 @@ from app.models import (
     ExecucaoConciliacao,
     ExplicacaoDivergencia,
     Extrato,
+    Fechamento,
     Lancamento,
     LinhaInvalida,
     Usuario,
@@ -165,6 +166,7 @@ def criar_empresa(db_session):
     for empresa_id in empresas_criadas:
         # Eventos de decisão (issue #83) têm FK pra extratos e usuarios.
         db_session.query(DecisaoLinha).filter_by(empresa_id=empresa_id).delete()
+        db_session.query(Fechamento).filter_by(empresa_id=empresa_id).delete()
         extrato_ids = [
             row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()
         ]
