@@ -71,24 +71,40 @@ class Rodada:
     numero: int
 
 
+def rodadas_mais_recentes(
+    db: Session, empresa_id: uuid.UUID, extratos_banco_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, Rodada]:
+    """A rodada de maior número de cada extrato do banco, numa consulta só.
+    Extrato do banco nunca conciliado fica fora do dicionário."""
+    if not extratos_banco_ids:
+        return {}
+    primeira = func.min(ExecucaoConciliacao.criado_em)
+    pares = db.execute(
+        select(ExecucaoConciliacao.extrato_banco_id, ExecucaoConciliacao.extrato_sistema_id)
+        .where(
+            ExecucaoConciliacao.empresa_id == empresa_id,
+            ExecucaoConciliacao.extrato_banco_id.in_(list(extratos_banco_ids)),
+        )
+        .group_by(ExecucaoConciliacao.extrato_banco_id, ExecucaoConciliacao.extrato_sistema_id)
+        .order_by(
+            ExecucaoConciliacao.extrato_banco_id, primeira, ExecucaoConciliacao.extrato_sistema_id
+        )
+    ).all()
+    por_banco: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
+    for par in pares:
+        por_banco[par.extrato_banco_id].append(par.extrato_sistema_id)
+    return {
+        banco: Rodada(extrato_sistema_id=sistemas[-1], numero=len(sistemas))
+        for banco, sistemas in por_banco.items()
+    }
+
+
 def rodada_mais_recente(
     db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID
 ) -> Rodada | None:
     """A rodada de maior número do extrato do banco, numa consulta só, ou
     `None` quando ele nunca foi conciliado."""
-    primeira = func.min(ExecucaoConciliacao.criado_em)
-    pares = db.execute(
-        select(ExecucaoConciliacao.extrato_sistema_id)
-        .where(
-            ExecucaoConciliacao.empresa_id == empresa_id,
-            ExecucaoConciliacao.extrato_banco_id == extrato_banco_id,
-        )
-        .group_by(ExecucaoConciliacao.extrato_sistema_id)
-        .order_by(primeira, ExecucaoConciliacao.extrato_sistema_id)
-    ).all()
-    if not pares:
-        return None
-    return Rodada(extrato_sistema_id=pares[-1].extrato_sistema_id, numero=len(pares))
+    return rodadas_mais_recentes(db, empresa_id, [extrato_banco_id]).get(extrato_banco_id)
 
 
 def carregar_eventos(
