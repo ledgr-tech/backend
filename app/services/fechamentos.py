@@ -10,8 +10,9 @@ Regra do mês, a mesma do front (`fechamento.ts` e `execucoesVigentes`):
   rodada MAIS RECENTE dele (regra de `app/services/decisoes.py`), com a
   execução atual desse par. Rodadas anteriores não contam.
 - Pendências: linhas divergentes desses pares sem justificativa em vigor, e
-  linhas não lidas (`linhas_invalidas`) do extrato do banco e do sistema de
-  cada par. O mês está pronto quando não há nenhuma das duas.
+  linhas não lidas (`linhas_invalidas`) dos extratos do banco e do sistema
+  dos pares, contando cada extrato uma vez. O mês está pronto quando não
+  há nenhuma das duas.
 
 Tudo com número fixo de consultas, qualquer que seja o número de extratos.
 Nunca loga descrição de lançamento nem ressalva.
@@ -233,9 +234,8 @@ def resumo_do_mes(db: Session, empresa_id: uuid.UUID, pares: list[ParDoMes]) -> 
                 )
             }
         )
-        linhas_nao_lidas = sum(
-            invalidas[par.extrato_banco_id] + invalidas[par.extrato_sistema_id] for par in pares
-        )
+        # Cada extrato conta uma vez, mesmo que esteja em mais de um par do mês.
+        linhas_nao_lidas = sum(invalidas[extrato] for extrato in extratos)
 
     return {
         "pares": [

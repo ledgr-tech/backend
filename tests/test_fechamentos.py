@@ -391,3 +391,25 @@ def test_decisao_e_rodada_nova_esperam_a_trava_do_extrato_do_banco(conta):
     # se depois, registra a rodada 2; se antes, a 1.
     assert decisao.status_code == 200
     assert decisao.json()["rodada"] in (1, 2)
+
+
+def test_linhas_nao_lidas_contam_cada_extrato_uma_vez(conta, db_session):
+    c = conta()
+    sistema = c.extrato("sistema", [("10.00", "a")])
+    for _ in range(2):
+        banco = c.extrato("banco", [("10.00", "a")])
+        c.conciliar(banco, sistema)
+    _linha_invalida(db_session, sistema)
+    _linha_invalida(db_session, sistema)
+
+    sem_ressalva = c.fechar()
+    com_ressalva = c.fechar(ressalva="Duas linhas ilegíveis no arquivo do sistema.")
+
+    assert sem_ressalva.status_code == 409
+    assert sem_ressalva.json()["detail"] == (
+        "Há 2 linhas não lidas nesta competência. Justifique, corrija ou feche com ressalva."
+    )
+    assert com_ressalva.status_code == 201
+    resumo = com_ressalva.json()["resumo"]
+    assert len(resumo["pares"]) == 2
+    assert resumo["linhas_nao_lidas"] == 2
