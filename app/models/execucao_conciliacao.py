@@ -12,8 +12,9 @@ class ExecucaoConciliacao(Base, TimestampMixin):
 
     Só de inserção: cada linha é uma chamada bem-sucedida de `POST
     /conciliacoes`, gravada por `conciliar_extratos`
-    (app/services/matching.py) na mesma transação do motor, dentro do mesmo
-    `pg_advisory_xact_lock` do par — nunca editada nem apagada depois.
+    (app/services/matching.py) na mesma transação do motor, sob a trava do
+    extrato do banco (`app/services/travas.py`, issue #86; antes era por par)
+    — nunca editada nem apagada depois.
     `conciliacoes` (ADR-007) continua guardando só a última rodada de cada
     par; esta tabela é o que permite ver rodadas anteriores.
 

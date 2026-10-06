@@ -73,8 +73,8 @@ class DecisaoLinha(Base):
         UUID(as_uuid=True), ForeignKey("extratos.id"), nullable=False
     )
     # clock_timestamp(), não now(): now() é a hora de início da transação, e o
-    # POST só pega o advisory lock depois de outras consultas. A ordem de "em"
-    # precisa ser a do INSERT, que acontece depois do lock.
+    # POST só pega as travas (do mês e do extrato do banco) depois de outras
+    # consultas. A ordem de "em" precisa ser a do INSERT, feito depois delas.
     em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )

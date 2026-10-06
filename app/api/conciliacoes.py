@@ -51,8 +51,10 @@ decisão (o front sempre filtra por par). A exportação CSV não traz decisões
 `POST /conciliacoes/{extrato_id}/decisoes` grava um evento (conferir,
 justificar ou desfazer) na rodada mais recente do extrato do banco e devolve
 a decisão em vigor depois dele. Autentica o usuário (`sub` do token), que vira
-o autor. Segura o mesmo `pg_advisory_xact_lock` de `conciliar_extratos` para
-o par, para não decidir sobre uma linha enquanto uma rodada nova a substitui.
+o autor. Pega a trava do extrato do banco (a mesma de `conciliar_extratos`,
+app/services/travas.py) ANTES de calcular a rodada mais recente, para não
+decidir sobre uma linha enquanto uma rodada nova a substitui, mesmo com outro
+extrato do sistema.
 Erros de regra saem como 422 com `detail` em texto, porque o front só mostra
 o motivo quando `detail` é string. Nunca loga o texto da justificativa nem a
 descrição de lançamento.
@@ -66,7 +68,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi import status as http_status
 from pydantic import BaseModel
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
@@ -74,7 +76,8 @@ from app.core.database import get_db
 from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento, Usuario
 from app.services import decisoes
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
-from app.services.matching import _chave_lock_do_par, conciliar_extratos
+from app.services.matching import conciliar_extratos
+from app.services.travas import travar_extrato_banco
 
 router = APIRouter(prefix="/conciliacoes", tags=["conciliacoes"])
 
@@ -429,17 +432,16 @@ def registrar_decisao(
     empresa_id = usuario.empresa_id
     _validar_extrato_banco(db, extrato_id, empresa_id)
 
+    # A trava vem ANTES da rodada: uma rodada nova com outro extrato do
+    # sistema espera esta decisão terminar, ou esta decisão espera a rodada.
+    travar_extrato_banco(db, empresa_id, extrato_id)
+
     rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_id)
     if rodada is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Este extrato ainda não foi conciliado.",
         )
-
-    db.execute(
-        text("SELECT pg_advisory_xact_lock(:chave)"),
-        {"chave": _chave_lock_do_par(empresa_id, extrato_id, rodada.extrato_sistema_id)},
-    )
 
     linha = _linha_da_chave(db, empresa_id, extrato_id, rodada.extrato_sistema_id, corpo.chave)
     if linha is None:
