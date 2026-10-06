@@ -1,0 +1,15 @@
+# Configuração opcional de um layout de ERP (issue #84). Para usar, copie para
+# ao lado do PDF com o nome <amostra>.layout.toml. O relatório marca a amostra
+# como "configuração específica: sim", porque isso pesa na decisão go/no-go.
+
+# Sinônimos extras de cabeçalho, somados aos padrões (sem acento, minúsculas).
+[colunas]
+descricao = ["complemento do historico"]
+valor = ["vl. lancamento"]
+entrada = ["recebimentos"]
+saida = ["pagamentos"]
+saldo = ["saldo acumulado"]
+
+# Expressões regulares (sobre o texto normalizado, sem acento e minúsculo) de
+# linhas a ignorar, além de saldo, subtotal, total e transporte.
+ignorar = ["^acumulado do mes"]
