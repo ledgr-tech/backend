@@ -6,3 +6,6 @@ line-length = 100
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "volume: testes de volume e tempo (lentos); rodam num job próprio da CI (issue #74)",
+]

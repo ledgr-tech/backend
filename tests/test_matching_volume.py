@@ -5,7 +5,15 @@ linear: não há comparação de todos contra todos. Estes testes guardam isso
 com bases grandes. A janela de datas (buckets vizinhos) só entra com a
 tolerância de data da Sprint 4 e não existe aqui.
 
-Rodar só estes: `pytest tests/test_matching_volume.py`.
+Têm o marcador `volume` (issue #74) e rodam no job `volume` da CI, separado
+da suíte principal. Rodar só estes: `pytest -m volume tests/test_matching_volume.py`.
+
+O teto absoluto de 10 s ficou (issue #74): aqui não há banco nem HTTP, e os
+casos medidos levam bem menos que 1 s (0,18 s no grupo gigante e 0,60 s sem
+sobreposição, em 07/10), então a folga é de mais de 15 vezes. O teste de
+crescimento relativo segue como o detector de regressão do caso geral, e o
+teto do grupo gigante é o que pega uma comparação de todos contra todos
+dentro de um grupo de mesma chave.
 """
 
 import random
@@ -21,6 +29,8 @@ import pytest
 from app.services.matching import LancamentoParaMatching, parear_lancamentos
 from app.services.normalizacao import _normalizar_descricao
 from scripts.gerar_extratos_sinteticos import _gerar_par
+
+pytestmark = pytest.mark.volume
 
 TETO_ABSOLUTO_SEGUNDOS = 10.0
 SEED = 19

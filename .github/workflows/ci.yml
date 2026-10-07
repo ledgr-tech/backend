@@ -43,4 +43,36 @@ jobs:
       - run: black --check .
       - run: ruff check .
       - run: alembic upgrade head
-      - run: pytest
+      # Os testes de volume (marcador `volume`, issue #74) rodam no job abaixo.
+      - run: pytest -m "not volume"
+
+  volume:
+    # Testes de volume e tempo, separados da suíte principal (issue #74): são
+    # lentos e sensíveis ao desempenho do runner. Rodam em paralelo ao job
+    # `test`, com o mesmo Postgres. `-s` mostra os tempos no log.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pip install pytest
+      - run: alembic upgrade head
+      - run: pytest -m volume -s
