@@ -7,7 +7,7 @@ perceber (cookie criptografado do NextAuth). Estes testes usam um VETOR fixo,
 `tests/fixtures/contrato_jwt.json`: um token gerado pelo `assinarToken` REAL do
 front (lib/token.ts, develop a50915c), com o relógio parado em `instante_utc` e
 um segredo só de teste (nunca usar em .env nem em produção). A mesma cópia fica
-no vault, em `02-decisoes/05-contrato-jwt-vetor.json`, e o teste do front
+no vault, em `02-decisoes/anexos/05-contrato-jwt-vetor.json`, e o teste do front
 confere que `assinarToken` produz exatamente esse token.
 
 O relógio é congelado com freezegun (que congela `datetime.now` e `time.time`,
