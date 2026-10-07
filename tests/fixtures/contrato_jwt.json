@@ -1,0 +1,21 @@
+{
+  "versao": 1,
+  "descricao": "Vetor do contrato JWT entre frontend (NextAuth, lib/token.ts) e backend (app/core/auth.py). Issue #71, ADR-005.",
+  "gerado_com": "assinarToken de lib/token.ts do frontend (develop a50915c), com o relógio fixo em instante_utc",
+  "segredo": "segredo-somente-para-o-vetor-de-contrato-jwt",
+  "instante_utc": "2026-10-07T12:00:00Z",
+  "claims_entrada": {
+    "usuarioId": "11111111-1111-4111-8111-111111111111",
+    "empresaId": "22222222-2222-4222-8222-222222222222",
+    "email": "contrato@ledgr.test"
+  },
+  "token": "eyJhbGciOiJIUzI1NiJ9.eyJlbXByZXNhX2lkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiZW1haWwiOiJjb250cmF0b0BsZWRnci50ZXN0Iiwic3ViIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaWF0IjoxNzkxMzc0NDAwLCJleHAiOjE3OTE5NzkyMDB9.ohed-x1g8TK-bMNaoAOSxpQ_F2atWmx5HUGKfhC8OIQ",
+  "header": { "alg": "HS256" },
+  "payload": {
+    "empresa_id": "22222222-2222-4222-8222-222222222222",
+    "email": "contrato@ledgr.test",
+    "sub": "11111111-1111-4111-8111-111111111111",
+    "iat": 1791374400,
+    "exp": 1791979200
+  }
+}
