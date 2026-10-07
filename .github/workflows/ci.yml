@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pip install pytest black ruff
+      - run: pip install -r requirements-dev.txt
       - run: black --check .
       - run: ruff check .
       - run: alembic upgrade head
@@ -73,6 +73,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pip install pytest
+      - run: pip install -r requirements-dev.txt
       - run: alembic upgrade head
       - run: pytest -m volume -s
