@@ -1,16 +1,25 @@
 name: Estabilidade
 
-# Disparo manual (aba Actions > Estabilidade > Run workflow, escolhendo a
-# branch). Roda a suíte completa, inclusive os testes de volume, em 10 rodadas
+# Roda a suíte completa, inclusive os testes de volume, em 10 rodadas
 # independentes, cada uma com o próprio Postgres. Serve para conferir que a
 # suíte passa 10 vezes seguidas sem falha intermitente (issue #74).
+#
+# Dois jeitos de disparar:
+# - colocar a etiqueta "estabilidade" num PR: roda as 10 rodadas na branch
+#   daquele PR (para rodar de novo, tire e coloque a etiqueta);
+# - manual, pela aba Actions > Estabilidade > Run workflow, escolhendo a
+#   branch. Só funciona depois que este arquivo estiver na main: o GitHub só
+#   dispara workflow_dispatch de workflows da branch padrão.
 
 on:
   workflow_dispatch:
+  pull_request:
+    types: [labeled]
 
 jobs:
   suite:
     name: rodada ${{ matrix.rodada }}
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'estabilidade'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
