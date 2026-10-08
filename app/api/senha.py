@@ -15,6 +15,10 @@ app/core/senha.py). Quem não recebe link, com a mesma resposta:
 
 A única resposta diferente é o 503, quando o envio está desligado ou sem
 `FRONTEND_URL`. Ela depende só da configuração, igual pra qualquer e-mail.
+Desde a issue #79, `FRONTEND_URL` recusada (URL de deploy da Vercel, http fora
+de localhost) vale o mesmo que ausente — mesmo 503, mesmo corpo —, porque um
+link montado em cima dela quebraria no deploy seguinte do front. Quem decide é
+`app/core/frontend_url.py`, que loga o motivo.
 
 `POST /senha/redefinir` recebe o token do link e a senha nova (mesma regra
 do cadastro). Token inexistente, expirado, já usado ou de outra finalidade
@@ -49,8 +53,8 @@ from sqlalchemy.orm import Session
 
 from app.api.auth import SenhaNova, normalizar_email
 from app.core import senha
-from app.core.config import settings
 from app.core.database import SessionLocal, get_db
+from app.core.frontend_url import frontend_url_para_link
 from app.core.rate_limit import LIMITE_RECUPERACAO_SENHA, LIMITE_REDEFINICAO_SENHA, limiter
 from app.models import TokenEmail, Usuario
 from app.models.token_email import FINALIDADE_RECUPERACAO_SENHA
@@ -138,7 +142,12 @@ def agendar_aviso_senha_alterada(
     if provedor is None:
         logger.info("aviso_senha_alterada resultado=desabilitado")
         return
-    tarefas.add_task(enviar_aviso_senha_alterada, provedor, para, nome, settings.frontend_url)
+    # URL recusada vira string vazia: o aviso continua indo, só sem o link de
+    # login (ver `enviar_aviso_senha_alterada`). Trocar a senha não pode
+    # depender de FRONTEND_URL estar certa.
+    tarefas.add_task(
+        enviar_aviso_senha_alterada, provedor, para, nome, frontend_url_para_link() or ""
+    )
 
 
 def enviar_link_recuperacao(email: str, provedor: ProvedorDeEmail, frontend_url: str) -> None:
@@ -203,7 +212,7 @@ def pedir_recuperacao(
     tarefas: BackgroundTasks,
     provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> PedidoRecuperacaoResponse:
-    frontend_url = settings.frontend_url.strip()
+    frontend_url = frontend_url_para_link()
     if provedor is None or not frontend_url:
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,

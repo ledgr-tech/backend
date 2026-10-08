@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -11,9 +13,22 @@ from app.api.extratos import router as extratos_router
 from app.api.fechamentos import router as fechamentos_router
 from app.api.me import router as me_router
 from app.api.senha import router as senha_router
+from app.core.frontend_url import avisar_frontend_url_no_startup
 from app.core.rate_limit import limiter
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # FRONTEND_URL errada (URL de deploy da Vercel, http fora de localhost) só
+    # apareceria no log quando alguém pedisse recuperação de senha, dias depois
+    # do deploy. Conferir no startup põe o motivo no log de deploy do Railway,
+    # junto do resto do boot (issue #79). Não bloqueia o boot: o resto da API
+    # não depende de e-mail.
+    avisar_frontend_url_no_startup()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
