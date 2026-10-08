@@ -9,3 +9,8 @@ venv/
 # apoio (volume/QA manual), não fonte de fixture de CI. As fixtures de
 # teste determinísticas continuam versionadas em tests/fixtures/.
 tests/fixtures/gerados/
+
+# Dump do Postgres de produção (issue #35): o ensaio de restore
+# (scripts/ensaio_restore.py) roda sobre um arquivo gerado à mão e guardado
+# fora do repositório. Dump nunca entra no git.
+*.dump
