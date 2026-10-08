@@ -8,13 +8,14 @@ perguntas de uma vez: o backup volta? e a migração pendente roda em cima de
 dado de produção de verdade? (esta segunda é o ensaio pedido pela issue #65).
 
 Nada aqui toca o banco do Railway. A URL de conexão é montada pelo próprio
-script apontando pra 127.0.0.1, e `exigir_banco_local` barra qualquer host que
-não seja local antes de cada comando que recebe DATABASE_URL. A guarda não é
-decorativa: `app/core/config.py` lê o `.env` do repositório, que em máquina de
-desenvolvimento aponta pro Railway, então um subprocesso de alembic sem
-DATABASE_URL no env migraria produção. O que garante o destino certo é a
-precedência da variável de ambiente sobre o `.env` no pydantic-settings
-(conferido na 2.15.0, a versão de requirements.txt).
+script apontando pra 127.0.0.1, e `exigir_banco_local` (de
+`app/core/banco_local.py`, compartilhada com o conftest e o `migrations/env.py`
+desde a issue #65) barra qualquer host que não seja local antes de cada comando
+que recebe DATABASE_URL. A guarda não é decorativa: `app/core/config.py` lê o
+`.env` do repositório, que em máquina de desenvolvimento aponta pro Railway,
+então um subprocesso de alembic sem DATABASE_URL no env migraria produção. O que
+garante o destino certo é a precedência da variável de ambiente sobre o `.env` no
+pydantic-settings (conferido na 2.15.0, a versão de requirements.txt).
 
 Uso:
 
@@ -36,13 +37,17 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 RAIZ = Path(__file__).resolve().parent.parent
 
-# Os três jeitos de escrever "esta máquina". Qualquer outra coisa é recusada por
-# `exigir_banco_local`.
-HOSTS_LOCAIS = frozenset({"localhost", "127.0.0.1", "::1"})
+# Rodado como `python scripts/ensaio_restore.py`, o sys.path recebe scripts/, não
+# a raiz do repositório, e o import de app/ abaixo não acharia nada. Pytest não
+# passa por aqui (pythonpath = ["."] no pyproject.toml), mas a linha de comando
+# é o uso normal deste script.
+if str(RAIZ) not in sys.path:
+    sys.path.insert(0, str(RAIZ))
+
+from app.core.banco_local import exigir_banco_local
 
 USUARIO_PG = "postgres"
 BANCO_ENSAIO = "ensaio"
@@ -55,41 +60,8 @@ SEGUNDOS_ESPERA_BANCO = 90
 CAMINHO_DUMP_NO_CONTAINER = "/tmp/ensaio.dump"
 
 
-class BancoNaoLocal(RuntimeError):
-    """A URL de conexão aponta pra fora desta máquina."""
-
-
 class EnsaioFalhou(RuntimeError):
     """Falha depois do container de pé: ele é mantido pra inspeção."""
-
-
-def exigir_banco_local(url: str) -> str:
-    """Devolve `url` se ela aponta pro Postgres local; levanta `BancoNaoLocal` se não.
-
-    Função pura, sem I/O: é a guarda que separa o ensaio do banco de produção, e
-    é chamada antes de todo comando que recebe DATABASE_URL.
-
-    Recusa, nesta ordem: URL inválida, host ausente (`postgresql:///ensaio`),
-    host fora de {localhost, 127.0.0.1, ::1} — inclusive vizinho de nome como
-    `127.0.0.1.exemplo.com`, que casaria num teste de prefixo — e o parâmetro
-    `host=` na query, que no libpq tem precedência sobre o host da URL e
-    driblaria a checagem acima.
-    """
-    try:
-        partes = urlsplit(url)
-        host, _porta = partes.hostname, partes.port
-    except ValueError as erro:
-        raise BancoNaoLocal(f"URL de conexão inválida ({erro}): {url!r}") from erro
-    if not host:
-        raise BancoNaoLocal(f"URL de conexão sem host explícito, recusada: {url!r}")
-    if host not in HOSTS_LOCAIS:
-        raise BancoNaoLocal(
-            f"URL de conexão aponta pro host {host!r}, que não é local. O ensaio só "
-            f"roda contra {sorted(HOSTS_LOCAIS)} — nunca contra o Railway."
-        )
-    if "host" in parse_qs(partes.query):
-        raise BancoNaoLocal(f"URL de conexão traz `host=` na query, recusada: {url!r}")
-    return url
 
 
 def _rodar(comando: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
