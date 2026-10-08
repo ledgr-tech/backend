@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     email_timeout_segundos: float = 10.0
     frontend_url: str = ""
 
+    # Rate limit (issue #64): segredo que o servidor do Next manda junto com o
+    # IP do navegador, em app/core/rate_limit.py. Vazio, o IP repassado é
+    # ignorado e o limite de /login, /register e /senha/* volta a ser um só
+    # para todos os usuários do front. Mesmo valor nos dois lados.
+    ledgr_segredo_proxy: str = ""
+
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.
 
