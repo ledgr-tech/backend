@@ -12,9 +12,15 @@ configurado (ex: só editando parser, sem tocar em normalização); em CI, com
 o service container sempre disponível, esses testes rodam de verdade, não
 aparecem como skipped.
 
-Nunca faz TRUNCATE/DELETE indiscriminado nas tabelas — `db_session` pode
-apontar pro Postgres compartilhado de desenvolvimento (Railway, ver .env);
-cada fábrica limpa só as linhas que ela mesma criou.
+Desde a issue #65 a suíte NUNCA roda contra banco remoto: `pytest_configure`
+abaixo encerra tudo antes do primeiro teste se DATABASE_URL não apontar pra
+localhost. Não há variável de escape — teste grava e apaga linha, e contra o
+banco do Railway isso é perda de dado, não inconveniente. Rode o Postgres em
+Docker (o comando está em 07-tecnico/stack-e-deploy.md, no vault).
+
+Mesmo assim, nunca faz TRUNCATE/DELETE indiscriminado nas tabelas: cada fábrica
+limpa só as linhas que ela mesma criou. O banco local pode ser o mesmo que você
+usa pra desenvolver, com dado que você quer manter.
 """
 
 import hashlib
@@ -34,6 +40,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.core import senha
+from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
@@ -57,6 +64,34 @@ RAIZ = Path(__file__).resolve().parent.parent
 SECRET_TESTE = "secret-de-teste-nao-usar-em-producao"
 SENHA_USUARIO_TESTE = "senha-atual-123"
 FRONTEND_URL_TESTE = "https://app.ledgr.com.br"
+
+
+def pytest_configure(config):
+    """Encerra a suíte antes do primeiro teste se DATABASE_URL não for local.
+
+    É a primeira coisa que roda, de propósito: as fábricas deste arquivo criam e
+    apagam empresa, usuário, extrato e lançamento de verdade, e o `.env` do
+    repositório aponta DATABASE_URL pro Railway. Sem esta guarda, um `pytest`
+    rodado sem pensar grava e apaga linha no banco de produção.
+
+    Não existe variável de escape, ao contrário do `migrations/env.py` (que o
+    pre-deploy do Railway precisa destravar): nenhuma situação justifica rodar
+    esta suíte contra banco remoto.
+    """
+    try:
+        exigir_banco_local(settings.database_url)
+    except BancoNaoLocal as erro:
+        pytest.exit(
+            f"Suíte interrompida: {erro}\n\n"
+            "A suíte cria e apaga linha de verdade, então só roda contra Postgres "
+            "local. Suba um em Docker e aponte DATABASE_URL pra ele, por exemplo:\n\n"
+            "  docker run -d --name ledgr-dev -p 127.0.0.1:55432:5432 \\\n"
+            "    -e POSTGRES_USER=ledgr -e POSTGRES_PASSWORD=ledgr \\\n"
+            "    -e POSTGRES_DB=ledgr postgres:18\n\n"
+            "  DATABASE_URL=postgresql+psycopg://ledgr:ledgr@127.0.0.1:55432/ledgr\n\n"
+            "O roteiro completo está em 07-tecnico/stack-e-deploy.md, no vault.",
+            returncode=1,
+        )
 
 
 @pytest.fixture(autouse=True)
