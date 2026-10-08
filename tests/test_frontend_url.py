@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.frontend_url import (
     MOTIVO_DEPLOY_VERCEL,
     MOTIVO_ESQUEMA_NAO_HTTPS,
+    MOTIVO_QUERY_OU_FRAGMENTO,
     MOTIVO_SEM_ESQUEMA,
     MOTIVO_URL_INVALIDA,
     MOTIVO_VAZIO,
@@ -43,6 +44,9 @@ ACEITOS = [
     ("http://127.0.0.1:3000", "http://127.0.0.1:3000"),
     # Espaço nas pontas é erro de copiar e colar em variável de ambiente.
     ("  https://ledgrfinance.com.br  ", "https://ledgrfinance.com.br"),
+    # Caminho serve: o front pode estar sob um prefixo.
+    ("https://ledgrfinance.com.br/app", "https://ledgrfinance.com.br/app"),
+    ("https://ledgrfinance.com.br/app/", "https://ledgrfinance.com.br/app"),
 ]
 
 # (valor configurado, motivo esperado)
@@ -64,6 +68,16 @@ RECUSADOS = [
     ("ledgrfinance.com.br", MOTIVO_SEM_ESQUEMA),
     # Esquema certo, sem host: não dá pra montar link.
     ("https://", MOTIVO_URL_INVALIDA),
+    # Query e fragmento: a base é concatenada com `/redefinir-senha#token=...`,
+    # então um `#` aqui daria um link com dois fragmentos e uma query ficaria no
+    # meio do caminho.
+    ("https://ledgrfinance.com.br#x", MOTIVO_QUERY_OU_FRAGMENTO),
+    ("https://ledgrfinance.com.br?a=1", MOTIVO_QUERY_OU_FRAGMENTO),
+    ("https://ledgrfinance.com.br/?a=1#x", MOTIVO_QUERY_OU_FRAGMENTO),
+    # Delimitador sozinho: o parser devolveria query vazia, por isso a checagem
+    # olha o caractere cru.
+    ("https://ledgrfinance.com.br?", MOTIVO_QUERY_OU_FRAGMENTO),
+    ("https://ledgrfinance.com.br#", MOTIVO_QUERY_OU_FRAGMENTO),
 ]
 
 
@@ -107,6 +121,15 @@ def test_vercel_sem_segmento_do_meio_e_aceito(valor):
     """Sem segmento entre o primeiro e o último, não há identificador de deploy
     pra achar — é o alias do projeto."""
     assert avaliar_frontend_url(valor).serve
+
+
+def test_caminho_sobrevive_mas_query_e_fragmento_nao():
+    """O par que explica a regra: o caminho entra no link sem estragar nada, o
+    fragmento produziria `...#x/redefinir-senha#token=...`."""
+    base = avaliar_frontend_url("https://ledgrfinance.com.br/app").url
+    assert f"{base}/redefinir-senha#token=abc".count("#") == 1
+
+    assert not avaliar_frontend_url("https://ledgrfinance.com.br/app#x").serve
 
 
 # frontend_url_para_link: lê a configuração e loga

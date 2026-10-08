@@ -9,6 +9,11 @@ estável de produção, `https://ledgrfinance.com.br`.
 `avaliar_frontend_url` é pura: recebe o valor, devolve a URL normalizada ou o
 motivo da recusa. Quem lê a configuração e loga é `frontend_url_para_link`.
 
+O que serve é esquema, host e, se quiser, caminho — nada além disso. Query
+string e fragmento são recusados porque a base é concatenada com o caminho e o
+fragmento do link (`/redefinir-senha#token=...`): um `#` na base produziria um
+link com dois fragmentos, e uma query ficaria no meio do caminho.
+
 URL recusada se comporta igual a URL vazia — envio indisponível, nunca um link
 quebrado, que é a regra que já estava em app/core/config.py. A diferença é o
 log: valor vazio é o estado documentado de "e-mail desligado" (o default de
@@ -42,6 +47,7 @@ MOTIVO_URL_INVALIDA = "url_invalida"
 MOTIVO_SEM_ESQUEMA = "sem_esquema"
 MOTIVO_ESQUEMA_NAO_HTTPS = "esquema_nao_https"
 MOTIVO_DEPLOY_VERCEL = "deploy_especifico_vercel"
+MOTIVO_QUERY_OU_FRAGMENTO = "query_ou_fragmento_nao_permitido"
 
 
 @dataclass(frozen=True)
@@ -83,10 +89,14 @@ def avaliar_frontend_url(valor: str) -> FrontendUrlAvaliada:
     - `http://localhost` e `http://127.0.0.1`, com ou sem porta, pra
       desenvolvimento.
 
-    Recusa valor vazio, URL sem esquema ou com esquema que não seja esses, e
-    host `*.vercel.app` que tenha cara de deploy específico. `url_invalida`
-    cobre o que não dá pra interpretar (URL que o parser recusa, ou `https://`
-    sem host): a função nunca levanta, porque roda dentro de request.
+    Caminho é aceito (`https://exemplo.com.br/app`), query string e fragmento
+    não.
+
+    Recusa valor vazio, URL sem esquema ou com esquema que não seja esses, host
+    `*.vercel.app` que tenha cara de deploy específico, e URL com `?` ou `#`.
+    `url_invalida` cobre o que não dá pra interpretar (URL que o parser recusa,
+    ou `https://` sem host): a função nunca levanta, porque roda dentro de
+    request.
     """
     url = (valor or "").strip()
     if not url:
@@ -129,6 +139,20 @@ def avaliar_frontend_url(valor: str) -> FrontendUrlAvaliada:
                 f"FRONTEND_URL {url!r} é um deploy específico da Vercel: a URL muda "
                 f"no deploy seguinte do front e todo link já enviado quebra. Use o "
                 f"domínio estável de produção."
+            ),
+        )
+    # `?` e `#` só existem numa URL como delimitador de query e de fragmento,
+    # então procurar o caractere cru pega também o caso degenerado
+    # (`https://exemplo.com.br?`), que o parser devolveria como query vazia.
+    if "?" in url or "#" in url:
+        return FrontendUrlAvaliada(
+            motivo=MOTIVO_QUERY_OU_FRAGMENTO,
+            detalhe=(
+                f"FRONTEND_URL {url!r} tem query string ou fragmento. A base é "
+                f"concatenada com o caminho e o fragmento do link "
+                f"(`/redefinir-senha#token=...`), então sobraria um link com dois "
+                f"`#` ou com a query no meio do caminho. Use só esquema, host e "
+                f"caminho."
             ),
         )
     return FrontendUrlAvaliada(url=url.rstrip("/"))
