@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     # como a IA — ligar em produção depende de domínio verificado (SPF,
     # DKIM, DMARC) e do DPA do provedor (#37). A ausência destas variáveis
     # não bloqueia o boot nem os testes. `frontend_url` é a base dos links:
-    # vazio deixa o envio indisponível, pra nunca mandar link quebrado.
+    # vazio deixa o envio indisponível, pra nunca mandar link quebrado. Desde a
+    # issue #79 quem lê esse valor passa por `app/core/frontend_url.py`, que
+    # recusa URL de deploy da Vercel do mesmo jeito que recusa vazio.
     email_habilitado: bool = False
     email_provedor: str = "resend"
     resend_api_key: str = ""

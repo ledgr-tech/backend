@@ -138,6 +138,68 @@ def test_sem_frontend_url_e_503(provedor, monkeypatch):
     assert provedor.enviadas == []
 
 
+# FRONTEND_URL recusada (issue #79) ------------------------------------------
+
+FRONTEND_URL_DE_DEPLOY = "https://frontend-hfrnofw9w-ledgr7.vercel.app"
+
+
+def test_frontend_url_de_deploy_da_vercel_nao_enfileira_email(
+    db_session, provedor, criar_usuario, monkeypatch
+):
+    """Era o valor de produção antes da #79: a URL morre no deploy seguinte do
+    front, então o link iria quebrado. Com usuário real cadastrado, pra deixar
+    claro que o que barra é a configuração, não a conta não existir."""
+    usuario = criar_usuario()
+    monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_DE_DEPLOY)
+
+    response = _pedir(usuario.email)
+
+    assert response.status_code == 503
+    assert provedor.enviadas == []
+    # Nem token gravado: a rota recusa antes de agendar a tarefa.
+    assert (
+        db_session.scalars(select(TokenEmail).where(TokenEmail.usuario_id == usuario.id)).all()
+        == []
+    )
+
+
+def test_frontend_url_recusada_responde_igual_a_url_vazia(provedor, monkeypatch):
+    """O front não pode notar diferença entre "e-mail desligado" e "FRONTEND_URL
+    errada": mesmo status e mesmo corpo, senão a tela de recuperação teria de
+    tratar um caso novo."""
+    monkeypatch.setattr(settings, "frontend_url", "")
+    vazia = _pedir("alguem@teste.com")
+
+    monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_DE_DEPLOY)
+    recusada = _pedir("alguem@teste.com")
+
+    assert recusada.status_code == vazia.status_code == 503
+    assert recusada.json() == vazia.json()
+    assert provedor.enviadas == []
+
+
+def test_frontend_url_de_alias_de_branch_tambem_e_503(provedor, monkeypatch):
+    monkeypatch.setattr(settings, "frontend_url", "https://frontend-git-main-ledgr7.vercel.app")
+
+    response = _pedir("alguem@teste.com")
+
+    assert response.status_code == 503
+    assert provedor.enviadas == []
+
+
+def test_dominio_estavel_de_producao_envia_o_link(db_session, provedor, criar_usuario, monkeypatch):
+    """O valor certo desta issue: https://ledgrfinance.com.br."""
+    monkeypatch.setattr(settings, "frontend_url", "https://ledgrfinance.com.br")
+    usuario = criar_usuario()
+
+    response = _pedir(usuario.email)
+
+    assert response.status_code == 202
+    assert len(provedor.enviadas) == 1
+    link = re.search(r"https://\S+", provedor.enviadas[0].texto).group(0)
+    assert link.startswith("https://ledgrfinance.com.br/redefinir-senha#token=")
+
+
 def test_limite_de_envios_por_destino_nao_muda_a_resposta(db_session, provedor, criar_usuario):
     usuario = criar_usuario()
 
