@@ -1,0 +1,67 @@
+import uuid
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base, TimestampMixin
+
+
+class Lancamento(Base, TimestampMixin):
+    """Lançamento normalizado de um extrato, gravado pela camada de
+    normalização via BackgroundTasks (issue #12, ver app/services/normalizacao.py).
+
+    `hash_dedup` (sha256 de valor+data+descrição normalizada+extrato_id, mais
+    "|{ocorrencia}" quando `ocorrencia` > 1) e a UniqueConstraint(empresa_id,
+    extrato_id, hash_dedup) implementam a dedupliação em reprocessamento
+    decidida na ADR-004 (seção multi-tenant e constraint de dedup em
+    lançamentos) — via `INSERT ... ON CONFLICT DO NOTHING`, não checagem de
+    duplicata na aplicação antes do insert.
+
+    `ocorrencia` é o número de ordem da linha idêntica (mesmo valor, data e
+    descrição normalizada) dentro do arquivo: 1ª, 2ª... Entra no hash pra que
+    um pagamento duplicado de verdade no mesmo extrato não colapse no ON
+    CONFLICT e chegue ao motor de matching (ADR-006). Reprocessar o mesmo
+    arquivo continua idempotente, pois a numeração é determinística.
+
+    `empresa_id` é indexado (toda query real do sistema filtra por tenant,
+    mesma decisão já aplicada em Extrato/Usuario). `extrato_id`, `data` e
+    `valor` também têm índice simples próprio (issue #15).
+    """
+
+    __tablename__ = "lancamentos"
+    __table_args__ = (
+        CheckConstraint("tipo IN ('credito', 'debito')", name="ck_lancamentos_tipo_valido"),
+        UniqueConstraint(
+            "empresa_id", "extrato_id", "hash_dedup", name="uq_lancamentos_empresa_extrato_hash"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    empresa_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("empresas.id"), nullable=False, index=True
+    )
+    extrato_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("extratos.id"), nullable=False, index=True
+    )
+    data: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, index=True)
+    descricao: Mapped[str] = mapped_column(String, nullable=False)
+    tipo: Mapped[str] = mapped_column(String, nullable=False)
+    hash_dedup: Mapped[str] = mapped_column(String(64), nullable=False)
+    ocorrencia: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+
+    extrato: Mapped["Extrato"] = relationship(back_populates="lancamentos")  # noqa: F821

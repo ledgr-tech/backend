@@ -1,0 +1,55 @@
+name: Estabilidade
+
+# Roda a suíte completa, inclusive os testes de volume, em 10 rodadas
+# independentes, cada uma com o próprio Postgres. Serve para conferir que a
+# suíte passa 10 vezes seguidas sem falha intermitente (issue #74).
+#
+# Dois jeitos de disparar:
+# - colocar a etiqueta "estabilidade" num PR: roda as 10 rodadas na branch
+#   daquele PR (para rodar de novo, tire e coloque a etiqueta);
+# - manual, pela aba Actions > Estabilidade > Run workflow, escolhendo a
+#   branch. Só funciona depois que este arquivo estiver na main: o GitHub só
+#   dispara workflow_dispatch de workflows da branch padrão.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  suite:
+    name: rodada ${{ matrix.rodada }}
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'estabilidade'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rodada: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    services:
+      postgres:
+        # postgres:18-alpine pra CI testar a mesma major da produção
+        # (o Postgres do Railway é 18, imagem postgres-ssl:18 — issue #65).
+        # Antes era 16: a CI passava numa major que produção não usa.
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: alembic upgrade head
+      - run: pytest -s
