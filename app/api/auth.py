@@ -1,7 +1,8 @@
 """Cadastro e login por credenciais (issue #57).
 
 O login devolve só os dados do usuário, sem token: quem emite o JWT é o
-NextAuth (ADR-003). O cadastro é self-service e cria a empresa junto, e
+NextAuth (ADR-003). O cadastro é self-service, cria a empresa junto e manda
+o e-mail de boas-vindas quando o e-mail está ligado (issue #78), e
 `POST /register/verificar` diz antes se o e-mail e o CNPJ estão livres (issue
 #80). O 401 do login é o mesmo pra qualquer falha, pra não revelar quais
 e-mails têm conta.
@@ -17,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select
@@ -28,6 +29,7 @@ from app.core import bloqueio_login, senha
 from app.core.auth import normalizar_email
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
+from app.core.frontend_url import frontend_url_para_link
 from app.core.rate_limit import (
     LIMITE_CADASTRO,
     LIMITE_LOGIN,
@@ -35,6 +37,9 @@ from app.core.rate_limit import (
     limiter,
 )
 from app.models import Configuracao, Empresa, Usuario
+from app.services.email import ProvedorDeEmail
+from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
+from app.services.email.mensagens import mensagem_boas_vindas
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +123,9 @@ def _conflito(detalhe: str) -> HTTPException:
 def cadastrar(
     request: Request,
     dados: CadastroRequest,
+    tarefas: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> UsuarioResponse:
     email = normalizar_email(dados.email)
     if db.scalar(select(Usuario.id).where(Usuario.email == email)):
@@ -141,9 +148,38 @@ def cadastrar(
         db.rollback()
         raise _conflito("E-mail ou CNPJ já cadastrado.") from exc
 
+    agendar_boas_vindas(tarefas, provedor, usuario, dados.razao_social)
     return UsuarioResponse(
         id=usuario.id, empresa_id=empresa.id, nome=usuario.nome, email=usuario.email
     )
+
+
+def agendar_boas_vindas(
+    tarefas: BackgroundTasks,
+    provedor: ProvedorDeEmail | None,
+    usuario: Usuario,
+    razao_social: str,
+) -> None:
+    """E-mail de boas-vindas depois do cadastro (issue #78).
+
+    Sai em `BackgroundTasks`, depois da resposta: nenhuma falha de envio muda o
+    201. Com o e-mail desligado, o cadastro vale do mesmo jeito, sem e-mail.
+    Com `FRONTEND_URL` recusada (app/core/frontend_url.py), vai sem o link de
+    login, como o aviso de senha alterada. A chave de idempotência é por
+    usuário: um reenvio do Resend com a mesma chave não duplica o e-mail.
+    """
+    if provedor is None:
+        logger.info("boas_vindas resultado=desabilitado")
+        return
+    base = frontend_url_para_link()
+    mensagem = mensagem_boas_vindas(
+        para=usuario.email,
+        nome=usuario.nome,
+        razao_social=razao_social,
+        link_login=f"{base}/login" if base else None,
+        chave_idempotencia=f"boas-vindas-{usuario.id}",
+    )
+    tarefas.add_task(enviar_e_registrar, provedor, mensagem, "boas_vindas")
 
 
 @router.post("/register/verificar", response_model=VerificacaoCadastroResponse)

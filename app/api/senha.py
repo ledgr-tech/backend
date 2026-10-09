@@ -58,8 +58,8 @@ from app.core.frontend_url import frontend_url_para_link
 from app.core.rate_limit import LIMITE_RECUPERACAO_SENHA, LIMITE_REDEFINICAO_SENHA, limiter
 from app.models import TokenEmail, Usuario
 from app.models.token_email import FINALIDADE_RECUPERACAO_SENHA
-from app.services.email import ProvedorDeEmail, ProvedorEmailIndisponivel, obter_provedor_email
-from app.services.email.base import MensagemEmail
+from app.services.email import ProvedorDeEmail
+from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
 from app.services.email.mensagens import mensagem_recuperacao_senha, mensagem_senha_alterada
 
 logger = logging.getLogger(__name__)
@@ -85,10 +85,6 @@ class RedefinicaoRequest(BaseModel):
     senha_nova: SenhaNova
 
 
-def obter_provedor_email_dependencia() -> ProvedorDeEmail | None:
-    return obter_provedor_email()
-
-
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -105,24 +101,6 @@ def invalidar_links_de_recuperacao(db: Session, usuario_id: uuid.UUID) -> None:
     )
 
 
-def _enviar(provedor: ProvedorDeEmail, mensagem: MensagemEmail, evento: str) -> None:
-    """Envia e só registra o resultado: roda depois da resposta, então uma
-    falha não tem a quem ser devolvida."""
-    try:
-        provedor.enviar(mensagem)
-    except ProvedorEmailIndisponivel as exc:
-        logger.info(
-            "%s resultado=falha_envio motivo=%s status_http=%s",
-            evento,
-            exc.motivo,
-            exc.status_http,
-        )
-    except Exception as exc:  # noqa: BLE001 - a resposta já saiu, só registra
-        logger.info("%s resultado=falha_envio classe=%s", evento, type(exc).__name__)
-    else:
-        logger.info("%s resultado=enviado", evento)
-
-
 def enviar_aviso_senha_alterada(
     provedor: ProvedorDeEmail, para: str, nome: str, frontend_url: str
 ) -> None:
@@ -132,7 +110,7 @@ def enviar_aviso_senha_alterada(
     mensagem = mensagem_senha_alterada(
         para=para, nome=nome, link_login=f"{base}/login" if base else None
     )
-    _enviar(provedor, mensagem, "aviso_senha_alterada")
+    enviar_e_registrar(provedor, mensagem, "aviso_senha_alterada")
 
 
 def agendar_aviso_senha_alterada(
@@ -197,7 +175,7 @@ def enviar_link_recuperacao(email: str, provedor: ProvedorDeEmail, frontend_url:
         )
         db.commit()
 
-    _enviar(provedor, mensagem, "recuperacao_senha")
+    enviar_e_registrar(provedor, mensagem, "recuperacao_senha")
 
 
 @router.post(

@@ -1,8 +1,8 @@
-"""Textos dos e-mails transacionais (issue #66, ADR-012).
+"""Textos dos e-mails transacionais (issues #66 e #78, ADR-012).
 
 Cada mensagem sai em texto puro e em HTML simples, sem imagem nem
-rastreamento. Tudo o que vem do usuário (o nome) é escapado no HTML; o
-link é montado pelo backend, a partir de `FRONTEND_URL` e de um token
+rastreamento. Tudo o que vem do usuário (nome, razão social) é escapado no
+HTML; o link é montado pelo backend, a partir de `FRONTEND_URL` e de um token
 URL-safe.
 """
 
@@ -82,4 +82,49 @@ def mensagem_senha_alterada(*, para: str, nome: str, link_login: str | None) -> 
         assunto="Sua senha da Ledgr foi alterada",
         texto=texto,
         html=html,
+    )
+
+
+def mensagem_boas_vindas(
+    *,
+    para: str,
+    nome: str,
+    razao_social: str,
+    link_login: str | None,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Depois do cadastro (issue #78). O fim do texto cobre quem recebe sem ter
+    criado a conta: alguém cadastrou o e-mail dessa pessoa."""
+    onde_entrar = f" na tela de login ({link_login})" if link_login else " na tela de login"
+    texto = (
+        f"Olá, {nome}.\n\n"
+        f"Sua conta na Ledgr foi criada para a empresa {razao_social}.\n\n"
+        f"Para começar, entre{onde_entrar} e envie o extrato do banco e o extrato do "
+        "seu sistema de gestão do mesmo período. A Ledgr cruza os dois e mostra o que "
+        "bate e o que precisa da sua atenção.\n\n"
+        "Se não foi você quem criou esta conta, ignore este e-mail e avise o nosso "
+        "suporte.\n\n"
+        "Equipe Ledgr"
+    )
+    onde_entrar_html = (
+        f' na <a href="{escape(link_login, quote=True)}">tela de login</a>'
+        if link_login
+        else " na tela de login"
+    )
+    html = (
+        f"<p>Olá, {escape(nome)}.</p>"
+        f"<p>Sua conta na Ledgr foi criada para a empresa {escape(razao_social)}.</p>"
+        f"<p>Para começar, entre{onde_entrar_html} e envie o extrato do banco e o "
+        "extrato do seu sistema de gestão do mesmo período. A Ledgr cruza os dois e "
+        "mostra o que bate e o que precisa da sua atenção.</p>"
+        "<p>Se não foi você quem criou esta conta, ignore este e-mail e avise o nosso "
+        "suporte.</p>"
+        "<p>Equipe Ledgr</p>"
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="Boas-vindas à Ledgr",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
     )
