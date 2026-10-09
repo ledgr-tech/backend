@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy import func, select, tuple_
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.orm import Session, aliased
 
 from app.models import (
@@ -133,7 +134,11 @@ def pares_do_mes(db: Session, empresa_id: uuid.UUID, competencia: str) -> list[P
             ExecucaoConciliacao.criado_em.desc(),
             ExecucaoConciliacao.id.desc(),
         )
-        .distinct(ExecucaoConciliacao.extrato_banco_id, ExecucaoConciliacao.extrato_sistema_id)
+        .ext(
+            distinct_on(
+                ExecucaoConciliacao.extrato_banco_id, ExecucaoConciliacao.extrato_sistema_id
+            )
+        )
     ).all()
 
     return sorted(

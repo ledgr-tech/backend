@@ -15,7 +15,8 @@
 fastapi
 uvicorn[standard]
 httpx
-sqlalchemy>=2.0
+# 2.1: postgresql.distinct_on, usado em app/services/fechamentos.py
+sqlalchemy>=2.1
 alembic
 psycopg[binary]
 bcrypt>=4
