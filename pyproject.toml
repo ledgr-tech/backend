@@ -9,3 +9,8 @@ pythonpath = ["."]
 markers = [
     "volume: testes de volume e tempo (lentos); rodam num job próprio da CI (issue #74)",
 ]
+[tool.pip-tools]
+# pip-compile (issue #102): extras ficam fora dos .txt gerados, que listam o
+# pacote extra à parte (psycopg-binary, uvloop...). É o padrão a partir do
+# pip-tools 8, e sem isto todo pip-compile imprime um aviso.
+strip-extras = true

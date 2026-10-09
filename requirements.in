@@ -1,0 +1,33 @@
+# Dependências diretas da aplicação. O requirements.txt é gerado a partir deste
+# arquivo pelo pip-compile (pip-tools, issue #102), com a versão exata de cada
+# pacote, inclusive das dependências indiretas. Não edite o requirements.txt à
+# mão: o Railway e a CI instalam dele.
+#
+# Gere sempre em Python 3.13, a versão do .python-version (o resultado muda
+# conforme a versão do Python):
+#
+#   - atualizar um pacote (e só o que ele exigir):
+#       pip-compile --upgrade-package <pacote> requirements.in
+#   - depois de adicionar ou remover uma linha aqui:
+#       pip-compile requirements.in
+#   - em seguida, regenere o requirements-dev.txt, que usa este como restrição:
+#       pip-compile requirements-dev.in
+fastapi
+uvicorn[standard]
+httpx
+# 2.1: postgresql.distinct_on, usado em app/services/fechamentos.py
+sqlalchemy>=2.1
+alembic
+psycopg[binary]
+bcrypt>=4
+email-validator
+python-dotenv
+pydantic-settings
+python-multipart
+ofxtools
+pandas
+charset-normalizer
+python-dateutil
+pyjwt
+slowapi
+rapidfuzz

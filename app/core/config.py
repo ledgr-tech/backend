@@ -3,6 +3,9 @@
 Ver .env.example para a lista completa de variáveis esperadas.
 """
 
+from typing import Literal
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +52,21 @@ class Settings(BaseSettings):
     # ignorado e o limite de /login, /register e /senha/* volta a ser um só
     # para todos os usuários do front. Mesmo valor nos dois lados.
     ledgr_segredo_proxy: str = ""
+
+    # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
+    # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
+    # boot com o motivo, em vez de deixar a API no ar sem log.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # /docs, /redoc e /openapi.json (issue #102). Ligado por padrão, para o
+    # desenvolvimento local; em produção fica false, porque o schema lista todas
+    # as rotas e parâmetros da API e não serve a ninguém fora do time.
+    api_docs_habilitado: bool = True
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _normalizar_log_level(cls, valor: object) -> object:
+        return (valor.strip().upper() or "INFO") if isinstance(valor, str) else valor
 
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.

@@ -73,14 +73,36 @@ def exigir_destino_permitido(url: str) -> None:
         ) from erro
 
 
+# Limites da migração online (issue #102). O pre-deploy do Railway passa a ter
+# 120 s; em 08/10 um pre-deploy ficou parado 300 s depois de conectar, até o
+# Railway matar, sem dizer o que esperava. Com estes limites o alembic falha
+# sozinho, com a causa no log, antes de o Railway desistir:
+# - 10 s para conectar: um banco que não responde nesse tempo não vai responder;
+# - 10 s esperando lock: a migração disputa tabela com a API, e uma consulta
+#   presa segurando o lock não pode travar o deploy inteiro;
+# - 90 s por comando: maior que qualquer migração de hoje e menor que os 120 s,
+#   para sobrar tempo de o erro chegar ao log.
+CONNECT_TIMEOUT_SEGUNDOS = 10
+LOCK_TIMEOUT = "10s"
+STATEMENT_TIMEOUT = "90s"
+
+
 def run_migrations_online() -> None:
     exigir_destino_permitido(config.get_main_option("sqlalchemy.url"))
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"connect_timeout": CONNECT_TIMEOUT_SEGUNDOS},
     )
     with connectable.connect() as connection:
+        # SET de sessão, não SET LOCAL: vale para a conexão inteira, inclusive
+        # a transação da migração aberta abaixo. O commit fecha a transação que
+        # o SQLAlchemy abriu sozinho para os SETs; sem ele o begin_transaction
+        # do alembic veria uma transação em curso e não faria commit da migração.
+        connection.exec_driver_sql(f"SET lock_timeout = '{LOCK_TIMEOUT}'")
+        connection.exec_driver_sql(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
+        connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
