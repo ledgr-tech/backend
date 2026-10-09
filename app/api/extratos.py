@@ -69,7 +69,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import obter_empresa_id_autenticada
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_UPLOAD, limiter
+from app.core.rate_limit import LIMITE_UPLOAD, chave_por_empresa, limiter
 from app.models import ExecucaoConciliacao, Extrato, LinhaInvalida
 from app.services.normalizacao import normalizar_extrato
 
@@ -104,7 +104,7 @@ class ExtratoDetalheResponse(BaseModel):
     response_model=ExtratoUploadResponse,
     status_code=http_status.HTTP_201_CREATED,
 )
-@limiter.limit(LIMITE_UPLOAD)
+@limiter.limit(LIMITE_UPLOAD, key_func=chave_por_empresa)
 async def upload_extrato(
     request: Request,
     empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
