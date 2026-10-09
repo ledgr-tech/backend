@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # boot com o motivo, em vez de deixar a API no ar sem log.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
+    # /docs, /redoc e /openapi.json (issue #102). Ligado por padrão, para o
+    # desenvolvimento local; em produção fica false, porque o schema lista todas
+    # as rotas e parâmetros da API e não serve a ninguém fora do time.
+    api_docs_habilitado: bool = True
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:

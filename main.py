@@ -13,6 +13,7 @@ from app.api.extratos import router as extratos_router
 from app.api.fechamentos import router as fechamentos_router
 from app.api.me import router as me_router
 from app.api.senha import router as senha_router
+from app.core.config import settings
 from app.core.frontend_url import avisar_frontend_url_no_startup
 from app.core.logging import configurar_logs
 from app.core.rate_limit import limiter
@@ -33,7 +34,12 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+# Com API_DOCS_HABILITADO=false (produção), /docs, /redoc e /openapi.json
+# respondem 404 (issue #102).
+if settings.api_docs_habilitado:
+    app = FastAPI(lifespan=lifespan)
+else:
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
