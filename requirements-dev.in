@@ -1,0 +1,19 @@
+# Dependências de desenvolvimento (testes, formatação, lint e o próprio
+# pip-tools). O requirements-dev.txt é gerado a partir deste arquivo pelo
+# pip-compile, com versões exatas; não edite o .txt à mão.
+#
+# Gere sempre em Python 3.13 e depois do requirements.txt, porque a linha
+# `-c requirements.txt` abaixo prende as dependências em comum nas versões que
+# a aplicação usa em produção:
+#
+#   - atualizar um pacote:
+#       pip-compile --upgrade-package <pacote> requirements-dev.in
+#   - depois de adicionar ou remover uma linha aqui:
+#       pip-compile requirements-dev.in
+-c requirements.txt
+
+pytest
+black
+ruff
+freezegun
+pip-tools
