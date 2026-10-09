@@ -125,6 +125,17 @@ def _marcar_erro(db: Session, extrato_id: uuid.UUID) -> None:
         db.commit()
 
 
+def _resumo_do_erro(exc: Exception) -> str:
+    """Classe e código SQLSTATE do erro, sem a mensagem (regra da issue #34).
+
+    A mensagem de um erro de banco traz os parâmetros do INSERT ou o
+    "Failing row contains (...)" do Postgres, com a descrição dos lançamentos.
+    O SQLSTATE (ex.: 23505, 57014) diz o tipo de falha sem carregar dado.
+    """
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return f"classe={type(exc).__name__} sqlstate={sqlstate}"
+
+
 def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> None:
     """Parseia `conteudo` e grava os lançamentos normalizados do extrato `extrato_id`.
 
@@ -145,8 +156,13 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
         try:
             resultado = _parse(formato, conteudo)
         except (OFXInvalidoError, CSVInvalidoError) as exc:
+            # Só as classes: a mensagem do parser pode trazer trecho do arquivo
+            # (o ofxtools inclui o OFX inteiro, com MEMO) — regra da issue #34.
             logger.warning(
-                "normalizar_extrato: extrato %s com conteúdo inválido: %s", extrato_id, exc
+                "normalizar_extrato: extrato %s com conteúdo inválido classe=%s causa=%s",
+                extrato_id,
+                type(exc).__name__,
+                type(exc.__cause__).__name__ if exc.__cause__ else None,
             )
             db.rollback()
             _marcar_erro(db, extrato_id)
@@ -222,17 +238,25 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             extrato.periodo_inicio = None
             extrato.periodo_fim = None
         db.commit()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - amplo de propósito, ver abaixo
         # Amplo de propósito — ver docstring do módulo: garante que o
         # extrato nunca fica preso em "processando" por um erro que os
         # except específicos acima não previram (ex: falha de conexão no
         # meio do insert).
-        logger.exception("normalizar_extrato: falha inesperada processando extrato %s", extrato_id)
+        logger.error(
+            "normalizar_extrato: falha inesperada processando extrato %s %s",
+            extrato_id,
+            _resumo_do_erro(exc),
+        )
         db.rollback()
         try:
             _marcar_erro(db, extrato_id)
-        except Exception:
-            logger.exception("normalizar_extrato: falha ao marcar extrato %s como erro", extrato_id)
+        except Exception as exc_marcar:  # noqa: BLE001 - só registra
+            logger.error(
+                "normalizar_extrato: falha ao marcar extrato %s como erro %s",
+                extrato_id,
+                _resumo_do_erro(exc_marcar),
+            )
             db.rollback()
     finally:
         db.close()

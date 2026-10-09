@@ -14,7 +14,12 @@ from app.api.fechamentos import router as fechamentos_router
 from app.api.me import router as me_router
 from app.api.senha import router as senha_router
 from app.core.frontend_url import avisar_frontend_url_no_startup
+from app.core.logging import configurar_logs
 from app.core.rate_limit import limiter
+
+# Antes de criar a app, para que o aviso do startup (FRONTEND_URL) já saia
+# com formato e nível certos (issue #102).
+configurar_logs()
 
 
 @asynccontextmanager
