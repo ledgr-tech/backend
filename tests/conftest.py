@@ -24,6 +24,7 @@ usa pra desenvolver, com dado que você quer manter.
 """
 
 import hashlib
+import logging
 import os
 import random
 import subprocess
@@ -102,6 +103,14 @@ def _auth_e_rate_limit_de_teste(monkeypatch):
     limiter.reset()
     yield
     limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _logs_de_app_chegam_ao_caplog(monkeypatch):
+    """O `main` desliga a propagação do logger `app` para a linha não sair
+    duplicada (app/core/logging.py, issue #102). O `caplog` lê do logger raiz,
+    então nos testes a propagação volta a valer."""
+    monkeypatch.setattr(logging.getLogger("app"), "propagate", True)
 
 
 @pytest.fixture
