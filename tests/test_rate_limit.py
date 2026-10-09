@@ -133,7 +133,9 @@ def test_chave_por_usuario_sem_token_usa_o_ip_do_cliente():
 
 
 def _login(cabecalhos: dict[str, str]) -> int:
-    corpo = {"email": "ninguem@exemplo.com", "senha": "senha-errada-123"}
+    # Um e-mail por tentativa: com o mesmo, o bloqueio por conta (issue #67)
+    # responderia 429 já na 6ª, e o que se testa aqui é o limite por IP.
+    corpo = {"email": f"{uuid.uuid4().hex[:12]}@exemplo.com", "senha": "senha-errada-123"}
     return client.post("/login", json=corpo, headers=cabecalhos).status_code
 
 
