@@ -36,6 +36,14 @@ ALGORITMO_JWT = "HS256"
 _bearer = HTTPBearer(auto_error=False)
 
 
+def normalizar_email(email: str) -> str:
+    """Forma única do e-mail: a que fica no banco e a chave do bloqueio de login.
+
+    Mora aqui, e não em app/api/auth.py, para app/core/bloqueio_login.py usar
+    sem importar a camada de rotas (issue #67)."""
+    return email.strip().lower()
+
+
 def _nao_autenticado() -> HTTPException:
     return HTTPException(
         status_code=http_status.HTTP_401_UNAUTHORIZED,

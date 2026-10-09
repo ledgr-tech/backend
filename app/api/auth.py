@@ -3,9 +3,16 @@
 O login devolve só os dados do usuário, sem token: quem emite o JWT é o
 NextAuth (ADR-003). O cadastro é self-service e cria a empresa junto. O 401 do
 login é o mesmo pra qualquer falha, pra não revelar quais e-mails têm conta.
+
+Além do rate limit por IP, o login tem bloqueio por conta (issue #67): 5 senhas
+erradas para o mesmo e-mail em 15 minutos bloqueiam esse e-mail por 15 minutos,
+com 429 e `Retry-After`. Ver app/core/bloqueio_login.py.
 """
 
+import logging
+import math
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,19 +22,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core import senha
+from app.core import bloqueio_login, senha
+from app.core.auth import normalizar_email
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
 from app.core.rate_limit import LIMITE_CADASTRO, LIMITE_LOGIN, limiter
 from app.models import Configuracao, Empresa, Usuario
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["autenticacao"])
 
 TAMANHO_MINIMO_SENHA = 8
-
-
-def normalizar_email(email: str) -> str:
-    return email.strip().lower()
 
 
 def _senha_cabe_no_bcrypt(valor: str) -> str:
@@ -126,15 +132,32 @@ def login(
     dados: LoginRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> UsuarioResponse:
-    usuario = db.scalar(select(Usuario).where(Usuario.email == normalizar_email(dados.email)))
+    email = normalizar_email(dados.email)
+
+    # Bloqueio por conta (issue #67): antes do banco e do bcrypt, igual para
+    # e-mail com e sem conta. Não loga o e-mail nem o hash dele.
+    ate = bloqueio_login.bloqueado_ate(email)
+    if ate is not None:
+        logger.info("login_bloqueado motivo=tentativa_durante_bloqueio")
+        segundos = max(1, math.ceil((ate - datetime.now(UTC)).total_seconds()))
+        raise HTTPException(
+            status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Muitas tentativas. Tente novamente mais tarde.",
+            headers={"Retry-After": str(segundos)},
+        )
+
+    usuario = db.scalar(select(Usuario).where(Usuario.email == email))
     senha_hash = usuario.senha_hash if usuario else None
 
     if not senha.verificar(dados.senha, senha_hash):
+        if bloqueio_login.registrar_falha(email):
+            logger.info("login_bloqueado motivo=limite_de_falhas")
         raise HTTPException(
             status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="E-mail ou senha inválidos.",
         )
 
+    bloqueio_login.limpar(email)
     return UsuarioResponse(
         id=usuario.id, empresa_id=usuario.empresa_id, nome=usuario.nome, email=usuario.email
     )

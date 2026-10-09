@@ -52,7 +52,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.auth import SenhaNova, normalizar_email
-from app.core import senha
+from app.core import bloqueio_login, senha
 from app.core.database import SessionLocal, get_db
 from app.core.frontend_url import frontend_url_para_link
 from app.core.rate_limit import LIMITE_RECUPERACAO_SENHA, LIMITE_REDEFINICAO_SENHA, limiter
@@ -257,5 +257,7 @@ def redefinir_senha(
     invalidar_links_de_recuperacao(db, usuario.id)
     para, nome = usuario.email, usuario.nome  # antes do commit, que expira o objeto
     db.commit()
+    # O link de recuperação destrava o login bloqueado por senha errada (issue #67).
+    bloqueio_login.limpar(para)
     logger.info("redefinicao_senha resultado=sucesso")
     agendar_aviso_senha_alterada(tarefas, provedor, para, nome)

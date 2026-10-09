@@ -40,7 +40,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from app.core import senha
+from app.core import bloqueio_login, senha
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
@@ -103,6 +103,16 @@ def _auth_e_rate_limit_de_teste(monkeypatch):
     limiter.reset()
     yield
     limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _bloqueio_de_login_zerado():
+    """O bloqueio de login por conta (issue #67) é em memória e vale para o
+    processo inteiro: sem zerar, as falhas de um teste bloqueariam o e-mail de
+    outro."""
+    bloqueio_login.limpar_tudo()
+    yield
+    bloqueio_login.limpar_tudo()
 
 
 @pytest.fixture(autouse=True)
