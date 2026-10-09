@@ -69,6 +69,10 @@ LIMITE_UPLOAD = "10/minute"
 # navegador (ver o docstring do módulo).
 LIMITE_LOGIN = "10/minute"
 LIMITE_CADASTRO = "5/minute"
+# Verificação de e-mail e CNPJ antes do fim do cadastro (issue #80). A resposta
+# diz qual dos dois já tem conta, então este limite é a proteção contra
+# enumeração de e-mails e CNPJs cadastrados.
+LIMITE_VERIFICACAO_CADASTRO = "10/minute"
 # Recuperação de senha (issue #66). O limite que protege cada endereço é o de
 # envios por hora, por destino, em app/api/senha.py.
 LIMITE_RECUPERACAO_SENHA = "10/minute"

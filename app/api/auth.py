@@ -1,8 +1,10 @@
 """Cadastro e login por credenciais (issue #57).
 
 O login devolve só os dados do usuário, sem token: quem emite o JWT é o
-NextAuth (ADR-003). O cadastro é self-service e cria a empresa junto. O 401 do
-login é o mesmo pra qualquer falha, pra não revelar quais e-mails têm conta.
+NextAuth (ADR-003). O cadastro é self-service e cria a empresa junto, e
+`POST /register/verificar` diz antes se o e-mail e o CNPJ estão livres (issue
+#80). O 401 do login é o mesmo pra qualquer falha, pra não revelar quais
+e-mails têm conta.
 
 Além do rate limit por IP, o login tem bloqueio por conta (issue #67): 5 senhas
 erradas para o mesmo e-mail em 15 minutos bloqueiam esse e-mail por 15 minutos,
@@ -26,7 +28,12 @@ from app.core import bloqueio_login, senha
 from app.core.auth import normalizar_email
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_CADASTRO, LIMITE_LOGIN, limiter
+from app.core.rate_limit import (
+    LIMITE_CADASTRO,
+    LIMITE_LOGIN,
+    LIMITE_VERIFICACAO_CADASTRO,
+    limiter,
+)
 from app.models import Configuracao, Empresa, Usuario
 
 logger = logging.getLogger(__name__)
@@ -48,12 +55,24 @@ SenhaNova = Annotated[
 ]
 
 
+def _cnpj_valido(valor: str) -> str:
+    normalizado = normalizar_cnpj(valor)
+    if normalizado is None:
+        raise ValueError("CNPJ inválido")
+    return normalizado
+
+
+# CNPJ com dígito verificador, sem máscara e em maiúsculas; o mesmo no cadastro
+# e na verificação antes dele (issue #80).
+CnpjValido = Annotated[str, AfterValidator(_cnpj_valido)]
+
+
 class CadastroRequest(BaseModel):
     nome: str = Field(min_length=1)
     email: EmailStr
     senha: SenhaNova
     razao_social: str = Field(min_length=1)
-    cnpj: str
+    cnpj: CnpjValido
 
     @field_validator("nome", "razao_social")
     @classmethod
@@ -63,13 +82,15 @@ class CadastroRequest(BaseModel):
             raise ValueError("não pode ser vazio")
         return valor
 
-    @field_validator("cnpj")
-    @classmethod
-    def _cnpj_valido(cls, valor: str) -> str:
-        normalizado = normalizar_cnpj(valor)
-        if normalizado is None:
-            raise ValueError("CNPJ inválido")
-        return normalizado
+
+class VerificacaoCadastroRequest(BaseModel):
+    email: EmailStr
+    cnpj: CnpjValido
+
+
+class VerificacaoCadastroResponse(BaseModel):
+    email_disponivel: bool
+    cnpj_disponivel: bool
 
 
 class LoginRequest(BaseModel):
@@ -122,6 +143,40 @@ def cadastrar(
 
     return UsuarioResponse(
         id=usuario.id, empresa_id=empresa.id, nome=usuario.nome, email=usuario.email
+    )
+
+
+@router.post("/register/verificar", response_model=VerificacaoCadastroResponse)
+@limiter.limit(LIMITE_VERIFICACAO_CADASTRO)
+def verificar_cadastro(
+    request: Request,
+    dados: VerificacaoCadastroRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> VerificacaoCadastroResponse:
+    """Diz se o e-mail e o CNPJ ainda estão livres, antes do fim do cadastro (issue #80).
+
+    Pública, como o /register. Valida os dois campos com as mesmas regras dele
+    (inválido é 422 no mesmo formato) e não cria nada: o /register confere tudo
+    de novo no fim, e a corrida entre verificar e cadastrar continua coberta pelo
+    409 dele.
+
+    A resposta diz qual dos dois está em uso, de propósito, divergindo do texto
+    da issue. Uma resposta genérica ("um dos dois já existe") não impediria a
+    enumeração: basta mandar o e-mail com um CNPJ válido inventado. E o próprio
+    /register já responde "E-mail já cadastrado." ou "CNPJ já cadastrado."
+    separadamente. O que limita a enumeração é o rate limit por IP
+    (`LIMITE_VERIFICACAO_CADASTRO`).
+
+    As duas consultas rodam sempre, mesmo quando a primeira já achou, para o
+    tempo de resposta não depender de qual dos dois existe. Não loga o e-mail
+    nem o CNPJ.
+    """
+    email_em_uso = db.scalar(
+        select(Usuario.id).where(Usuario.email == normalizar_email(dados.email))
+    )
+    cnpj_em_uso = db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj))
+    return VerificacaoCadastroResponse(
+        email_disponivel=email_em_uso is None, cnpj_disponivel=cnpj_em_uso is None
     )
 
 
