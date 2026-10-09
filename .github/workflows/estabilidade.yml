@@ -16,6 +16,12 @@ on:
   pull_request:
     types: [labeled]
 
+# Os jobs só fazem checkout e rodam testes: leitura do repositório basta. Sem
+# este bloco o GITHUB_TOKEN herda a permissão padrão do repositório, que pode
+# incluir escrita (issue #102).
+permissions:
+  contents: read
+
 jobs:
   suite:
     name: rodada ${{ matrix.rodada }}

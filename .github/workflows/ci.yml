@@ -6,6 +6,12 @@ on:
   push:
     branches: [main, develop]
 
+# Os jobs só fazem checkout e rodam testes: leitura do repositório basta. Sem
+# este bloco o GITHUB_TOKEN herda a permissão padrão do repositório, que pode
+# incluir escrita (issue #102).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
