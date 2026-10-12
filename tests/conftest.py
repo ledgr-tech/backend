@@ -106,6 +106,18 @@ def _auth_e_rate_limit_de_teste(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _email_de_verdade_desligado(monkeypatch):
+    """Nenhum teste fala com o Resend de verdade.
+
+    O `.env` de quem desenvolve pode ter `EMAIL_HABILITADO=true` com uma chave
+    real, e o `/register` manda e-mail de boas-vindas desde a issue #78: sem
+    isto, todo cadastro feito por um teste sairia como e-mail de verdade. Quem
+    precisa de envio usa a fixture `provedor` (ou troca a dependency), que não
+    passa por esta configuração."""
+    monkeypatch.setattr(settings, "email_habilitado", False)
+
+
+@pytest.fixture(autouse=True)
 def _bloqueio_de_login_zerado():
     """O bloqueio de login por conta (issue #67) é em memória e vale para o
     processo inteiro: sem zerar, as falhas de um teste bloqueariam o e-mail de

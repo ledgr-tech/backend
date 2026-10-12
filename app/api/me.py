@@ -31,11 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import SenhaNova
-from app.api.senha import (
-    agendar_aviso_senha_alterada,
-    invalidar_links_de_recuperacao,
-    obter_provedor_email_dependencia,
-)
+from app.api.senha import agendar_aviso_senha_alterada, invalidar_links_de_recuperacao
 from app.core import senha
 from app.core.auth import obter_usuario_autenticado
 from app.core.database import get_db
@@ -47,6 +43,7 @@ from app.core.rate_limit import (
 )
 from app.models import Usuario
 from app.services.email import ProvedorDeEmail
+from app.services.email.envio import obter_provedor_email_dependencia
 
 __all__ = ["LIMITE_CONSULTA_ME_POR_USUARIO", "LIMITE_TROCA_SENHA_POR_USUARIO", "router"]
 
