@@ -29,6 +29,10 @@ class Usuario(Base, TimestampMixin):
     mantém o nome, apaga senha e `google_sub` e troca o e-mail por
     `removido+<id>@ledgr.invalid`, que libera o endereço para outro cadastro
     ou convite. Regra em app/services/usuarios.py.
+
+    `sessoes_validas_desde` encerra as sessões abertas: a troca de senha, a
+    redefinição pelo link e a remoção gravam o instante, e o token com
+    login anterior a ele deixa de valer (issue #75).
     """
 
     __tablename__ = "usuarios"
@@ -58,5 +62,10 @@ class Usuario(Base, TimestampMixin):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
     removido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Token com `auth_time` anterior a isto é recusado (issue #75, ADR-016).
+    # Nulo: nenhuma sessão foi encerrada. Ver app/core/auth.py.
+    sessoes_validas_desde: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     empresa: Mapped["Empresa"] = relationship(back_populates="usuarios")  # noqa: F821
