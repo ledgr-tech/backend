@@ -8,11 +8,17 @@ import hashlib
 import uuid
 
 from app.services.ia.base import ContextoDivergencia
+from app.services.ia.mascaramento import MODO_TERMOS, ModoDescricao
 from app.services.ia.prompt import VERSAO_PROMPT, serializar_contexto
 
 
 def chave_cache(
-    empresa_id: uuid.UUID, provedor: str, modelo: str, contexto: ContextoDivergencia
+    empresa_id: uuid.UUID,
+    provedor: str,
+    modelo: str,
+    contexto: ContextoDivergencia,
+    *,
+    modo: ModoDescricao = MODO_TERMOS,
 ) -> str:
     """sha256 hex (64 caracteres) de `empresa_id` + `provedor` + `modelo` +
     `VERSAO_PROMPT` + `serializar_contexto(contexto)` (que já mascara e já
@@ -25,8 +31,19 @@ def chave_cache(
     componentes e gera uma chave diferente, invalidando o cache sozinho
     (ADR-011). Determinística: a mesma entrada sempre produz a mesma
     chave, e duas empresas com o mesmo contexto geram chaves diferentes
-    (o `empresa_id` entra na composição)."""
+    (o `empresa_id` entra na composição).
+
+    `modo` (issue #87) é o mesmo `LLM_MODO_DESCRICAO` que o provedor usa no
+    prompt: a serialização muda com ele, e a chave junto. Quando as duas
+    serializações dão o mesmo texto (descrição só com termos permitidos), a
+    chave é a mesma de propósito: o prompt enviado seria idêntico."""
     bruto = "|".join(
-        (str(empresa_id), provedor, modelo, VERSAO_PROMPT, serializar_contexto(contexto))
+        (
+            str(empresa_id),
+            provedor,
+            modelo,
+            VERSAO_PROMPT,
+            serializar_contexto(contexto, modo=modo),
+        )
     )
     return hashlib.sha256(bruto.encode()).hexdigest()

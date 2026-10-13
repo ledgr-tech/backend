@@ -3,7 +3,9 @@ mensagens pro provedor de IA (issue #28, ADR-011).
 
 `serializar_contexto` é o ÚNICO caminho do contexto até o prompt — e, no
 PR B, até o hash da chave de cache. A máscara de
-app/services/ia/mascaramento.py é aplicada aqui dentro, nunca antes.
+app/services/ia/mascaramento.py é aplicada aqui dentro, nunca antes, e no
+modo "termos" (issue #87) também o filtro de termos permitidos. Como o modo
+muda o texto serializado, trocar de modo muda a chave do cache sozinho.
 `VERSAO_PROMPT` entra na chave de cache do PR B: mudar o texto do prompt ou
 subir essa versão invalida o cache sozinho.
 """
@@ -11,7 +13,7 @@ subir essa versão invalida o cache sozinho.
 import json
 
 from app.services.ia.base import CandidatoContexto, ContextoDivergencia, LancamentoContexto
-from app.services.ia.mascaramento import mascarar_descricao
+from app.services.ia.mascaramento import MODO_TERMOS, ModoDescricao, preparar_descricao
 
 VERSAO_PROMPT = "v1"
 
@@ -58,18 +60,18 @@ def motivo_deterministico(status: str) -> str:
     raise ValueError(f"Status '{status}' não é elegível para explicação de divergência.")
 
 
-def _lancamento_para_dict(lancamento: LancamentoContexto) -> dict:
+def _lancamento_para_dict(lancamento: LancamentoContexto, modo: ModoDescricao) -> dict:
     return {
         "data": lancamento.data.isoformat(),
         "valor": f"{lancamento.valor:.2f}",
         "tipo": lancamento.tipo,
-        "descricao": mascarar_descricao(lancamento.descricao),
+        "descricao": preparar_descricao(lancamento.descricao, modo),
     }
 
 
-def _candidato_para_dict(candidato: CandidatoContexto) -> dict:
+def _candidato_para_dict(candidato: CandidatoContexto, modo: ModoDescricao) -> dict:
     return {
-        "lancamento": _lancamento_para_dict(candidato.lancamento),
+        "lancamento": _lancamento_para_dict(candidato.lancamento, modo),
         "diferenca_valor": (
             f"{candidato.diferenca_valor:.2f}" if candidato.diferenca_valor is not None else None
         ),
@@ -77,7 +79,7 @@ def _candidato_para_dict(candidato: CandidatoContexto) -> dict:
     }
 
 
-def serializar_contexto(contexto: ContextoDivergencia) -> str:
+def serializar_contexto(contexto: ContextoDivergencia, *, modo: ModoDescricao = MODO_TERMOS) -> str:
     """JSON canônico e determinístico do contexto (ADR-011): `sort_keys`,
     separadores fixos, `ensure_ascii=False`, `Decimal` como string com duas
     casas, data em ISO. Único caminho do dado até o prompt (e até o hash da
@@ -90,12 +92,16 @@ def serializar_contexto(contexto: ContextoDivergencia) -> str:
     diferença nenhuma pra quem lê o dado), mas nenhuma descrição consegue
     conter o delimitador `<dados>`/`</dados>` literal que `montar_mensagens`
     usa pra envolver este texto. Determinístico: a mesma entrada sempre
-    produz a mesma string, inclusive pro hash da chave de cache do PR B."""
+    produz a mesma string, inclusive pro hash da chave de cache do PR B.
+
+    `modo` é o `LLM_MODO_DESCRICAO` (issue #87): "termos" (padrão) ou
+    "mascarada". Quem chama passa o da configuração; o padrão é o mais
+    restritivo, para um esquecimento nunca mandar descrição a mais."""
     corpo = {
         "status": contexto.status,
         "motivo": contexto.motivo,
-        "lancamento": _lancamento_para_dict(contexto.lancamento),
-        "candidatos": [_candidato_para_dict(c) for c in contexto.candidatos],
+        "lancamento": _lancamento_para_dict(contexto.lancamento, modo),
+        "candidatos": [_candidato_para_dict(c, modo) for c in contexto.candidatos],
         "quantidade_mesmo_lado": contexto.quantidade_mesmo_lado,
         "quantidade_outro_lado": contexto.quantidade_outro_lado,
     }
@@ -116,14 +122,16 @@ _INSTRUCAO_SISTEMA = (
 )
 
 
-def montar_mensagens(contexto: ContextoDivergencia) -> list[dict]:
+def montar_mensagens(
+    contexto: ContextoDivergencia, *, modo: ModoDescricao = MODO_TERMOS
+) -> list[dict]:
     """Mensagens pro provedor (ADR-011): uma "system" fixa (instrução acima)
     e uma "user" só com o JSON serializado (já mascarado), dentro de um
     delimitador claro (`<dados>`/`</dados>`). A descrição de terceiro nunca
     aparece fora desse bloco — uma tentativa de injeção de prompt dentro
     dela é só mais um valor de string no JSON, nunca texto interpretado
     como instrução pelo modelo."""
-    dados = serializar_contexto(contexto)
+    dados = serializar_contexto(contexto, modo=modo)
     return [
         {"role": "system", "content": _INSTRUCAO_SISTEMA},
         {"role": "user", "content": f"<dados>\n{dados}\n</dados>"},

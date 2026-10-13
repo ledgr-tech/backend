@@ -260,6 +260,40 @@ def test_log_da_cota_esgotada_nao_tem_o_corpo(caplog):
     assert "status_http=429" in caplog.text
 
 
+# modo de descrição (issue #87)
+
+
+@pytest.mark.parametrize(
+    ("modo", "descricao_esperada"),
+    [("termos", "PIX [TEXTO]"), ("mascarada", "PIX JOAO DA SILVA")],
+)
+def test_corpo_da_requisicao_usa_o_modo_de_descricao(modo, descricao_esperada):
+    capturadas = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        capturadas.append(request)
+        return httpx.Response(200, json=_resposta_sucesso())
+
+    contexto = ContextoDivergencia(
+        status="sem_correspondencia",
+        motivo="m",
+        lancamento=LancamentoContexto(
+            data=date(2026, 9, 20),
+            valor=Decimal("10.00"),
+            tipo="debito",
+            descricao="PIX JOAO DA SILVA",
+        ),
+        candidatos=(),
+        quantidade_mesmo_lado=None,
+        quantidade_outro_lado=None,
+    )
+    _provedor(handler, modo_descricao=modo).explicar_divergencia(contexto)
+
+    usuario = json.loads(capturadas[0].content)["messages"][1]["content"]
+    dados = json.loads(usuario.removeprefix("<dados>\n").removesuffix("\n</dados>"))
+    assert dados["lancamento"]["descricao"] == descricao_esperada
+
+
 def test_json_invalido_levanta_indisponivel_com_motivo_resposta_invalida():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"isto nao e json{{{")

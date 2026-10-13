@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 
 from app.services.ia.base import ContextoDivergencia, ProvedorIAIndisponivel, RespostaIA
+from app.services.ia.mascaramento import MODO_TERMOS, ModoDescricao
 from app.services.ia.prompt import montar_mensagens
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,7 @@ class ProvedorOpenAI:
         timeout_segundos: float,
         max_tokens_saida: int,
         cliente_http: httpx.Client | None = None,
+        modo_descricao: ModoDescricao = MODO_TERMOS,
     ) -> None:
         self._api_key = api_key
         self._modelo = modelo
@@ -130,6 +132,7 @@ class ProvedorOpenAI:
         self._timeout_segundos = timeout_segundos
         self._max_tokens_saida = max_tokens_saida
         self._cliente_http = cliente_http
+        self._modo_descricao = modo_descricao
 
     def explicar_divergencia(
         self, contexto: ContextoDivergencia, *, identificador_anonimo: str | None = None
@@ -139,7 +142,7 @@ class ProvedorOpenAI:
 
         corpo: dict = {
             "model": self._modelo,
-            "messages": montar_mensagens(contexto),
+            "messages": montar_mensagens(contexto, modo=self._modo_descricao),
             "reasoning_effort": "none",
             "max_completion_tokens": self._max_tokens_saida,
             "store": False,

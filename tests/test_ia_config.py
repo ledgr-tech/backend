@@ -22,6 +22,7 @@ _VARIAVEIS_LLM = (
     "OPENAI_BASE_URL",
     "LLM_TIMEOUT_SEGUNDOS",
     "LLM_MAX_TOKENS_SAIDA",
+    "LLM_MODO_DESCRICAO",
 )
 
 
@@ -54,6 +55,7 @@ def test_defaults_da_issue_87():
     campos = Settings.model_fields
     assert campos["llm_limite_diario_empresa"].default == 300
     assert campos["llm_limite_diario_global"].default == 1500
+    assert campos["llm_modo_descricao"].default == "termos"
 
 
 def test_ausencia_das_variaveis_nao_quebra_a_aplicacao(monkeypatch):

@@ -470,6 +470,23 @@ def test_outros_motivos_continuam_em_info(cenario, caplog, motivo):
     assert f"motivo={motivo}" in registro.getMessage()
 
 
+def test_mudar_modo_de_descricao_invalida_cache(cenario, provedor_falso, monkeypatch):
+    """Issue #87: "Item divergente" sai como "[TEXTO]" no modo termos e inteiro
+    no mascarada, então a chave muda sozinha."""
+    _empresa, linha, headers = cenario
+
+    monkeypatch.setattr(settings, "llm_modo_descricao", "termos")
+    primeira = _explicar(headers, linha.id)
+    monkeypatch.setattr(settings, "llm_modo_descricao", "mascarada")
+    segunda = _explicar(headers, linha.id)
+    terceira = _explicar(headers, linha.id)
+
+    assert primeira.json()["em_cache"] is False
+    assert segunda.json()["em_cache"] is False
+    assert terceira.json()["em_cache"] is True
+    assert len(provedor_falso.chamadas) == 2
+
+
 def test_provedor_indisponivel_proxima_chamada_tenta_de_novo(db_session, cenario):
     _empresa, linha, headers = cenario
     fake_falha = ProvedorFalso(excecao=ProvedorIAIndisponivel("timeout"))

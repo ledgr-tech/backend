@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     # de US$ 15/mês do projeto na OpenAI: o limite do backend bate antes.
     llm_limite_diario_empresa: int = 300
     llm_limite_diario_global: int = 1500
+    # O que a descrição do lançamento leva ao provedor (issue #87, ADR-011):
+    # "termos" (padrão) deixa só termos bancários e marcadores, o resto vira
+    # [TEXTO]; "mascarada" manda a descrição com a máscara de CPF, CNPJ etc.,
+    # mas com nomes de pessoa. "termos" vale enquanto não houver Zero Data
+    # Retention. Valor fora da lista derruba o boot, como LOG_LEVEL.
+    llm_modo_descricao: Literal["termos", "mascarada"] = "termos"
 
     # E-mail transacional (issue #66, ADR-012): link de recuperação de senha
     # e de aprovação da troca de e-mail, pelo Resend. Desligado por padrão,
@@ -71,6 +77,11 @@ class Settings(BaseSettings):
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:
         return (valor.strip().upper() or "INFO") if isinstance(valor, str) else valor
+
+    @field_validator("llm_modo_descricao", mode="before")
+    @classmethod
+    def _normalizar_llm_modo_descricao(cls, valor: object) -> object:
+        return (valor.strip().lower() or "termos") if isinstance(valor, str) else valor
 
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.

@@ -155,7 +155,13 @@ def criar_explicacao(
             indisponibilidade="desabilitado",
         )
 
-    chave = chave_cache(empresa_id, settings.llm_provedor, settings.openai_modelo, contexto)
+    chave = chave_cache(
+        empresa_id,
+        settings.llm_provedor,
+        settings.openai_modelo,
+        contexto,
+        modo=settings.llm_modo_descricao,
+    )
 
     cache_existente = db.execute(
         select(ExplicacaoDivergencia).where(
