@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # para todos os usuários do front. Mesmo valor nos dois lados.
     ledgr_segredo_proxy: str = ""
 
+    # Login pelo Google (issue #73): o client id do client OAuth da Ledgr no
+    # Google Cloud, o mesmo que o NextAuth usa na Vercel. O backend confere
+    # que o `aud` do ID token é este valor (app/core/google.py). Vazio deixa
+    # as rotas `*/google` em 503, sem chamar o Google, e não bloqueia o boot.
+    google_client_id: str = ""
+
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
     # boot com o motivo, em vez de deixar a API no ar sem log.

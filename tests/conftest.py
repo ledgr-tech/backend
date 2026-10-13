@@ -36,11 +36,13 @@ from pathlib import Path
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.core import bloqueio_login, senha
+from app.core import google as modulo_google
 from app.core.auth import DURACAO_SESSAO_SEGUNDOS
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
@@ -122,6 +124,23 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     monkeypatch.setattr(settings, "llm_habilitado", False)
 
 
+class _ClienteDeChavesProibido:
+    """No lugar do `PyJWKClient` de app/core/google.py: nenhum teste busca as
+    chaves do Google de verdade."""
+
+    def get_signing_key_from_jwt(self, token):
+        raise AssertionError("teste tentou buscar as chaves do Google de verdade")
+
+
+@pytest.fixture(autouse=True)
+def _google_de_verdade_desligado(monkeypatch):
+    """Login pelo Google desligado (`GOOGLE_CLIENT_ID` vazio) e o cliente de
+    chaves trocado por um que falha (issue #73). Quem testa o Google usa a
+    fixture `google`, com chave RSA gerada na hora."""
+    monkeypatch.setattr(settings, "google_client_id", "")
+    monkeypatch.setattr(modulo_google, "_cliente_de_chaves", _ClienteDeChavesProibido())
+
+
 @pytest.fixture(autouse=True)
 def _bloqueio_de_login_zerado():
     """O bloqueio de login por conta (issue #67) é em memória e vale para o
@@ -195,6 +214,89 @@ def auth_headers(gerar_token, request):
         return {"Authorization": f"Bearer {token}"}
 
     return _headers
+
+
+GOOGLE_CLIENT_ID_TESTE = "ledgr-teste.apps.googleusercontent.com"
+KID_GOOGLE_TESTE = "kid-de-teste"
+
+
+@pytest.fixture(scope="session")
+def _chaves_rsa():
+    """Duas chaves RSA, geradas uma vez por sessão: a do "Google" e outra,
+    para a assinatura errada."""
+    return tuple(rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in "12")
+
+
+class ClienteDeChavesFalso:
+    """Faz o papel do `PyJWKClient`: devolve a chave pública do `kid` do
+    token, sem rede. Com `falha_de_conexao`, falha como o Google fora do ar.
+    `buscas` conta as chamadas; `conexoes_em_uso` guarda quantas conexões do
+    pool estavam em uso em cada uma."""
+
+    def __init__(self, chave_publica) -> None:
+        jwk = jwt.algorithms.RSAAlgorithm.to_jwk(chave_publica, as_dict=True)
+        self._chaves = {
+            KID_GOOGLE_TESTE: jwt.PyJWK({**jwk, "kid": KID_GOOGLE_TESTE, "alg": "RS256"})
+        }
+        self.falha_de_conexao = False
+        self.buscas = 0
+        self.conexoes_em_uso: list[int] = []
+
+    def get_signing_key_from_jwt(self, token):
+        self.buscas += 1
+        self.conexoes_em_uso.append(engine.pool.checkedout())
+        if self.falha_de_conexao:
+            raise jwt.PyJWKClientConnectionError("Google fora do ar (teste)")
+        kid = jwt.get_unverified_header(token).get("kid")
+        if kid not in self._chaves:
+            raise jwt.PyJWKClientError(f"Unable to find a signing key that matches: {kid!r}")
+        return self._chaves[kid]
+
+
+class GoogleFalso:
+    """Emite ID tokens como o Google, assinados com a chave de teste."""
+
+    def __init__(self, chave_privada, outra_chave, cliente: ClienteDeChavesFalso) -> None:
+        self._chave_privada = chave_privada
+        self._outra_chave = outra_chave
+        self.cliente = cliente
+
+    def id_token(
+        self,
+        email: str | None = "maria@gmail.com",
+        nome: str | None = "Maria Google",
+        assinar_com_outra_chave: bool = False,
+        kid: str = KID_GOOGLE_TESTE,
+        **claims,
+    ) -> str:
+        """`claims` sobrescreve qualquer claim; valor `None` tira o claim."""
+        agora = datetime.now(UTC)
+        payload = {
+            "iss": "https://accounts.google.com",
+            "azp": GOOGLE_CLIENT_ID_TESTE,
+            "aud": GOOGLE_CLIENT_ID_TESTE,
+            "sub": f"1{random.randint(10**19, 10**20 - 1)}",
+            "email": email,
+            "email_verified": True,
+            "name": nome,
+            "iat": agora,
+            "exp": agora + timedelta(hours=1),
+            **claims,
+        }
+        payload = {chave: valor for chave, valor in payload.items() if valor is not None}
+        chave = self._outra_chave if assinar_com_outra_chave else self._chave_privada
+        return jwt.encode(payload, chave, algorithm="RS256", headers={"kid": kid})
+
+
+@pytest.fixture
+def google(monkeypatch, _chaves_rsa):
+    """Login pelo Google ligado com `GOOGLE_CLIENT_ID_TESTE` e o cliente de
+    chaves falso. Nada sai para a rede."""
+    chave_privada, outra_chave = _chaves_rsa
+    cliente = ClienteDeChavesFalso(chave_privada.public_key())
+    monkeypatch.setattr(settings, "google_client_id", GOOGLE_CLIENT_ID_TESTE)
+    monkeypatch.setattr(modulo_google, "_cliente_de_chaves", cliente)
+    return GoogleFalso(chave_privada, outra_chave, cliente)
 
 
 def _postgres_disponivel() -> bool:
