@@ -36,16 +36,14 @@ def upgrade() -> None:
 
     # Quem cadastrou a empresa é o usuário mais antigo dela. Empate em
     # `criado_em` (mesma transação) desempata pelo id, para sair um só.
-    op.execute(
-        """
+    op.execute("""
         UPDATE usuarios SET administrador = true
         WHERE id IN (
             SELECT DISTINCT ON (empresa_id) id
             FROM usuarios
             ORDER BY empresa_id, criado_em, id
         )
-        """
-    )
+        """)
     op.create_index(
         UNICO_ADMINISTRADOR,
         "usuarios",
