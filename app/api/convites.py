@@ -13,11 +13,18 @@ convite, com o e-mail do convite, e marca o convite como usado. Responde como
 o `/register` (`UsuarioResponse`), e o front faz o login em seguida. Não manda
 boas-vindas: quem convidou já avisou.
 
-Token inexistente, expirado, usado ou cancelado: 400 nas duas, nunca 401 (o
+`POST /convites/aceitar/google` (issue #73) é o mesmo aceite com o
+`id_token` do Google no lugar da senha. O backend confere o token antes de
+tocar no banco (app/core/google.py), e o e-mail do Google tem de ser o do
+convite. Cria o usuário sem senha, com o `google_sub`, e responde com
+`LoginResponse`, porque já é o login.
+
+Token inexistente, expirado, usado ou cancelado: 400 nas três, nunca 401 (o
 frontend trata todo 401 como sessão expirada). Se o e-mail ganhou conta entre
 o convite e o aceite: 409.
 
-Nunca loga o token, o e-mail nem o nome: só o resultado categorizado.
+Nunca loga o token do convite, o `id_token`, o e-mail, o `sub` nem o nome: só
+o resultado categorizado.
 """
 
 import logging
@@ -32,9 +39,20 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.auth import SenhaNova, UsuarioResponse
+from app.api.auth import (
+    CONTA_GOOGLE_JA_CADASTRADA,
+    IdToken,
+    LoginResponse,
+    SenhaNova,
+    TextoPreenchido,
+    UsuarioResponse,
+    nome_da_conta,
+    resposta_de_login,
+    usuario_pelo_google_sub,
+)
 from app.core import senha
 from app.core.database import get_db
+from app.core.google import identidade_ou_erro_http
 from app.core.rate_limit import LIMITE_CONVITE, limiter
 from app.models import Empresa, Usuario
 from app.services.convites import convite_pendente_pelo_token
@@ -68,6 +86,13 @@ class AceiteConviteRequest(BaseModel):
         if not valor:
             raise ValueError("não pode ser vazio")
         return valor
+
+
+class AceiteConviteGoogleRequest(BaseModel):
+    token: Token
+    id_token: IdToken
+    # Sem `nome`, vale o `name` do token do Google, como no /register/google.
+    nome: TextoPreenchido | None = None
 
 
 def _convite_invalido() -> HTTPException:
@@ -136,3 +161,64 @@ def aceitar(
 
     logger.info("convite_aceite resultado=aceito")
     return resposta
+
+
+@router.post(
+    "/aceitar/google", response_model=LoginResponse, status_code=http_status.HTTP_201_CREATED
+)
+@limiter.limit(LIMITE_CONVITE)
+def aceitar_com_google(
+    request: Request,
+    dados: AceiteConviteGoogleRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> LoginResponse:
+    # Antes do banco: a busca das chaves não pode segurar o FOR UPDATE.
+    identidade = identidade_ou_erro_http(dados.id_token, logger, "convite_aceite_google")
+    nome = nome_da_conta(dados.nome, identidade)
+
+    convite = convite_pendente_pelo_token(db, dados.token, travar=True)
+    if convite is None:
+        logger.info("convite_aceite_google resultado=token_invalido")
+        raise _convite_invalido()
+    if identidade.email != convite.email:
+        logger.info("convite_aceite_google resultado=email_diferente")
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="O e-mail da conta Google é diferente do e-mail convidado.",
+        )
+
+    email_em_uso = HTTPException(
+        status_code=http_status.HTTP_409_CONFLICT, detail="E-mail já cadastrado."
+    )
+    if db.scalar(select(Usuario.id).where(Usuario.email == convite.email)):
+        logger.info("convite_aceite_google resultado=email_em_uso")
+        raise email_em_uso
+    if usuario_pelo_google_sub(db, identidade.sub) is not None:
+        # A conta Google já entra no Ledgr com outro e-mail (trocou o e-mail
+        # no Google depois do cadastro).
+        logger.info("convite_aceite_google resultado=google_ja_cadastrado")
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT, detail=CONTA_GOOGLE_JA_CADASTRADA
+        )
+
+    usuario = Usuario(
+        id=uuid.uuid4(),
+        empresa_id=convite.empresa_id,
+        nome=nome,
+        email=convite.email,
+        senha_hash=None,
+        google_sub=identidade.sub,
+        administrador=False,
+    )
+    db.add(usuario)
+    convite.usado_em = func.now()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Corrida com um cadastro ou outro aceite do mesmo e-mail.
+        db.rollback()
+        logger.info("convite_aceite_google resultado=email_em_uso")
+        raise email_em_uso from exc
+
+    logger.info("convite_aceite_google resultado=aceito")
+    return resposta_de_login(usuario)

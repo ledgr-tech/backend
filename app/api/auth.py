@@ -13,6 +13,16 @@ e-mails têm conta.
 Além do rate limit por IP, o login tem bloqueio por conta (issue #67): 5 senhas
 erradas para o mesmo e-mail em 15 minutos bloqueiam esse e-mail por 15 minutos,
 com 429 e `Retry-After`. Ver app/core/bloqueio_login.py.
+
+Login e cadastro pelo Google (issue #73, adendo de 13/10 do ADR-004):
+`POST /login/google` e `POST /register/google` recebem o `id_token` do Google,
+que o backend confere sozinho (app/core/google.py) antes de tocar no banco.
+O login acha o usuário pelo `google_sub`; sem conta, 404, e o front leva ao
+cadastro, que pede CNPJ e razão social como o `/register`. Um e-mail do Google
+que já tem conta com senha não é vinculado (409): o cadastro do Ledgr não
+confirma e-mail, e vincular entregaria a conta criada antes por outra pessoa
+com o e-mail da vítima. As duas respondem com `LoginResponse`, com o
+`auth_time` do `instante_do_login`.
 """
 
 import logging
@@ -23,6 +33,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
+from fastapi.exceptions import RequestValidationError
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -33,6 +44,7 @@ from app.core.auth import instante_do_login, normalizar_email
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
+from app.core.google import IdentidadeGoogle, identidade_ou_erro_http
 from app.core.rate_limit import (
     LIMITE_CADASTRO,
     LIMITE_LOGIN,
@@ -114,13 +126,73 @@ class UsuarioResponse(BaseModel):
 
 
 class LoginResponse(UsuarioResponse):
-    """Só do `/login`: o `/register` e o `/convites/aceitar` não mudam."""
+    """Do `/login` e das rotas do Google (issue #73), que também fazem o
+    login: o `/register` e o `/convites/aceitar` não mudam."""
 
     auth_time: int
 
 
+def resposta_de_login(usuario: Usuario) -> LoginResponse:
+    """`LoginResponse` com o `auth_time` de agora (`instante_do_login`)."""
+    return LoginResponse(
+        id=usuario.id,
+        empresa_id=usuario.empresa_id,
+        nome=usuario.nome,
+        email=usuario.email,
+        auth_time=instante_do_login(),
+    )
+
+
+# Um ID token do Google tem 1 a 2 KB.
+IdToken = Annotated[str, Field(min_length=1, max_length=4096)]
+
+
+def _texto_preenchido(valor: str) -> str:
+    valor = valor.strip()
+    if not valor:
+        raise ValueError("não pode ser vazio")
+    return valor
+
+
+# Texto não vazio, sem espaços nas pontas: a regra de `nome` e `razao_social`.
+TextoPreenchido = Annotated[str, Field(min_length=1), AfterValidator(_texto_preenchido)]
+
+
+class CadastroGoogleRequest(BaseModel):
+    id_token: IdToken
+    razao_social: TextoPreenchido
+    cnpj: CnpjValido
+    # Sem `nome`, vale o `name` do token do Google.
+    nome: TextoPreenchido | None = None
+
+
+class LoginGoogleRequest(BaseModel):
+    id_token: IdToken
+
+
+def nome_da_conta(nome_do_corpo: str | None, identidade: IdentidadeGoogle) -> str:
+    """O `nome` do corpo ou, sem ele, o `name` do token do Google. Sem os
+    dois, 422 no formato do FastAPI, com `loc` no campo `nome`."""
+    nome = nome_do_corpo or identidade.nome
+    if nome is None:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "missing",
+                    "loc": ("body", "nome"),
+                    "msg": "A conta Google não informou o nome: mande o campo nome.",
+                    "input": None,
+                }
+            ]
+        )
+    return nome
+
+
 def _conflito(detalhe: str) -> HTTPException:
     return HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=detalhe)
+
+
+CONTA_GOOGLE_JA_CADASTRADA = "Já existe uma conta no Ledgr para esta conta Google."
 
 
 @router.post(
@@ -271,3 +343,92 @@ def login(
         email=usuario.email,
         auth_time=auth_time,
     )
+
+
+def usuario_pelo_google_sub(db: Session, sub: str) -> Usuario | None:
+    # O removido não tem `google_sub` (issue #69): nunca é encontrado.
+    return db.scalar(
+        select(Usuario).where(Usuario.google_sub == sub, Usuario.removido_em.is_(None))
+    )
+
+
+@router.post("/login/google", response_model=LoginResponse)
+@limiter.limit(LIMITE_LOGIN)
+def login_google(
+    request: Request,
+    dados: LoginGoogleRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> LoginResponse:
+    """Login pelo Google (issue #73). 404 sem conta, para o front levar ao
+    cadastro; 409 quando o e-mail já tem conta com senha (sem vínculo
+    automático). Não loga o token, o e-mail nem o `sub`."""
+    # Antes do banco: a busca das chaves não pode segurar uma transação.
+    identidade = identidade_ou_erro_http(dados.id_token, logger, "login_google")
+
+    usuario = usuario_pelo_google_sub(db, identidade.sub)
+    if usuario is not None:
+        logger.info("login_google resultado=entrou")
+        return resposta_de_login(usuario)
+
+    if db.scalar(select(Usuario.id).where(Usuario.email == identidade.email)):
+        logger.info("login_google resultado=email_com_outra_conta")
+        raise _conflito("Já existe uma conta com este e-mail. Entre com e-mail e senha.")
+    logger.info("login_google resultado=sem_conta")
+    raise HTTPException(
+        status_code=http_status.HTTP_404_NOT_FOUND,
+        detail="Não há conta no Ledgr para esta conta Google.",
+    )
+
+
+@router.post(
+    "/register/google",
+    response_model=LoginResponse,
+    status_code=http_status.HTTP_201_CREATED,
+)
+@limiter.limit(LIMITE_CADASTRO)
+def cadastrar_google(
+    request: Request,
+    dados: CadastroGoogleRequest,
+    tarefas: BackgroundTasks,
+    db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
+) -> LoginResponse:
+    """Cadastro pelo Google (issue #73): como o `/register`, com o e-mail e o
+    `google_sub` do token e sem senha. Quem cadastra é o administrador da
+    empresa, e as boas-vindas saem do mesmo jeito. Responde com
+    `LoginResponse`, porque já é o login."""
+    # Antes do banco: a busca das chaves não pode segurar uma transação.
+    identidade = identidade_ou_erro_http(dados.id_token, logger, "cadastro_google")
+    nome = nome_da_conta(dados.nome, identidade)
+
+    if usuario_pelo_google_sub(db, identidade.sub) is not None:
+        logger.info("cadastro_google resultado=google_ja_cadastrado")
+        raise _conflito(CONTA_GOOGLE_JA_CADASTRADA)
+    if db.scalar(select(Usuario.id).where(Usuario.email == identidade.email)):
+        logger.info("cadastro_google resultado=email_em_uso")
+        raise _conflito("E-mail já cadastrado.")
+    if db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj)):
+        logger.info("cadastro_google resultado=cnpj_em_uso")
+        raise _conflito("CNPJ já cadastrado.")
+
+    empresa = Empresa(id=uuid.uuid4(), razao_social=dados.razao_social, cnpj=dados.cnpj)
+    usuario = Usuario(
+        empresa_id=empresa.id,
+        nome=nome,
+        email=identidade.email,
+        senha_hash=None,
+        google_sub=identidade.sub,
+        administrador=True,  # quem cadastra a empresa a administra (issue #69)
+    )
+    db.add_all([empresa, Configuracao(empresa_id=empresa.id), usuario])
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Corrida com outro cadastro do mesmo e-mail, CNPJ ou conta Google.
+        db.rollback()
+        logger.info("cadastro_google resultado=conflito_concorrente")
+        raise _conflito("E-mail ou CNPJ já cadastrado.") from exc
+
+    logger.info("cadastro_google resultado=cadastrado")
+    agendar_boas_vindas(tarefas, provedor, usuario, dados.razao_social)
+    return resposta_de_login(usuario)

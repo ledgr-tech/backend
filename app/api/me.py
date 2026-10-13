@@ -12,7 +12,8 @@ regra do cadastro). As regras vêm da issue:
   frontend trata todo 401 como sessão expirada e deslogaria a pessoa por um
   erro de digitação. Não há risco de enumeração, o token já diz quem é.
 - Conta sem senha (login pelo Google) devolve 409. Definir senha pra essa
-  conta fica pra #73. Nenhuma troca acontece sem a senha atual: com um token
+  conta, ou vincular o Google a uma conta com senha, fica para depois do MVP
+  (issue #73). Nenhuma troca acontece sem a senha atual: com um token
   roubado, isso viraria acesso permanente à conta.
 - Rate limit por usuário (`sub`), não por IP (ver app/core/rate_limit.py).
 
