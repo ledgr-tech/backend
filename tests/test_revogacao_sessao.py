@@ -12,11 +12,12 @@ import hashlib
 import io
 import time
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import SENHA_USUARIO_TESTE
 from fastapi.testclient import TestClient
+from freezegun import freeze_time
 from sqlalchemy import func
 
 from app.core.auth import DURACAO_SESSAO_SEGUNDOS
@@ -191,6 +192,38 @@ def test_troca_de_um_usuario_nao_derruba_o_outro_da_mesma_empresa(
     )
 
     assert client.get("/extratos", headers=do_colega).status_code == 200
+
+
+def test_login_logo_depois_da_troca_no_mesmo_segundo_passa(db_session, criar_usuario, gerar_token):
+    """O front refaz o login logo depois da troca (`trocarSenha` chama
+    `entrar`). Com o `auth_time` devolvido pelo `/login`, a troca e o login
+    usam o mesmo relógio, e o login no mesmo segundo da troca vale."""
+    usuario = criar_usuario()
+    troca = datetime(2026, 10, 13, 15, 0, 0, 200_000, tzinfo=UTC)
+
+    def cabecalho(auth_time: int) -> dict[str, str]:
+        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id, auth_time=auth_time)
+        return {"Authorization": f"Bearer {token}"}
+
+    with freeze_time(troca) as relogio:
+        antigo = cabecalho(int(troca.timestamp()) - 60)
+        trocar = client.post(
+            "/me/senha",
+            json={"senha_atual": SENHA_USUARIO_TESTE, "senha_nova": SENHA_NOVA},
+            headers=antigo,
+        )
+        assert trocar.status_code == 204
+
+        relogio.move_to(troca + timedelta(milliseconds=700))  # ainda no mesmo segundo
+        login = client.post("/login", json={"email": usuario.email, "senha": SENHA_NOVA})
+        assert login.status_code == 200
+        auth_time = login.json()["auth_time"]
+
+        desde = _recarregar(db_session, usuario).sessoes_validas_desde
+        assert auth_time == int(desde.timestamp()) == int(troca.timestamp())
+        for rota in ROTAS_DE_LEITURA:
+            assert client.get(rota, headers=cabecalho(auth_time)).status_code == 200
+            assert client.get(rota, headers=antigo).status_code == 401
 
 
 # --- redefinição pelo link ------------------------------------------------------

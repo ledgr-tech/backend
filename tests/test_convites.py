@@ -121,7 +121,8 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
 
     login = client.post("/login", json={"email": email, "senha": SENHA_CONVIDADO})
     assert login.status_code == 200
-    assert login.json() == novo
+    # o `auth_time` é só do login (issue #75); o aceite devolve o mesmo do /register
+    assert {k: v for k, v in login.json().items() if k != "auth_time"} == novo
 
     usuario = db_session.get(Usuario, uuid.UUID(novo["id"]))
     assert usuario.administrador is False

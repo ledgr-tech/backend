@@ -5,7 +5,8 @@ Contrato do token, emitido pelo NextAuth no frontend (outro repo):
 - Claims: `sub` (usuario_id, string), `empresa_id` (string UUID), `email`,
   `iat`, `exp` e, desde a issue #75, `auth_time`: o momento do login, em
   segundos inteiros desde a época, gravado só no login e mantido em cada
-  renovação da sessão.
+  renovação da sessão. O valor vem da resposta do `POST /login`
+  (`instante_do_login`), e não do relógio do front.
 - Enviado em `Authorization: Bearer <token>`.
 
 Toda rota autenticada passa por `_usuario_do_token` (issue #75, ADR-016),
@@ -19,6 +20,14 @@ e só deixa passar quando:
 - `auth_time` não é anterior a `usuarios.sessoes_validas_desde`, que
   `encerrar_sessoes` grava na troca de senha, na redefinição pelo link e na
   remoção do usuário.
+
+Um relógio só: o `auth_time` do login, o `sessoes_validas_desde` e o
+"agora" das comparações saem todos de `_agora`, o relógio deste processo.
+Com o `auth_time` calculado pela Vercel e o `sessoes_validas_desde` pelo
+Postgres, um relógio um pouco atrasado em relação ao outro faria o login
+logo depois da troca de senha sair com `auth_time` um segundo antes da
+troca, e a sessão nasceria inválida para sempre (a renovação mantém o
+`auth_time`).
 
 Qualquer falha vira o mesmo 401, sem detalhar o motivo. A empresa continua
 vindo do token; a consulta confere o usuário, e foi o preço aceito para
@@ -45,7 +54,6 @@ import jwt
 from fastapi import Depends, HTTPException
 from fastapi import status as http_status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -59,6 +67,16 @@ ALGORITMO_JWT = "HS256"
 DURACAO_SESSAO_SEGUNDOS = 7 * 24 * 60 * 60
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+def _agora() -> datetime:
+    return datetime.now(UTC)
+
+
+def instante_do_login() -> int:
+    """O `auth_time` de um login cuja senha acabou de ser conferida: agora,
+    em segundos inteiros desde a época, no mesmo relógio das comparações."""
+    return math.floor(_agora().timestamp())
 
 
 def normalizar_email(email: str) -> str:
@@ -103,17 +121,17 @@ def _uuid_do_claim(claims: dict, nome: str) -> uuid.UUID:
 def _auth_time(claims: dict) -> int:
     """O `auth_time` do token, só se for inteiro e não estiver no futuro.
 
-    Sem folga para relógio adiantado, a mesma regra que o PyJWT aplica ao
-    `iat`, que nunca é anterior ao `auth_time`."""
+    Sem folga: o valor vem do `POST /login`, calculado por `_agora`, o mesmo
+    relógio desta comparação."""
     valor = claims["auth_time"]
     # bool é subclasse de int no Python, e `true` não é um instante
-    if type(valor) is not int or valor > datetime.now(UTC).timestamp():
+    if type(valor) is not int or valor > _agora().timestamp():
         raise _nao_autenticado()
     return valor
 
 
 def _sessao_valida(usuario: Usuario, auth_time: int) -> bool:
-    if datetime.now(UTC).timestamp() - auth_time > DURACAO_SESSAO_SEGUNDOS:
+    if _agora().timestamp() - auth_time > DURACAO_SESSAO_SEGUNDOS:
         return False
     if usuario.sessoes_validas_desde is None:
         return True
@@ -141,9 +159,10 @@ def encerrar_sessoes(usuario: Usuario) -> None:
 
     Truncado no segundo porque o `auth_time` é inteiro: sem isso, o login
     feito logo depois, ainda no mesmo segundo, sairia com `auth_time`
-    anterior ao valor gravado e daria 401. Sem commit: vale com a transação
-    de quem chama."""
-    usuario.sessoes_validas_desde = func.date_trunc("second", func.now())
+    anterior ao valor gravado e daria 401. Vem de `_agora`, o relógio do
+    `instante_do_login`, e não do `now()` do Postgres. Sem commit: vale com a
+    transação de quem chama."""
+    usuario.sessoes_validas_desde = _agora().replace(microsecond=0)
 
 
 def obter_empresa_id_autenticada(

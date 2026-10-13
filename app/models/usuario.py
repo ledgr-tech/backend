@@ -63,7 +63,8 @@ class Usuario(Base, TimestampMixin):
     )
     removido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Token com `auth_time` anterior a isto é recusado (issue #75, ADR-016).
-    # Nulo: nenhuma sessão foi encerrada. Ver app/core/auth.py.
+    # Nulo: nenhuma sessão foi encerrada. Gravado no relógio do backend, o
+    # mesmo do `auth_time` do login. Ver app/core/auth.py.
     sessoes_validas_desde: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
