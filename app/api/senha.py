@@ -23,17 +23,16 @@ link montado em cima dela quebraria no deploy seguinte do front. Quem decide é
 `POST /senha/redefinir` recebe o token do link e a senha nova (mesma regra
 do cadastro). Token inexistente, expirado, já usado ou de outra finalidade
 devolve 400, nunca 401: o frontend trata todo 401 como sessão expirada. O
-uso marca como usados todos os links pendentes do usuário e manda o aviso de
-senha alterada (o mesmo da troca em `POST /me/senha`, app/api/me.py).
+uso marca como usados todos os links pendentes do usuário, encerra as
+sessões abertas (issue #75: quem roubou a sessão perde o acesso) e manda o
+aviso de senha alterada (o mesmo da troca em `POST /me/senha`,
+app/api/me.py).
 
 Tokens: `secrets.token_urlsafe(32)`, gravados só como sha256 (ver
 app/models/token_email.py), com validade de `VALIDADE_TOKEN_MINUTOS`; um
 pedido novo invalida o pendente anterior. O link vai no fragmento
 (`/redefinir-senha#token=...`), que o navegador não manda ao servidor da
 Vercel, então o token não aparece em log de acesso nem em `Referer`.
-
-Revogar as sessões abertas depois da redefinição depende da #75, ainda
-aberta: entra quando ela fechar.
 
 Nunca loga o token, o link nem o e-mail: só o resultado categorizado.
 """
@@ -53,6 +52,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auth import SenhaNova, normalizar_email
 from app.core import bloqueio_login, senha
+from app.core.auth import encerrar_sessoes
 from app.core.database import SessionLocal, get_db
 from app.core.frontend_url import frontend_url_para_link
 from app.core.rate_limit import LIMITE_RECUPERACAO_SENHA, LIMITE_REDEFINICAO_SENHA, limiter
@@ -232,6 +232,7 @@ def redefinir_senha(
         )
 
     usuario.senha_hash = senha.gerar_hash(dados.senha_nova)
+    encerrar_sessoes(usuario)
     invalidar_links_de_recuperacao(db, usuario.id)
     para, nome = usuario.email, usuario.nome  # antes do commit, que expira o objeto
     db.commit()

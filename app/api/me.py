@@ -19,8 +19,10 @@ regra do cadastro). As regras vêm da issue:
 A troca invalida os links de recuperação pendentes (um link antigo não
 desfaz a troca) e manda o aviso de senha alterada por e-mail, depois da
 resposta. Com o e-mail desligado, a troca vale do mesmo jeito, sem aviso.
-O backend não devolve token novo: quem emite o JWT é o NextAuth, e o front
-reautentica com a senha nova. Revogar as outras sessões depende da #75.
+A troca também encerra todas as sessões abertas, inclusive a de quem
+trocou (issue #75): o token com login anterior deixa de valer. O backend
+não devolve token novo: quem emite o JWT é o NextAuth, e o front
+reautentica com a senha nova.
 """
 
 import uuid
@@ -34,7 +36,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import SenhaNova
 from app.api.senha import agendar_aviso_senha_alterada, invalidar_links_de_recuperacao
 from app.core import senha
-from app.core.auth import obter_usuario_autenticado
+from app.core.auth import encerrar_sessoes, obter_usuario_autenticado
 from app.core.database import get_db
 from app.core.rate_limit import (
     LIMITE_CONSULTA_ME_POR_USUARIO,
@@ -117,6 +119,7 @@ def trocar_senha(
         )
 
     usuario.senha_hash = senha.gerar_hash(dados.senha_nova)
+    encerrar_sessoes(usuario)
     invalidar_links_de_recuperacao(db, usuario.id)
     para, nome = usuario.email, usuario.nome  # antes do commit, que expira o objeto
     db.commit()
