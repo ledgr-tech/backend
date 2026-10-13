@@ -7,6 +7,7 @@ injeção) rodam no modo "mascarada", o comportamento de antes da issue #87; o
 modo "termos", padrão, tem os testes dele em tests/test_ia_modo_descricao.py.
 """
 
+import hashlib
 import json
 from datetime import date
 from decimal import Decimal
@@ -16,7 +17,9 @@ import pytest
 from app.services.ia.base import CandidatoContexto, ContextoDivergencia, LancamentoContexto
 from app.services.ia.mascaramento import MODO_MASCARADA
 from app.services.ia.prompt import (
+    _INSTRUCAO_SISTEMA,
     _MOTIVOS_DETERMINISTICOS,
+    VERSAO_PROMPT,
     montar_mensagens,
     motivo_deterministico,
     serializar_contexto,
@@ -171,6 +174,30 @@ def test_mensagem_de_sistema_instrui_tratar_json_como_dado():
     assert "dado" in sistema.lower()
     assert "ignore" in sistema.lower()
     assert "não altere" in sistema.lower() or "não sugira" in sistema.lower()
+
+
+def test_mensagem_de_sistema_explica_os_marcadores():
+    """Issue #87: no modo "termos" a descrição chega cheia de marcadores, e o
+    modelo não pode repeti-los nem tentar adivinhar o que foi omitido."""
+    sistema = next(m["content"] for m in montar_mensagens(_contexto()) if m["role"] == "system")
+
+    assert "[TEXTO]" in sistema
+    assert "[CPF]" in sistema
+    assert "omitidos por privacidade" in sistema
+    assert "não repita esses marcadores" in sistema
+    assert "nem tente deduzir o que foi omitido" in sistema
+
+
+# Hash da instrução da versão atual do prompt. Mudou a instrução? Suba
+# VERSAO_PROMPT (o cache das explicações antigas deixa de valer) e atualize
+# os dois valores aqui.
+VERSAO_ESPERADA = "v2"
+SHA256_INSTRUCAO_V2 = "1f73439acab8c05f999d7aacc7b7d2385399f42b203b469b5d3951389ffe613e"
+
+
+def test_versao_do_prompt_acompanha_a_instrucao():
+    assert VERSAO_PROMPT == VERSAO_ESPERADA
+    assert hashlib.sha256(_INSTRUCAO_SISTEMA.encode()).hexdigest() == SHA256_INSTRUCAO_V2
 
 
 def test_cnpj_e_email_crus_nunca_aparecem_nas_mensagens_montadas():

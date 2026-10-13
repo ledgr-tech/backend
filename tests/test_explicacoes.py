@@ -369,8 +369,9 @@ def test_mudar_versao_prompt_invalida_cache(cenario, provedor_falso, monkeypatch
     # cache.py e explicacoes.py importaram VERSAO_PROMPT por nome ("from ...
     # import VERSAO_PROMPT"), então cada um tem sua própria referência —
     # monkeypatch precisa alcançar as duas, não só app.services.ia.prompt.
-    monkeypatch.setattr(cache_module, "VERSAO_PROMPT", "v2")
-    monkeypatch.setattr(explicacoes_module, "VERSAO_PROMPT", "v2")
+    outra_versao = f"{prompt_module.VERSAO_PROMPT}-outra"
+    monkeypatch.setattr(cache_module, "VERSAO_PROMPT", outra_versao)
+    monkeypatch.setattr(explicacoes_module, "VERSAO_PROMPT", outra_versao)
     segunda = _explicar(headers, linha.id)
 
     assert primeira.json()["em_cache"] is False
