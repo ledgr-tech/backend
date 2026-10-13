@@ -41,6 +41,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.core import bloqueio_login, senha
+from app.core.auth import DURACAO_SESSAO_SEGUNDOS
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
@@ -139,25 +140,37 @@ def _logs_de_app_chegam_ao_caplog(monkeypatch):
     monkeypatch.setattr(logging.getLogger("app"), "propagate", True)
 
 
+# Valor padrão de `auth_time` em `gerar_token`: o login acabou de acontecer.
+LOGIN_AGORA = object()
+
+
 @pytest.fixture
 def gerar_token():
-    """Simula o JWT que o NextAuth emite (contrato em app/core/auth.py)."""
+    """Simula o JWT que o NextAuth emite (contrato em app/core/auth.py).
+
+    Desde a issue #75, toda rota autenticada carrega o usuário do `sub`: para
+    passar, o token precisa do id de um usuário real da empresa (ou use
+    `auth_headers`, que cria um). `auth_time` é o login, em segundos
+    inteiros; `None` tira o claim do token."""
 
     def _gerar(
         empresa_id: uuid.UUID | str | None,
         secret: str = SECRET_TESTE,
-        expira_em: timedelta = timedelta(days=7),
+        expira_em: timedelta = timedelta(seconds=DURACAO_SESSAO_SEGUNDOS),
         usuario_id: uuid.UUID | str | None = None,
+        auth_time: object = LOGIN_AGORA,
     ) -> str:
         agora = datetime.now(UTC)
         claims = {
-            # `sub` aleatório basta pras rotas que só leem `empresa_id`; as
-            # rotas por usuário (issue #66) precisam do id de um usuário real.
             "sub": str(usuario_id or uuid.uuid4()),
             "email": "usuario@teste.com",
             "iat": agora,
             "exp": agora + expira_em,
         }
+        if auth_time is LOGIN_AGORA:
+            claims["auth_time"] = int(agora.timestamp())
+        elif auth_time is not None:
+            claims["auth_time"] = auth_time
         if empresa_id is not None:
             claims["empresa_id"] = str(empresa_id)
         return jwt.encode(claims, secret, algorithm="HS256")
@@ -166,9 +179,20 @@ def gerar_token():
 
 
 @pytest.fixture
-def auth_headers(gerar_token):
+def auth_headers(gerar_token, request):
+    """Cabeçalho com o token de um usuário real da empresa (issue #75). Na
+    primeira chamada para cada empresa, cria um usuário nela, sem senha e
+    sem ser administrador, que `criar_usuario` apaga no fim. A empresa
+    precisa existir no banco."""
+    usuarios: dict[str, uuid.UUID] = {}
+
     def _headers(empresa_id: uuid.UUID | str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {gerar_token(empresa_id)}"}
+        chave = str(empresa_id)
+        if chave not in usuarios:
+            criar_usuario = request.getfixturevalue("criar_usuario")
+            usuarios[chave] = criar_usuario(com_senha=False, empresa_id=uuid.UUID(chave)).id
+        token = gerar_token(empresa_id, usuario_id=usuarios[chave])
+        return {"Authorization": f"Bearer {token}"}
 
     return _headers
 
