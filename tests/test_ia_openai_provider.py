@@ -195,6 +195,71 @@ def test_status_429_levanta_indisponivel_com_motivo_http_e_status():
     assert exc_info.value.status_http == 429
 
 
+# 429 de cota esgotada (issue #87)
+
+
+@pytest.mark.parametrize(
+    "codigo",
+    ["insufficient_quota", "project_spend_limit_exceeded", "organization_spend_limit_exceeded"],
+)
+@pytest.mark.parametrize("campo", ["code", "type"])
+def test_429_de_cota_esgotada_levanta_motivo_cota_esgotada(codigo, campo):
+    corpo = {"error": {"message": "Você excedeu a cota.", campo: codigo}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json=corpo)
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        _provedor(handler).explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "cota_esgotada"
+    assert exc_info.value.status_http == 429
+
+
+@pytest.mark.parametrize(
+    "resposta",
+    [
+        httpx.Response(429),
+        httpx.Response(429, content=b"nao e json{{"),
+        httpx.Response(429, json=["insufficient_quota"]),
+        httpx.Response(429, json={"error": "insufficient_quota"}),
+        httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}}),
+        httpx.Response(429, json={"error": {"code": None, "type": ["insufficient_quota"]}}),
+    ],
+    ids=["sem_corpo", "nao_json", "lista", "error_string", "outro_codigo", "tipos_errados"],
+)
+def test_429_que_nao_e_cota_continua_http(resposta):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return resposta
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        _provedor(handler).explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "http"
+    assert exc_info.value.status_http == 429
+
+
+def test_cota_esgotada_com_status_diferente_de_429_continua_http():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": {"code": "insufficient_quota"}})
+
+    with pytest.raises(ProvedorIAIndisponivel) as exc_info:
+        _provedor(handler).explicar_divergencia(_contexto())
+    assert exc_info.value.motivo == "http"
+
+
+def test_log_da_cota_esgotada_nao_tem_o_corpo(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"error": {"code": "insufficient_quota", "message": "CORPO-SECRETO"}}
+        )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(ProvedorIAIndisponivel):
+        _provedor(handler).explicar_divergencia(_contexto())
+
+    assert "CORPO-SECRETO" not in caplog.text
+    assert "insufficient_quota" not in caplog.text
+    assert "status_http=429" in caplog.text
+
+
 def test_json_invalido_levanta_indisponivel_com_motivo_resposta_invalida():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"isto nao e json{{{")

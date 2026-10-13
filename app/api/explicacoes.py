@@ -25,10 +25,11 @@ provedor. (g) Gera, com `identificador_anonimo` = sha256 hex do
 `str(empresa_id)` — o id cru nunca vai ao provedor. (h)
 `ProvedorIAIndisponivel` (qualquer motivo) ou qualquer outra `Exception`
 da chamada: fallback com `indisponibilidade="erro_provedor"`, nada é
-gravado, a próxima chamada tenta de novo. (i) Sucesso: grava com `INSERT
-... ON CONFLICT (empresa_id, chave) DO NOTHING`; se o INSERT falhar por
-erro de banco, rollback e devolve o texto gerado mesmo assim
-(`em_cache=False`).
+gravado, a próxima chamada tenta de novo. O motivo `cota_esgotada` (teto
+de gasto da OpenAI, issue #87) sai no log em WARNING; os outros, em INFO.
+(i) Sucesso: grava com `INSERT ... ON CONFLICT (empresa_id, chave) DO
+NOTHING`; se o INSERT falhar por erro de banco, rollback e devolve o texto
+gerado mesmo assim (`em_cache=False`).
 
 Nenhuma transação de banco fica aberta durante a chamada HTTP ao provedor
 (passo g): todas as leituras (linha, contexto, cache, contagens) terminam
@@ -213,7 +214,10 @@ def criar_explicacao(
             contexto, identificador_anonimo=identificador_anonimo
         )
     except ProvedorIAIndisponivel as exc:
-        logger.info("explicacoes motivo=%s status_http=%s", exc.motivo, exc.status_http)
+        # Cota esgotada é o teto de gasto da OpenAI: em WARNING, para aparecer
+        # no log do Railway. Para o front é um erro_provedor como outro qualquer.
+        nivel = logging.WARNING if exc.motivo == "cota_esgotada" else logging.INFO
+        logger.log(nivel, "explicacoes motivo=%s status_http=%s", exc.motivo, exc.status_http)
         return ExplicacaoResponse(
             conciliacao_id=corpo.conciliacao_id,
             status=status_conciliacao,
