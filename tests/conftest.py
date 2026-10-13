@@ -49,6 +49,7 @@ from app.core.rate_limit import limiter
 from app.models import (
     Conciliacao,
     Configuracao,
+    Convite,
     DecisaoLinha,
     Empresa,
     ExecucaoConciliacao,
@@ -262,6 +263,10 @@ def criar_empresa(db_session):
         # issue #28/ADR-011 acrescenta o cache de explicações).
         db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
         db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
+        # Convites e usuários criados pelo aceite de convite (issue #69), que
+        # não passam por `criar_usuario`.
+        db_session.query(Convite).filter_by(empresa_id=empresa_id).delete()
+        db_session.query(Usuario).filter_by(empresa_id=empresa_id).delete()
         db_session.query(Empresa).filter_by(id=empresa_id).delete()
     db_session.commit()
 
@@ -296,20 +301,27 @@ def provedor(monkeypatch):
 
 @pytest.fixture
 def criar_usuario(db_session, criar_empresa):
-    """Usuário real no banco, numa empresa nova, com a senha
-    `SENHA_USUARIO_TESTE` (ou sem senha, como conta do Google). Apaga só os
+    """Usuário real no banco, com a senha `SENHA_USUARIO_TESTE` (ou sem senha,
+    como conta do Google). Sem `empresa_id`, numa empresa nova e como
+    administrador dela, como no `/register`; com `empresa_id`, entra na
+    empresa como convidado, sem ser administrador (issue #69). Apaga só os
     que criou, antes da limpeza de `criar_empresa` (os tokens de
     `tokens_email` caem junto, pelo ON DELETE CASCADE)."""
     criados: list[uuid.UUID] = []
 
-    def _criar(com_senha: bool = True) -> Usuario:
-        empresa = criar_empresa()
+    def _criar(
+        com_senha: bool = True, empresa_id: uuid.UUID | None = None, nome: str = "Maria Financeiro"
+    ) -> Usuario:
+        administrador = empresa_id is None
+        if empresa_id is None:
+            empresa_id = criar_empresa().id
         usuario = Usuario(
-            empresa_id=empresa.id,
-            nome="Maria Financeiro",
+            empresa_id=empresa_id,
+            nome=nome,
             email=f"{uuid.uuid4().hex[:12]}@teste.com",
             senha_hash=senha.gerar_hash(SENHA_USUARIO_TESTE) if com_senha else None,
             google_sub=None if com_senha else f"google-{uuid.uuid4().hex}",
+            administrador=administrador,
         )
         db_session.add(usuario)
         db_session.commit()

@@ -1,8 +1,9 @@
 """Cadastro e login por credenciais (issue #57).
 
 O login devolve só os dados do usuário, sem token: quem emite o JWT é o
-NextAuth (ADR-003). O cadastro é self-service, cria a empresa junto e manda
-o e-mail de boas-vindas quando o e-mail está ligado (issue #78), e
+NextAuth (ADR-003). O cadastro é self-service, cria a empresa junto, com quem
+cadastrou como administrador dela (issue #69), e manda o e-mail de
+boas-vindas quando o e-mail está ligado (issue #78), e
 `POST /register/verificar` diz antes se o e-mail e o CNPJ estão livres (issue
 #80). O 401 do login é o mesmo pra qualquer falha, pra não revelar quais
 e-mails têm conta.
@@ -139,6 +140,7 @@ def cadastrar(
         nome=dados.nome,
         email=email,
         senha_hash=senha.gerar_hash(dados.senha),
+        administrador=True,  # quem cadastra a empresa a administra (issue #69)
     )
     db.add_all([empresa, Configuracao(empresa_id=empresa.id), usuario])
     try:
@@ -237,7 +239,11 @@ def login(
             headers={"Retry-After": str(segundos)},
         )
 
-    usuario = db.scalar(select(Usuario).where(Usuario.email == email))
+    # Usuário removido (issue #69) cai no mesmo caminho de senha errada: sem
+    # hash, o bcrypt roda contra o hash fictício e a resposta é o mesmo 401.
+    usuario = db.scalar(
+        select(Usuario).where(Usuario.email == email, Usuario.removido_em.is_(None))
+    )
     senha_hash = usuario.senha_hash if usuario else None
 
     if not senha.verificar(dados.senha, senha_hash):

@@ -1,4 +1,4 @@
-"""Textos dos e-mails transacionais (issues #66 e #78, ADR-012).
+"""Textos dos e-mails transacionais (issues #66, #69 e #78, ADR-012).
 
 Cada mensagem sai em texto puro e em HTML simples, sem imagem nem
 rastreamento. Tudo o que vem do usuário (nome, razão social) é escapado no
@@ -124,6 +124,51 @@ def mensagem_boas_vindas(
     return MensagemEmail(
         para=para,
         assunto="Boas-vindas à Ledgr",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def mensagem_convite(
+    *,
+    para: str,
+    nome_de_quem_convidou: str,
+    razao_social: str,
+    link: str,
+    validade_dias: int,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Convite para entrar numa empresa que já existe (issue #69). O
+    convidado ainda não tem conta, então a mensagem não tem nome dele."""
+    texto = (
+        "Olá.\n\n"
+        f"{nome_de_quem_convidou} convidou você para usar a Ledgr na empresa "
+        f"{razao_social}.\n\n"
+        "Para aceitar, abra o link abaixo e crie a sua senha:\n\n"
+        f"{link}\n\n"
+        f"O convite vale por {validade_dias} dias e só pode ser usado uma vez.\n\n"
+        "Se você não esperava este convite, ignore este e-mail: nenhuma conta é "
+        "criada sem o aceite.\n\n"
+        "Equipe Ledgr"
+    )
+    link_html = escape(link, quote=True)
+    html = (
+        "<p>Olá.</p>"
+        f"<p>{escape(nome_de_quem_convidou)} convidou você para usar a Ledgr na empresa "
+        f"{escape(razao_social)}.</p>"
+        "<p>Para aceitar, use o botão abaixo e crie a sua senha:</p>"
+        f'<p><a href="{link_html}">Aceitar o convite</a></p>'
+        f"<p>Se o botão não funcionar, copie e cole este endereço no navegador:<br>"
+        f"{link_html}</p>"
+        f"<p>O convite vale por {validade_dias} dias e só pode ser usado uma vez.</p>"
+        "<p>Se você não esperava este convite, ignore este e-mail: nenhuma conta é "
+        "criada sem o aceite.</p>"
+        "<p>Equipe Ledgr</p>"
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="Convite para usar a Ledgr",
         texto=texto,
         html=html,
         chave_idempotencia=chave_idempotencia,
