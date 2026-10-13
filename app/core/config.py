@@ -27,8 +27,12 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     llm_timeout_segundos: float = 20.0
     llm_max_tokens_saida: int = 300
-    llm_limite_diario_empresa: int = 50
-    llm_limite_diario_global: int = 300
+    # Limites diários (issue #87). Pior caso por explicação: 1.000 tokens de
+    # entrada e 300 de saída no Luna (US$ 0,10 e US$ 0,50 por milhão), uns
+    # US$ 0,00025. 1.500 por dia durante 30 dias dá uns US$ 11, abaixo do teto
+    # de US$ 15/mês do projeto na OpenAI: o limite do backend bate antes.
+    llm_limite_diario_empresa: int = 300
+    llm_limite_diario_global: int = 1500
 
     # E-mail transacional (issue #66, ADR-012): link de recuperação de senha
     # e de aprovação da troca de e-mail, pelo Resend. Desligado por padrão,
