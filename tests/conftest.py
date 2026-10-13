@@ -107,15 +107,18 @@ def _auth_e_rate_limit_de_teste(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _email_de_verdade_desligado(monkeypatch):
-    """Nenhum teste fala com o Resend de verdade.
+def _email_e_ia_de_verdade_desligados(monkeypatch):
+    """Nenhum teste fala com o Resend nem com a OpenAI de verdade.
 
-    O `.env` de quem desenvolve pode ter `EMAIL_HABILITADO=true` com uma chave
-    real, e o `/register` manda e-mail de boas-vindas desde a issue #78: sem
-    isto, todo cadastro feito por um teste sairia como e-mail de verdade. Quem
-    precisa de envio usa a fixture `provedor` (ou troca a dependency), que não
-    passa por esta configuração."""
+    O `.env` de quem desenvolve pode ter `EMAIL_HABILITADO=true` ou
+    `LLM_HABILITADO=true` com uma chave real. O `/register` manda e-mail de
+    boas-vindas desde a issue #78, e o `POST /explicacoes` chama o provedor de
+    IA: sem isto, um teste que passasse por eles sairia como chamada de
+    verdade, paga no caso da IA (issue #87). Quem precisa de envio ou de
+    explicação troca a dependency por um provedor falso (fixture `provedor`,
+    `app.dependency_overrides`), que não passa por esta configuração."""
     monkeypatch.setattr(settings, "email_habilitado", False)
+    monkeypatch.setattr(settings, "llm_habilitado", False)
 
 
 @pytest.fixture(autouse=True)
