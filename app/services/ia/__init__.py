@@ -59,4 +59,5 @@ def obter_provedor(settings: "Settings | None" = None) -> ProvedorDeIA | None:
         base_url=config.openai_base_url,
         timeout_segundos=config.llm_timeout_segundos,
         max_tokens_saida=config.llm_max_tokens_saida,
+        modo_descricao=config.llm_modo_descricao,
     )

@@ -22,6 +22,7 @@ _VARIAVEIS_LLM = (
     "OPENAI_BASE_URL",
     "LLM_TIMEOUT_SEGUNDOS",
     "LLM_MAX_TOKENS_SAIDA",
+    "LLM_MODO_DESCRICAO",
 )
 
 
@@ -45,6 +46,16 @@ def test_defaults_de_llm_sem_variaveis_de_ambiente(monkeypatch):
     assert config.openai_base_url == "https://api.openai.com/v1"
     assert config.llm_timeout_segundos == 20.0
     assert config.llm_max_tokens_saida == 300
+
+
+def test_defaults_da_issue_87():
+    """Lidos da declaração, não de uma instância: o `.env` de quem desenvolve
+    pode ter valores próprios para estas variáveis. ~US$ 11/mês no pior caso,
+    abaixo do teto de US$ 15 do projeto na OpenAI."""
+    campos = Settings.model_fields
+    assert campos["llm_limite_diario_empresa"].default == 300
+    assert campos["llm_limite_diario_global"].default == 1500
+    assert campos["llm_modo_descricao"].default == "termos"
 
 
 def test_ausencia_das_variaveis_nao_quebra_a_aplicacao(monkeypatch):

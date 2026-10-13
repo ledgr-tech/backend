@@ -17,7 +17,9 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal, Protocol
 
-MotivoIndisponibilidade = Literal["timeout", "http", "resposta_invalida", "nao_configurado"]
+MotivoIndisponibilidade = Literal[
+    "timeout", "http", "resposta_invalida", "nao_configurado", "cota_esgotada"
+]
 
 
 @dataclass(frozen=True)
@@ -84,9 +86,11 @@ class ProvedorDeIA(Protocol):
 class ProvedorIAIndisponivel(Exception):
     """Levantada quando o provedor não consegue responder. `motivo` é
     sempre uma das categorias fixas — nunca texto livre com corpo de
-    resposta ou descrição: "timeout", "http", "resposta_invalida" ou
-    "nao_configurado". `status_http` só é preenchido pra motivo="http"
-    quando existe um código de resposta."""
+    resposta ou descrição: "timeout", "http", "resposta_invalida",
+    "nao_configurado" ou "cota_esgotada" (429 da OpenAI por teto de gasto ou
+    crédito acabado, issue #87). `status_http` só é preenchido pra
+    motivo="http" quando existe um código de resposta, e pra
+    "cota_esgotada" (sempre 429)."""
 
     def __init__(self, motivo: MotivoIndisponibilidade, status_http: int | None = None) -> None:
         self.motivo = motivo

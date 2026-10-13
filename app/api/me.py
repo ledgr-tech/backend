@@ -1,8 +1,9 @@
 """Rotas da própria conta de quem está logado (issue #66, ADR-012).
 
 `GET /me` devolve os dados da conta pro cabeçalho do front (issue #81): nome
-da empresa, CNPJ e os métodos de login. Conta única no MVP, então sem campo
-de papel — sem ele, o front trata todo mundo como administrador.
+da empresa, CNPJ e os métodos de login. Desde a issue #69, também
+`administrador`: sem papéis (ADR-015), só quem cadastrou a empresa é
+administrador, e é ele quem convida e remove usuários.
 
 `POST /me/senha` troca a senha na hora, com a senha atual e a nova (mesma
 regra do cadastro). As regras vêm da issue:
@@ -31,11 +32,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import SenhaNova
-from app.api.senha import (
-    agendar_aviso_senha_alterada,
-    invalidar_links_de_recuperacao,
-    obter_provedor_email_dependencia,
-)
+from app.api.senha import agendar_aviso_senha_alterada, invalidar_links_de_recuperacao
 from app.core import senha
 from app.core.auth import obter_usuario_autenticado
 from app.core.database import get_db
@@ -47,6 +44,7 @@ from app.core.rate_limit import (
 )
 from app.models import Usuario
 from app.services.email import ProvedorDeEmail
+from app.services.email.envio import obter_provedor_email_dependencia
 
 __all__ = ["LIMITE_CONSULTA_ME_POR_USUARIO", "LIMITE_TROCA_SENHA_POR_USUARIO", "router"]
 
@@ -60,6 +58,7 @@ class MeResponse(BaseModel):
     email: str
     razao_social: str
     cnpj: str
+    administrador: bool
     metodos_login: list[str]
 
 
@@ -86,6 +85,7 @@ def obter_dados_da_conta(
         email=usuario.email,
         razao_social=empresa.razao_social,
         cnpj=empresa.cnpj,
+        administrador=usuario.administrador,
         metodos_login=_metodos_login(usuario),
     )
 

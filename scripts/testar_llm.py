@@ -10,7 +10,9 @@ Uso:
     OPENAI_API_KEY=sk-... python scripts/testar_llm.py
 
 Sem OPENAI_API_KEY no ambiente, sai com uma mensagem clara e não faz
-nenhuma requisição.
+nenhuma requisição. Antes de chamar a API, imprime o contexto exatamente como
+vai no prompt, no modo de `LLM_MODO_DESCRICAO` ("termos" se ausente, issue
+#87), para conferir o que sai da descrição. Isso acontece mesmo sem a chave.
 """
 
 import os
@@ -28,8 +30,9 @@ from app.services.ia.base import (
     LancamentoContexto,
     ProvedorIAIndisponivel,
 )
+from app.services.ia.mascaramento import MODO_MASCARADA, MODO_TERMOS
 from app.services.ia.openai_provider import ProvedorOpenAI
-from app.services.ia.prompt import motivo_deterministico
+from app.services.ia.prompt import motivo_deterministico, serializar_contexto
 
 
 def _contexto_sintetico() -> ContextoDivergencia:
@@ -76,6 +79,13 @@ def _contexto_sintetico() -> ContextoDivergencia:
 
 
 def main() -> None:
+    modo = os.environ.get("LLM_MODO_DESCRICAO", "").strip().lower() or MODO_TERMOS
+    if modo not in (MODO_TERMOS, MODO_MASCARADA):
+        print(f"LLM_MODO_DESCRICAO inválido: {modo!r} (use termos ou mascarada).")
+        return
+    contexto = _contexto_sintetico()
+    print(f"Contexto serializado (modo {modo}):\n{serializar_contexto(contexto, modo=modo)}\n")
+
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         print("OPENAI_API_KEY não configurada no ambiente — nenhuma requisição foi feita.")
@@ -87,12 +97,13 @@ def main() -> None:
         base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         timeout_segundos=float(os.environ.get("LLM_TIMEOUT_SEGUNDOS", "20.0")),
         max_tokens_saida=int(os.environ.get("LLM_MAX_TOKENS_SAIDA", "300")),
+        modo_descricao=modo,
     )
 
     inicio = time.monotonic()
     try:
         resposta = provedor.explicar_divergencia(
-            _contexto_sintetico(), identificador_anonimo="script-teste-manual"
+            contexto, identificador_anonimo="script-teste-manual"
         )
     except ProvedorIAIndisponivel as exc:
         print(f"Provedor indisponível: motivo={exc.motivo} status_http={exc.status_http}")

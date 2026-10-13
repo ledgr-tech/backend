@@ -24,9 +24,30 @@ Nomes de pessoa NÃO são mascarados (ADR-011): detectar nome por regra é
 pouco confiável e daria falsa sensação de segurança. É uma limitação
 conhecida, coberta por DPA/Zero Data Retention com a OpenAI e, depois,
 pelo Sabiazinho BR-SP (mantém o dado em território nacional).
+
+Modo "termos" (issue #87, `LLM_MODO_DESCRICAO`, padrão enquanto não houver
+Zero Data Retention): depois da máscara, `filtrar_termos` deixa passar só as
+palavras de `TERMOS_PERMITIDOS` e os marcadores acima; qualquer outra palavra
+(nome de pessoa, de empresa, número curto) vira `[TEXTO]`, e `[TEXTO]`
+seguidos viram um só. É lista fechada de propósito: o que não está nela não
+sai, em vez de tentar adivinhar o que é nome. O modo "mascarada" é o
+comportamento anterior, só a máscara.
+
+Não reaproveita `TERMOS_TARIFA_BANCARIA` de app/services/matching.py: lá são
+expressões ("manutencao de conta"), comparadas por substring, e importar o
+motor puxaria os models para esta camada, que não toca banco (ver
+tests/test_ia_config.py). As palavras de lá que fazem sentido sozinhas
+(TARIFA, TAR, PACOTE, MANUTENCAO, CONTA, CESTA, SERVICOS, ANUIDADE, IOF e
+TAXA) estão na lista abaixo.
 """
 
 import re
+import unicodedata
+from typing import Literal
+
+ModoDescricao = Literal["termos", "mascarada"]
+MODO_TERMOS: ModoDescricao = "termos"
+MODO_MASCARADA: ModoDescricao = "mascarada"
 
 _TAMANHO_MAXIMO = 120
 
@@ -75,3 +96,61 @@ def mascarar_descricao(texto: str) -> str:
     mascarado = _PADRAO_TELEFONE.sub("[TELEFONE]", mascarado)
     mascarado = _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, mascarado)
     return mascarado[:_TAMANHO_MAXIMO]
+
+
+# Termos bancários e de operação que podem chegar ao provedor no modo
+# "termos" (issue #87). Comparados sem acento e em maiúsculas.
+TERMOS_PERMITIDOS = frozenset(
+    {
+        "PIX", "TED", "DOC", "TEF", "BOLETO", "PAG", "PAGTO", "PAGAMENTO",
+        "TARIFA", "TAR", "TAXA", "IOF", "JUROS", "MULTA", "ESTORNO", "DEVOLUCAO",
+        "SAQUE", "DEPOSITO", "TRANSF", "TRANSFERENCIA", "RECEBIMENTO", "ENVIADO",
+        "RECEBIDO", "CARTAO", "DEBITO", "CREDITO", "DEB", "CRED", "AUTOMATICO",
+        "CONVENIO", "FOLHA", "SALARIO", "ALUGUEL", "IMPOSTO", "DARF", "GPS", "FGTS",
+        "DAS", "SIMPLES", "CONTA", "ENERGIA", "AGUA", "MENSALIDADE", "PACOTE",
+        "SERVICOS", "CESTA", "MANUTENCAO", "ANUIDADE", "RENDIMENTO", "APLICACAO",
+        "RESGATE", "CHEQUE", "COMPENSADO",
+    }
+)  # fmt: skip
+
+MARCADOR_TEXTO = "[TEXTO]"
+_MARCADORES = frozenset({"[CPF]", "[CNPJ]", "[EMAIL]", "[TELEFONE]", "[NUMERO]", MARCADOR_TEXTO})
+# Um marcador ou uma palavra (letras e dígitos, com acento). Pontuação e
+# espaço ficam de fora e somem da saída.
+_PADRAO_PALAVRA = re.compile(r"\[[A-Z]+\]|[^\W_]+")
+
+
+def _sem_acento_maiuscula(palavra: str) -> str:
+    decomposta = unicodedata.normalize("NFKD", palavra)
+    return "".join(c for c in decomposta if not unicodedata.combining(c)).upper()
+
+
+def filtrar_termos(texto: str) -> str:
+    """Deixa passar, como vieram, só as palavras de `TERMOS_PERMITIDOS` e os
+    marcadores da máscara; o resto vira `[TEXTO]`, sem repetir em seguida.
+    As palavras saem separadas por um espaço. Recebe o texto JÁ mascarado:
+    sem a máscara, um CPF virava `[TEXTO]` em vez de `[CPF]`. Determinística
+    e idempotente."""
+    saida: list[str] = []
+    for encontrado in _PADRAO_PALAVRA.finditer(texto):
+        palavra = encontrado.group(0)
+        if palavra in _MARCADORES or _sem_acento_maiuscula(palavra) in TERMOS_PERMITIDOS:
+            token = palavra
+        else:
+            token = MARCADOR_TEXTO
+        if token == MARCADOR_TEXTO and saida and saida[-1] == MARCADOR_TEXTO:
+            continue
+        saida.append(token)
+    return " ".join(saida)
+
+
+def preparar_descricao(texto: str, modo: ModoDescricao) -> str:
+    """O que sai da descrição para o provedor: a máscara sempre, e no modo
+    "termos" também `filtrar_termos`. Modo desconhecido levanta `ValueError`
+    (a configuração já recusa no boot; aqui é a última barreira)."""
+    mascarado = mascarar_descricao(texto)
+    if modo == MODO_MASCARADA:
+        return mascarado
+    if modo == MODO_TERMOS:
+        return filtrar_termos(mascarado)
+    raise ValueError(f"Modo de descrição desconhecido: {modo!r}")

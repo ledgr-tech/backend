@@ -14,7 +14,11 @@ As rotas da própria conta (`/me/*`, issue #66) precisam saber qual usuário
 está chamando: `obter_usuario_autenticado` lê também o `sub` e carrega o
 usuário com esse `id` E o `empresa_id` do token. Aqui a consulta ao banco é
 inerente (a rota precisa do hash da senha), o que o ADR-005 não rejeita.
-Usuário não encontrado também é 401.
+Usuário não encontrado ou removido (issue #69) também é 401.
+
+`obter_administrador_autenticado` (issue #69, ADR-015) é a mesma coisa, mas
+só deixa passar o administrador da empresa; os demais recebem 403. Não há
+papéis: o administrador é quem cadastrou a empresa.
 """
 
 import uuid
@@ -34,6 +38,14 @@ from app.models import Usuario
 ALGORITMO_JWT = "HS256"
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+def normalizar_email(email: str) -> str:
+    """Forma única do e-mail: a que fica no banco e a chave do bloqueio de login.
+
+    Mora aqui, e não em app/api/auth.py, para app/core/bloqueio_login.py usar
+    sem importar a camada de rotas (issue #67)."""
+    return email.strip().lower()
 
 
 def _nao_autenticado() -> HTTPException:
@@ -81,8 +93,23 @@ def obter_usuario_autenticado(
     usuario_id = _uuid_do_claim(claims, "sub")
     empresa_id = _uuid_do_claim(claims, "empresa_id")
     usuario = db.scalar(
-        select(Usuario).where(Usuario.id == usuario_id, Usuario.empresa_id == empresa_id)
+        select(Usuario).where(
+            Usuario.id == usuario_id,
+            Usuario.empresa_id == empresa_id,
+            Usuario.removido_em.is_(None),
+        )
     )
     if usuario is None:
         raise _nao_autenticado()
+    return usuario
+
+
+def obter_administrador_autenticado(
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+) -> Usuario:
+    if not usuario.administrador:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="Só o administrador da empresa pode fazer isso.",
+        )
     return usuario

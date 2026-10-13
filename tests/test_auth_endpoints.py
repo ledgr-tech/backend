@@ -79,6 +79,7 @@ def test_cadastro_cria_empresa_configuracao_e_usuario(db_session, cadastro, gera
 
     usuario = db_session.get(Usuario, uuid.UUID(corpo["id"]))
     assert str(usuario.empresa_id) == corpo["empresa_id"]
+    assert usuario.administrador is True  # issue #69
     assert usuario.empresa.cnpj == d
     assert usuario.empresa.configuracao is not None
 
@@ -242,9 +243,9 @@ def test_login_sem_campo_obrigatorio_retorna_422(campo):
 
 
 def test_login_acima_de_10_por_minuto_retorna_429_na_11a(db_session):
-    email = f"{uuid.uuid4().hex}@teste.com"
-
-    codigos = [_login(email).status_code for _ in range(11)]
+    # Um e-mail por tentativa: com o mesmo, o bloqueio por conta (issue #67)
+    # responderia 429 já na 6ª, e o que se testa aqui é o limite por IP.
+    codigos = [_login(f"{uuid.uuid4().hex}@teste.com").status_code for _ in range(11)]
 
     assert codigos[:10] == [401] * 10
     assert codigos[10] == 429

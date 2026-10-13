@@ -10,6 +10,12 @@ Nunca loga prompt, resposta do modelo, descrição nem a chave — só provedor,
 modelo, código HTTP, duração em ms e contagem de tokens, em nível INFO,
 tanto em sucesso quanto em falha.
 
+Um 429 com corpo de cota esgotada (`error.code` ou `error.type` em
+`CODIGOS_COTA_ESGOTADA`) vira `cota_esgotada` (issue #87): é o teto de gasto
+do painel da OpenAI, não um pico momentâneo, e o time precisa ver isso no
+log. Qualquer outro 429, ou corpo que não seja JSON no formato esperado,
+continua `http`. O corpo nunca é logado.
+
 Parsing defensivo (`_extrair_texto_e_tokens`): a API é de terceiro, então
 qualquer formato inesperado no corpo com status 200 — JSON que não é
 objeto, "choices"/"message"/"usage" com o tipo errado, "content" que não é
@@ -24,9 +30,20 @@ from typing import Any
 import httpx
 
 from app.services.ia.base import ContextoDivergencia, ProvedorIAIndisponivel, RespostaIA
+from app.services.ia.mascaramento import MODO_TERMOS, ModoDescricao
 from app.services.ia.prompt import montar_mensagens
 
 logger = logging.getLogger(__name__)
+
+# Códigos do corpo de erro da OpenAI quando acaba o crédito ou o teto de gasto
+# do projeto ou da organização (issue #87).
+CODIGOS_COTA_ESGOTADA = frozenset(
+    {
+        "insufficient_quota",
+        "project_spend_limit_exceeded",
+        "organization_spend_limit_exceeded",
+    }
+)
 
 
 def _inteiro_ou_zero(valor: Any) -> int:
@@ -75,6 +92,25 @@ def _extrair_texto_e_tokens(corpo_resposta: Any) -> tuple[str, int, int, str | N
     return texto, tokens_entrada, tokens_saida, modelo
 
 
+def _e_cota_esgotada(resposta: httpx.Response) -> bool:
+    """O corpo de erro diz que a cota acabou? Nunca levanta por causa do
+    formato: corpo que não é JSON, ou JSON fora do formato
+    `{"error": {"code": ..., "type": ...}}`, é só False."""
+    try:
+        corpo = resposta.json()
+    except ValueError:
+        return False
+    if not isinstance(corpo, dict):
+        return False
+    erro = corpo.get("error")
+    if not isinstance(erro, dict):
+        return False
+    return any(
+        isinstance(erro.get(campo), str) and erro[campo] in CODIGOS_COTA_ESGOTADA
+        for campo in ("code", "type")
+    )
+
+
 class ProvedorOpenAI:
     """Implementação de `ProvedorDeIA` pro GPT-6 Luna (ADR-011).
     `cliente_http` é injetável pra teste (`httpx.MockTransport`) — sem
@@ -88,6 +124,7 @@ class ProvedorOpenAI:
         timeout_segundos: float,
         max_tokens_saida: int,
         cliente_http: httpx.Client | None = None,
+        modo_descricao: ModoDescricao = MODO_TERMOS,
     ) -> None:
         self._api_key = api_key
         self._modelo = modelo
@@ -95,6 +132,7 @@ class ProvedorOpenAI:
         self._timeout_segundos = timeout_segundos
         self._max_tokens_saida = max_tokens_saida
         self._cliente_http = cliente_http
+        self._modo_descricao = modo_descricao
 
     def explicar_divergencia(
         self, contexto: ContextoDivergencia, *, identificador_anonimo: str | None = None
@@ -104,7 +142,7 @@ class ProvedorOpenAI:
 
         corpo: dict = {
             "model": self._modelo,
-            "messages": montar_mensagens(contexto),
+            "messages": montar_mensagens(contexto, modo=self._modo_descricao),
             "reasoning_effort": "none",
             "max_completion_tokens": self._max_tokens_saida,
             "store": False,
@@ -143,6 +181,8 @@ class ProvedorOpenAI:
 
         if resposta.status_code != 200:
             self._logar(status_http=resposta.status_code, duracao_ms=duracao_ms)
+            if resposta.status_code == 429 and _e_cota_esgotada(resposta):
+                raise ProvedorIAIndisponivel("cota_esgotada", status_http=429)
             raise ProvedorIAIndisponivel("http", status_http=resposta.status_code)
 
         try:

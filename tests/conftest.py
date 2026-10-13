@@ -40,7 +40,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
-from app.core import senha
+from app.core import bloqueio_login, senha
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
@@ -49,6 +49,7 @@ from app.core.rate_limit import limiter
 from app.models import (
     Conciliacao,
     Configuracao,
+    Convite,
     DecisaoLinha,
     Empresa,
     ExecucaoConciliacao,
@@ -103,6 +104,31 @@ def _auth_e_rate_limit_de_teste(monkeypatch):
     limiter.reset()
     yield
     limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _email_e_ia_de_verdade_desligados(monkeypatch):
+    """Nenhum teste fala com o Resend nem com a OpenAI de verdade.
+
+    O `.env` de quem desenvolve pode ter `EMAIL_HABILITADO=true` ou
+    `LLM_HABILITADO=true` com uma chave real. O `/register` manda e-mail de
+    boas-vindas desde a issue #78, e o `POST /explicacoes` chama o provedor de
+    IA: sem isto, um teste que passasse por eles sairia como chamada de
+    verdade, paga no caso da IA (issue #87). Quem precisa de envio ou de
+    explicação troca a dependency por um provedor falso (fixture `provedor`,
+    `app.dependency_overrides`), que não passa por esta configuração."""
+    monkeypatch.setattr(settings, "email_habilitado", False)
+    monkeypatch.setattr(settings, "llm_habilitado", False)
+
+
+@pytest.fixture(autouse=True)
+def _bloqueio_de_login_zerado():
+    """O bloqueio de login por conta (issue #67) é em memória e vale para o
+    processo inteiro: sem zerar, as falhas de um teste bloqueariam o e-mail de
+    outro."""
+    bloqueio_login.limpar_tudo()
+    yield
+    bloqueio_login.limpar_tudo()
 
 
 @pytest.fixture(autouse=True)
@@ -240,6 +266,10 @@ def criar_empresa(db_session):
         # issue #28/ADR-011 acrescenta o cache de explicações).
         db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
         db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
+        # Convites e usuários criados pelo aceite de convite (issue #69), que
+        # não passam por `criar_usuario`.
+        db_session.query(Convite).filter_by(empresa_id=empresa_id).delete()
+        db_session.query(Usuario).filter_by(empresa_id=empresa_id).delete()
         db_session.query(Empresa).filter_by(id=empresa_id).delete()
     db_session.commit()
 
@@ -274,20 +304,27 @@ def provedor(monkeypatch):
 
 @pytest.fixture
 def criar_usuario(db_session, criar_empresa):
-    """Usuário real no banco, numa empresa nova, com a senha
-    `SENHA_USUARIO_TESTE` (ou sem senha, como conta do Google). Apaga só os
+    """Usuário real no banco, com a senha `SENHA_USUARIO_TESTE` (ou sem senha,
+    como conta do Google). Sem `empresa_id`, numa empresa nova e como
+    administrador dela, como no `/register`; com `empresa_id`, entra na
+    empresa como convidado, sem ser administrador (issue #69). Apaga só os
     que criou, antes da limpeza de `criar_empresa` (os tokens de
     `tokens_email` caem junto, pelo ON DELETE CASCADE)."""
     criados: list[uuid.UUID] = []
 
-    def _criar(com_senha: bool = True) -> Usuario:
-        empresa = criar_empresa()
+    def _criar(
+        com_senha: bool = True, empresa_id: uuid.UUID | None = None, nome: str = "Maria Financeiro"
+    ) -> Usuario:
+        administrador = empresa_id is None
+        if empresa_id is None:
+            empresa_id = criar_empresa().id
         usuario = Usuario(
-            empresa_id=empresa.id,
-            nome="Maria Financeiro",
+            empresa_id=empresa_id,
+            nome=nome,
             email=f"{uuid.uuid4().hex[:12]}@teste.com",
             senha_hash=senha.gerar_hash(SENHA_USUARIO_TESTE) if com_senha else None,
             google_sub=None if com_senha else f"google-{uuid.uuid4().hex}",
+            administrador=administrador,
         )
         db_session.add(usuario)
         db_session.commit()
