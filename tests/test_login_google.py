@@ -1,5 +1,6 @@
 """`POST /login/google` e `POST /register/google` (issue #73, adendo de 13/10
-do ADR-004).
+do ADR-004), e o que vale para as três rotas do Google, com o
+`POST /convites/aceitar/google` (o resto dele em tests/test_convites_google.py).
 
 Nenhum teste chama o Google: a fixture `google` (tests/conftest.py) gera uma
 chave RSA na hora e troca o cliente de chaves por um falso. O e-mail de
@@ -87,10 +88,11 @@ def _corpos_das_rotas(id_token: str, gerar_cnpj) -> dict[str, dict]:
             "razao_social": "Empresa",
             "cnpj": gerar_cnpj(),
         },
+        "/convites/aceitar/google": {"token": "qualquer", "id_token": id_token},
     }
 
 
-ROTAS_GOOGLE = ["/login/google", "/register/google"]
+ROTAS_GOOGLE = ["/login/google", "/register/google", "/convites/aceitar/google"]
 
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
