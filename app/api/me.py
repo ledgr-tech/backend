@@ -1,8 +1,9 @@
 """Rotas da própria conta de quem está logado (issue #66, ADR-012).
 
 `GET /me` devolve os dados da conta pro cabeçalho do front (issue #81): nome
-da empresa, CNPJ e os métodos de login. Conta única no MVP, então sem campo
-de papel — sem ele, o front trata todo mundo como administrador.
+da empresa, CNPJ e os métodos de login. Desde a issue #69, também
+`administrador`: sem papéis (ADR-015), só quem cadastrou a empresa é
+administrador, e é ele quem convida e remove usuários.
 
 `POST /me/senha` troca a senha na hora, com a senha atual e a nova (mesma
 regra do cadastro). As regras vêm da issue:
@@ -57,6 +58,7 @@ class MeResponse(BaseModel):
     email: str
     razao_social: str
     cnpj: str
+    administrador: bool
     metodos_login: list[str]
 
 
@@ -83,6 +85,7 @@ def obter_dados_da_conta(
         email=usuario.email,
         razao_social=empresa.razao_social,
         cnpj=empresa.cnpj,
+        administrador=usuario.administrador,
         metodos_login=_metodos_login(usuario),
     )
 

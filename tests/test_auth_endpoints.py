@@ -79,6 +79,7 @@ def test_cadastro_cria_empresa_configuracao_e_usuario(db_session, cadastro, gera
 
     usuario = db_session.get(Usuario, uuid.UUID(corpo["id"]))
     assert str(usuario.empresa_id) == corpo["empresa_id"]
+    assert usuario.administrador is True  # issue #69
     assert usuario.empresa.cnpj == d
     assert usuario.empresa.configuracao is not None
 

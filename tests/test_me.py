@@ -1,6 +1,6 @@
 """Testes de GET /me (issue #81): dados da conta pro cabeçalho do front —
-nome da empresa, CNPJ e métodos de login. Conta única no MVP, sem campo de
-papel (ver app/api/me.py).
+nome da empresa, CNPJ e métodos de login. Sem campo de papel, só
+`administrador` (issue #69, ver app/api/me.py).
 
 Mesmo padrão de tests/test_troca_senha.py: rota por usuário, autenticação e
 rate limit testados com as fixtures de conftest.py.
@@ -50,6 +50,7 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "email": usuario.email,
         "razao_social": empresa.razao_social,
         "cnpj": empresa.cnpj,
+        "administrador": True,
         "metodos_login": ["senha"],
     }
     assert len(corpo["cnpj"]) == 14
@@ -64,6 +65,16 @@ def test_conta_sem_senha_devolve_metodo_google(db_session, criar_usuario, cabeca
 
     assert response.status_code == 200
     assert response.json()["metodos_login"] == ["google"]
+
+
+def test_convidado_nao_e_administrador(db_session, criar_usuario, cabecalho_de):
+    administrador = criar_usuario()
+    convidado = criar_usuario(empresa_id=administrador.empresa_id)
+
+    response = _me(cabecalho_de(convidado))
+
+    assert response.status_code == 200
+    assert response.json()["administrador"] is False
 
 
 def test_conta_com_senha_e_google_devolve_os_dois_na_ordem(db_session, criar_usuario, cabecalho_de):
