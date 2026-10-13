@@ -28,6 +28,7 @@ ofxtools
 pandas
 charset-normalizer
 python-dateutil
-pyjwt
+# [crypto] traz o cryptography, para conferir o ID token do Google (RS256, issue #73)
+pyjwt[crypto]
 slowapi
 rapidfuzz
