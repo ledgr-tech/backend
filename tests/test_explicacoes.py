@@ -24,6 +24,7 @@ from app.models import Conciliacao, ExplicacaoDivergencia
 from app.services.ia import cache as cache_module
 from app.services.ia import prompt as prompt_module
 from app.services.ia.base import ProvedorIAIndisponivel, RespostaIA
+from app.services.ia.prompt import motivo_deterministico
 from main import app
 
 client = TestClient(app)
@@ -368,8 +369,9 @@ def test_mudar_versao_prompt_invalida_cache(cenario, provedor_falso, monkeypatch
     # cache.py e explicacoes.py importaram VERSAO_PROMPT por nome ("from ...
     # import VERSAO_PROMPT"), então cada um tem sua própria referência —
     # monkeypatch precisa alcançar as duas, não só app.services.ia.prompt.
-    monkeypatch.setattr(cache_module, "VERSAO_PROMPT", "v2")
-    monkeypatch.setattr(explicacoes_module, "VERSAO_PROMPT", "v2")
+    outra_versao = f"{prompt_module.VERSAO_PROMPT}-outra"
+    monkeypatch.setattr(cache_module, "VERSAO_PROMPT", outra_versao)
+    monkeypatch.setattr(explicacoes_module, "VERSAO_PROMPT", outra_versao)
     segunda = _explicar(headers, linha.id)
 
     assert primeira.json()["em_cache"] is False
@@ -380,7 +382,9 @@ def test_mudar_versao_prompt_invalida_cache(cenario, provedor_falso, monkeypatch
 # falhas do provedor
 
 
-@pytest.mark.parametrize("motivo", ["timeout", "http", "resposta_invalida", "nao_configurado"])
+@pytest.mark.parametrize(
+    "motivo", ["timeout", "http", "resposta_invalida", "nao_configurado", "cota_esgotada"]
+)
 def test_provedor_indisponivel_gera_fallback_erro_provedor_sem_gravar_cache(
     db_session, cenario, motivo
 ):
@@ -400,6 +404,88 @@ def test_provedor_indisponivel_gera_fallback_erro_provedor_sem_gravar_cache(
 
     db_session.expire_all()
     assert db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa.id).count() == 0
+
+
+def _logs_do_endpoint(caplog, excecao, headers, conciliacao_id):
+    fake = ProvedorFalso(excecao=excecao)
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    with caplog.at_level(logging.INFO):
+        try:
+            resposta = _explicar(headers, conciliacao_id)
+        finally:
+            app.dependency_overrides.pop(obter_provedor_dependencia, None)
+    registros = [r for r in caplog.records if r.name == "app.api.explicacoes"]
+    return resposta, registros
+
+
+def test_cota_esgotada_devolve_erro_provedor_e_loga_warning(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers, caplog
+):
+    """Issue #87: o contrato com o front não muda, mas o time vê no log."""
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    descricao_secreta = "PIX ENVIADO FULANO-SECRETO-DA-COTA"
+    d = date(2026, 9, 20)
+    item = _lancamento_em(db_session, banco, "100.00", d, descricao_secreta)
+    _lancamento_em(db_session, sistema, "99.00", d, "Candidato")
+    linha = _conciliacao(
+        db_session,
+        empresa.id,
+        banco.id,
+        sistema.id,
+        "divergente_valor",
+        lancamento_banco_id=item.id,
+    )
+
+    resposta, registros = _logs_do_endpoint(
+        caplog,
+        ProvedorIAIndisponivel("cota_esgotada", status_http=429),
+        auth_headers(empresa.id),
+        linha.id,
+    )
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["indisponibilidade"] == "erro_provedor"
+    assert corpo["gerada_por_ia"] is False
+    assert corpo["explicacao"] == motivo_deterministico("divergente_valor")
+    (registro,) = registros
+    assert registro.levelno == logging.WARNING
+    assert registro.getMessage() == "explicacoes motivo=cota_esgotada status_http=429"
+    assert "FULANO-SECRETO" not in caplog.text
+    assert "<dados>" not in caplog.text
+    assert "insufficient_quota" not in caplog.text
+
+
+@pytest.mark.parametrize("motivo", ["timeout", "http", "resposta_invalida", "nao_configurado"])
+def test_outros_motivos_continuam_em_info(cenario, caplog, motivo):
+    _empresa, linha, headers = cenario
+
+    _resposta, registros = _logs_do_endpoint(
+        caplog, ProvedorIAIndisponivel(motivo), headers, linha.id
+    )
+
+    (registro,) = registros
+    assert registro.levelno == logging.INFO
+    assert f"motivo={motivo}" in registro.getMessage()
+
+
+def test_mudar_modo_de_descricao_invalida_cache(cenario, provedor_falso, monkeypatch):
+    """Issue #87: "Item divergente" sai como "[TEXTO]" no modo termos e inteiro
+    no mascarada, então a chave muda sozinha."""
+    _empresa, linha, headers = cenario
+
+    monkeypatch.setattr(settings, "llm_modo_descricao", "termos")
+    primeira = _explicar(headers, linha.id)
+    monkeypatch.setattr(settings, "llm_modo_descricao", "mascarada")
+    segunda = _explicar(headers, linha.id)
+    terceira = _explicar(headers, linha.id)
+
+    assert primeira.json()["em_cache"] is False
+    assert segunda.json()["em_cache"] is False
+    assert terceira.json()["em_cache"] is True
+    assert len(provedor_falso.chamadas) == 2
 
 
 def test_provedor_indisponivel_proxima_chamada_tenta_de_novo(db_session, cenario):

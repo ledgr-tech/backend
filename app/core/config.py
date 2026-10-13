@@ -27,8 +27,18 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     llm_timeout_segundos: float = 20.0
     llm_max_tokens_saida: int = 300
-    llm_limite_diario_empresa: int = 50
-    llm_limite_diario_global: int = 300
+    # Limites diários (issue #87). Pior caso por explicação: 1.000 tokens de
+    # entrada e 300 de saída no Luna (US$ 0,10 e US$ 0,50 por milhão), uns
+    # US$ 0,00025. 1.500 por dia durante 30 dias dá uns US$ 11, abaixo do teto
+    # de US$ 15/mês do projeto na OpenAI: o limite do backend bate antes.
+    llm_limite_diario_empresa: int = 300
+    llm_limite_diario_global: int = 1500
+    # O que a descrição do lançamento leva ao provedor (issue #87, ADR-011):
+    # "termos" (padrão) deixa só termos bancários e marcadores, o resto vira
+    # [TEXTO]; "mascarada" manda a descrição com a máscara de CPF, CNPJ etc.,
+    # mas com nomes de pessoa. "termos" vale enquanto não houver Zero Data
+    # Retention. Valor fora da lista derruba o boot, como LOG_LEVEL.
+    llm_modo_descricao: Literal["termos", "mascarada"] = "termos"
 
     # E-mail transacional (issue #66, ADR-012): link de recuperação de senha
     # e de aprovação da troca de e-mail, pelo Resend. Desligado por padrão,
@@ -67,6 +77,11 @@ class Settings(BaseSettings):
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:
         return (valor.strip().upper() or "INFO") if isinstance(valor, str) else valor
+
+    @field_validator("llm_modo_descricao", mode="before")
+    @classmethod
+    def _normalizar_llm_modo_descricao(cls, valor: object) -> object:
+        return (valor.strip().lower() or "termos") if isinstance(valor, str) else valor
 
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.
