@@ -1,7 +1,9 @@
 """Cadastro e login por credenciais (issue #57).
 
 O login devolve só os dados do usuário, sem token: quem emite o JWT é o
-NextAuth (ADR-003). O cadastro é self-service, cria a empresa junto, com quem
+NextAuth (ADR-003). Desde a issue #75, devolve também o `auth_time` que o
+front grava no token: o instante do login no relógio do backend, o mesmo das
+comparações da revogação de sessão (app/core/auth.py). O cadastro é self-service, cria a empresa junto, com quem
 cadastrou como administrador dela (issue #69), e manda o e-mail de
 boas-vindas quando o e-mail está ligado (issue #78), e
 `POST /register/verificar` diz antes se o e-mail e o CNPJ estão livres (issue
@@ -27,7 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import bloqueio_login, senha
-from app.core.auth import normalizar_email
+from app.core.auth import instante_do_login, normalizar_email
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
@@ -109,6 +111,12 @@ class UsuarioResponse(BaseModel):
     empresa_id: uuid.UUID
     nome: str
     email: str
+
+
+class LoginResponse(UsuarioResponse):
+    """Só do `/login`: o `/register` e o `/convites/aceitar` não mudam."""
+
+    auth_time: int
 
 
 def _conflito(detalhe: str) -> HTTPException:
@@ -218,13 +226,13 @@ def verificar_cadastro(
     )
 
 
-@router.post("/login", response_model=UsuarioResponse)
+@router.post("/login", response_model=LoginResponse)
 @limiter.limit(LIMITE_LOGIN)
 def login(
     request: Request,
     dados: LoginRequest,
     db: Annotated[Session, Depends(get_db)],
-) -> UsuarioResponse:
+) -> LoginResponse:
     email = normalizar_email(dados.email)
 
     # Bloqueio por conta (issue #67): antes do banco e do bcrypt, igual para
@@ -254,7 +262,12 @@ def login(
             detail="E-mail ou senha inválidos.",
         )
 
+    auth_time = instante_do_login()  # depois de a senha ser conferida
     bloqueio_login.limpar(email)
-    return UsuarioResponse(
-        id=usuario.id, empresa_id=usuario.empresa_id, nome=usuario.nome, email=usuario.email
+    return LoginResponse(
+        id=usuario.id,
+        empresa_id=usuario.empresa_id,
+        nome=usuario.nome,
+        email=usuario.email,
+        auth_time=auth_time,
     )

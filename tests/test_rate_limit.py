@@ -172,10 +172,12 @@ def _upload(token: str, ip: str) -> int:
     ).status_code
 
 
-def test_upload_limita_por_empresa_e_nao_por_ip(gerar_token):
-    empresa_a, empresa_b = gerar_token(uuid.uuid4()), gerar_token(uuid.uuid4())
+def test_upload_limita_por_empresa_e_nao_por_ip(criar_usuario, gerar_token):
+    usuario_a, usuario_b = criar_usuario(com_senha=False), criar_usuario(com_senha=False)
+    empresa_a = gerar_token(usuario_a.empresa_id, usuario_id=usuario_a.id)
+    empresa_b = gerar_token(usuario_b.empresa_id, usuario_id=usuario_b.id)
 
-    # extensão inválida: 400 sem tocar no banco, mas conta no limite
+    # extensão inválida: 400 sem gravar nada, mas conta no limite
     codigos_a = [_upload(empresa_a, f"198.51.100.{n}") for n in range(11)]
 
     assert codigos_a[:10] == [400] * 10

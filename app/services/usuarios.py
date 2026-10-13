@@ -9,11 +9,11 @@ usuário removido:
 - troca o e-mail por `removido+<id>@ledgr.invalid`, um marcador único que não
   é endereço de entrega, e o e-mail original fica livre para outro cadastro
   ou para um convite novo (que cria outro usuário: não há reativação);
-- tem os links pendentes de `tokens_email` invalidados.
+- tem os links pendentes de `tokens_email` invalidados;
+- tem as sessões encerradas (issue #75).
 
-`obter_usuario_autenticado` recusa o removido com 401 e o `/login` responde
-como senha errada. O JWT já emitido continua valendo nas rotas que só leem o
-`empresa_id` até expirar; revogar na hora é a issue #75.
+Toda rota autenticada recusa o removido com 401, já no token que ele tinha
+(app/core/auth.py), e o `/login` responde como senha errada.
 
 A mesma função serve para o próprio usuário desativar a conta (issue #68).
 """
@@ -21,6 +21,7 @@ A mesma função serve para o próprio usuário desativar a conta (issue #68).
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
+from app.core.auth import encerrar_sessoes
 from app.models import TokenEmail, Usuario
 from app.models.usuario import DOMINIO_EMAIL_REMOVIDO
 
@@ -37,6 +38,7 @@ def remover_usuario(db: Session, usuario: Usuario) -> None:
     usuario.email = email_de_removido(usuario)
     usuario.senha_hash = None
     usuario.google_sub = None
+    encerrar_sessoes(usuario)
     db.execute(
         update(TokenEmail)
         .where(TokenEmail.usuario_id == usuario.id, TokenEmail.usado_em.is_(None))
