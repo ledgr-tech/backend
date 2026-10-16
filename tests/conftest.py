@@ -63,6 +63,7 @@ from app.models import (
     LinhaInvalida,
     Usuario,
 )
+from app.services.consulta_cnpj.cache import cache_por_cnpj as cache_consulta_cnpj
 from app.services.email import MensagemEmail
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -122,6 +123,18 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     `app.dependency_overrides`), que não passa por esta configuração."""
     monkeypatch.setattr(settings, "email_habilitado", False)
     monkeypatch.setattr(settings, "llm_habilitado", False)
+
+
+@pytest.fixture(autouse=True)
+def _consulta_cnpj_de_verdade_desligada(monkeypatch):
+    """Nenhum teste consulta a Receita de verdade (issue #119): a consulta fica
+    desligada, e o cache dela, vazio entre testes. Quem testa a consulta troca
+    a dependency por um provedor com `httpx.MockTransport` (fixture `receita`
+    de tests/test_consulta_cnpj_cadastro.py)."""
+    monkeypatch.setattr(settings, "cnpj_consulta_habilitada", False)
+    cache_consulta_cnpj.limpar()
+    yield
+    cache_consulta_cnpj.limpar()
 
 
 class _ClienteDeChavesProibido:
