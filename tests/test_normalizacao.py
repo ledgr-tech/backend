@@ -21,6 +21,7 @@ Cobertura, mapeada nos nomes:
   test_normalizar_extrato_ofx_transacao_malformada_tolera_e_marca_concluido_com_erros
 - Insert em lote, issue #51 (conta statements, não mede tempo):
   test_normalizar_extrato_com_volume_emite_um_insert_por_bloco_e_nao_um_por_linha
+- Saldo do extrato, issue #118: test_normalizar_extrato_*saldo*
 """
 
 import hashlib
@@ -31,6 +32,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import event
 
 from app.core.database import engine
@@ -410,3 +412,63 @@ def test_normalizar_extrato_com_volume_emite_um_insert_por_bloco_e_nao_um_por_li
     assert db_session.get(Extrato, extrato.id).quantidade_lancamentos == total
     assert db_session.query(Lancamento).filter_by(extrato_id=extrato.id).count() == total
     assert len(inserts) == math.ceil(total / TAMANHO_BLOCO_INSERT) == 3
+
+
+# Saldo do extrato (issue #118)
+
+
+def _saldo(db_session, extrato_id):
+    db_session.expire_all()
+    extrato = db_session.get(Extrato, extrato_id)
+    return extrato.status, extrato.saldo_final, extrato.saldo_data
+
+
+def test_normalizar_extrato_ofx_com_ledgerbal_grava_saldo_e_data(db_session, criar_extrato):
+    extrato = criar_extrato("ofx")
+
+    normalizar_extrato(extrato.id, "ofx", (FIXTURES_DIR / "extrato_valido.ofx").read_bytes())
+
+    assert _saldo(db_session, extrato.id) == ("concluido", Decimal("1249.25"), date(2026, 9, 10))
+
+
+@pytest.mark.parametrize(
+    "ledgerbal",
+    [b"", b"<LEDGERBAL>\n<BALAMT>abc\n<DTASOF>20260910120000\n</LEDGERBAL>\n"],
+    ids=["sem_ledgerbal", "balamt_ilegivel"],
+)
+def test_normalizar_extrato_ofx_sem_saldo_legivel_conclui_com_saldo_null(
+    db_session, criar_extrato, ledgerbal
+):
+    extrato = criar_extrato("ofx")
+    conteudo = (FIXTURES_DIR / "extrato_valido.ofx").read_bytes()
+    conteudo = conteudo.replace(
+        b"<LEDGERBAL>\n<BALAMT>1249.25\n<DTASOF>20260910120000\n</LEDGERBAL>\n", ledgerbal
+    )
+
+    normalizar_extrato(extrato.id, "ofx", conteudo)
+
+    assert _saldo(db_session, extrato.id) == ("concluido", None, None)
+    assert db_session.query(Lancamento).filter_by(extrato_id=extrato.id).count() == 2
+    assert db_session.query(LinhaInvalida).filter_by(extrato_id=extrato.id).count() == 0
+
+
+def test_normalizar_extrato_csv_com_coluna_saldo_grava_saldo(db_session, criar_extrato):
+    extrato = criar_extrato("csv", origem="sistema")
+    conteudo = b"data,valor,descricao,saldo\n2026-09-05,100.00,a,1100.00\n2026-09-07,20.00,b,1120\n"
+
+    normalizar_extrato(extrato.id, "csv", conteudo)
+
+    assert _saldo(db_session, extrato.id) == ("concluido", Decimal("1120.00"), date(2026, 9, 7))
+
+
+def test_normalizar_extrato_csv_sem_coluna_saldo_e_corrompido_deixam_saldo_null(
+    db_session, criar_extrato
+):
+    sem_coluna = criar_extrato("csv")
+    corrompido = criar_extrato("csv")
+
+    normalizar_extrato(sem_coluna.id, "csv", (FIXTURES_DIR / "extrato_valido.csv").read_bytes())
+    normalizar_extrato(corrompido.id, "csv", b"isso claramente nao eh um csv de extrato valido")
+
+    assert _saldo(db_session, sem_coluna.id) == ("concluido", None, None)
+    assert _saldo(db_session, corrompido.id) == ("erro", None, None)

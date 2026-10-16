@@ -439,6 +439,9 @@ def test_get_extrato_sem_conciliacao_devolve_lista_vazia(
     assert response.status_code == 200
     assert response.json() == {
         "extrato_id": str(banco.id),
+        "saldo_inicial": None,
+        "saldo_final": None,
+        "saldo_data": None,
         "total": 0,
         "limit": 100,
         "offset": 0,
