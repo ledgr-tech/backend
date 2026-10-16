@@ -20,6 +20,11 @@ client = TestClient(app)
 
 CNPJ_VALIDO = "12345678000195"
 
+# Consulta à Receita desligada (padrão nos testes, tests/conftest.py): a
+# situação vem "nao_verificado" (issue #119; com a consulta ligada, ver
+# tests/test_consulta_cnpj_cadastro.py).
+NAO_VERIFICADO = {"cnpj_situacao": "nao_verificado", "razao_social": None}
+
 
 def _verificar(email: str, cnpj: str):
     return client.post("/register/verificar", json={"email": email, "cnpj": cnpj})
@@ -51,7 +56,7 @@ def test_email_e_cnpj_livres(db_session):
     response = _verificar(_email_livre(), _cnpj_livre(db_session))
 
     assert response.status_code == 200
-    assert response.json() == {"email_disponivel": True, "cnpj_disponivel": True}
+    assert response.json() == {"email_disponivel": True, "cnpj_disponivel": True, **NAO_VERIFICADO}
 
 
 def test_so_o_email_em_uso(db_session, em_uso):
@@ -59,7 +64,7 @@ def test_so_o_email_em_uso(db_session, em_uso):
 
     response = _verificar(email, _cnpj_livre(db_session))
 
-    assert response.json() == {"email_disponivel": False, "cnpj_disponivel": True}
+    assert response.json() == {"email_disponivel": False, "cnpj_disponivel": True, **NAO_VERIFICADO}
 
 
 def test_so_o_cnpj_em_uso(db_session, em_uso):
@@ -67,13 +72,17 @@ def test_so_o_cnpj_em_uso(db_session, em_uso):
 
     response = _verificar(_email_livre(), cnpj)
 
-    assert response.json() == {"email_disponivel": True, "cnpj_disponivel": False}
+    assert response.json() == {"email_disponivel": True, "cnpj_disponivel": False, **NAO_VERIFICADO}
 
 
 def test_email_e_cnpj_em_uso(em_uso):
     response = _verificar(*em_uso)
 
-    assert response.json() == {"email_disponivel": False, "cnpj_disponivel": False}
+    assert response.json() == {
+        "email_disponivel": False,
+        "cnpj_disponivel": False,
+        **NAO_VERIFICADO,
+    }
 
 
 def test_email_com_maiusculas_e_espacos_e_o_mesmo_cadastrado(db_session, em_uso):
@@ -170,6 +179,7 @@ def test_as_duas_consultas_rodam_sempre(db_session, em_uso, email_em_uso, cnpj_e
     assert response.json() == {
         "email_disponivel": not email_em_uso,
         "cnpj_disponivel": not cnpj_em_uso,
+        **NAO_VERIFICADO,
     }
     assert len([c for c in consultas if "FROM usuarios" in c]) == 1
     assert len([c for c in consultas if "FROM empresas" in c]) == 1

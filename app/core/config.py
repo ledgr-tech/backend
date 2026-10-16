@@ -69,6 +69,16 @@ class Settings(BaseSettings):
     # as rotas `*/google` em 503, sem chamar o Google, e não bloqueia o boot.
     google_client_id: str = ""
 
+    # Consulta do CNPJ na Receita no cadastro (issue #119): se o CNPJ existe e
+    # está ativo, pela BrasilAPI (app/services/consulta_cnpj/). Desligada por
+    # padrão, como o e-mail e a IA: sem ela, nada é consultado e o cadastro
+    # segue como antes, com a empresa não verificada. `cnpj_consulta_url` é a
+    # base da API (o CNPJ entra no fim do caminho); `cnpj_consulta_chave` fica
+    # vazia, porque a BrasilAPI não usa chave. O timeout total é fixo, 5 s.
+    cnpj_consulta_habilitada: bool = False
+    cnpj_consulta_url: str = "https://brasilapi.com.br/api/cnpj/v1"
+    cnpj_consulta_chave: str = ""
+
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
     # boot com o motivo, em vez de deixar a API no ar sem log.

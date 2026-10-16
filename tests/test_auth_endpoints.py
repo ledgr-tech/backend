@@ -185,6 +185,8 @@ def test_cadastro_com_campo_invalido_retorna_422(sobrescrita):
         ("1234567800019", None),
         ("123456780001955", None),
         ("12ABC34501DE3A", None),
+        ("12ABC34501DE36", None),  # alfanumérico com o verificador errado
+        ("12ABC34501DE53", None),  # verificadores trocados
     ],
 )
 def test_normalizar_cnpj(entrada, esperado):

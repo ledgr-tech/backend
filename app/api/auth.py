@@ -23,13 +23,25 @@ que já tem conta com senha não é vinculado (409): o cadastro do Ledgr não
 confirma e-mail, e vincular entregaria a conta criada antes por outra pessoa
 com o e-mail da vítima. As duas respondem com `LoginResponse`, com o
 `auth_time` do `instante_do_login`.
+
+Verificação do CNPJ na Receita (issue #119, app/services/consulta_cnpj/): o
+`/register` e o `/register/google` consultam (ou usam o cache de 24 horas)
+depois das validações locais e antes de gravar, com a transação de leitura já
+encerrada, para a chamada externa (até 5 s) não segurar conexão do banco.
+"nao_encontrado" e "inativa" dão 422 no formato do FastAPI, com `loc`
+`["body", "cnpj"]`; "indisponivel" (consulta desligada, API fora do ar,
+lenta ou recusando o formato) não bloqueia, e a empresa nasce não
+verificada. Com "ativa", `cnpj_verificado_em` recebe o instante do cadastro;
+nada mais da consulta é gravado. O `/register/verificar` devolve a situação
+(`cnpj_situacao`) e a razão social da Receita para a tela oferecer, e só
+consulta quando o CNPJ ainda não tem empresa no Ledgr.
 """
 
 import logging
 import math
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
@@ -52,6 +64,13 @@ from app.core.rate_limit import (
     limiter,
 )
 from app.models import Configuracao, Empresa, Usuario
+from app.services.consulta_cnpj import (
+    ConsultaCNPJ,
+    ResultadoConsultaCNPJ,
+    consultar_cnpj,
+    obter_consulta_cnpj_dependencia,
+)
+from app.services.consulta_cnpj.base import INDISPONIVEL
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
 from app.services.email.mensagens import mensagem_boas_vindas
@@ -108,9 +127,16 @@ class VerificacaoCadastroRequest(BaseModel):
     cnpj: CnpjValido
 
 
+# "indisponivel" da consulta vira "nao_verificado" para a tela (issue #119).
+SituacaoCnpjNaResposta = Literal["ativa", "inativa", "nao_encontrado", "nao_verificado"]
+
+
 class VerificacaoCadastroResponse(BaseModel):
     email_disponivel: bool
     cnpj_disponivel: bool
+    cnpj_situacao: SituacaoCnpjNaResposta
+    # A razão social que a Receita devolveu, só com "ativa" ou "inativa".
+    razao_social: str | None
 
 
 class LoginRequest(BaseModel):
@@ -194,6 +220,37 @@ def _conflito(detalhe: str) -> HTTPException:
 
 CONTA_GOOGLE_JA_CADASTRADA = "Já existe uma conta no Ledgr para esta conta Google."
 
+# 422 do cadastro pela situação do CNPJ na Receita (issue #119).
+CNPJ_RECUSADO_PELA_RECEITA = {
+    "nao_encontrado": "CNPJ não encontrado na Receita Federal.",
+    "inativa": "CNPJ não está ativo na Receita Federal.",
+}
+
+ConsultaCnpjDependencia = Annotated[ConsultaCNPJ | None, Depends(obter_consulta_cnpj_dependencia)]
+
+
+def situacao_na_receita(
+    db: Session, consulta: ConsultaCNPJ | None, cnpj: str
+) -> ResultadoConsultaCNPJ:
+    """Consulta (ou cache) do CNPJ, com a transação de leitura encerrada antes:
+    a chamada externa não pode segurar uma conexão do banco."""
+    db.rollback()
+    return consultar_cnpj(cnpj, consulta)
+
+
+def barrar_cnpj_recusado(resultado: ResultadoConsultaCNPJ, cnpj: str) -> None:
+    """422 com "nao_encontrado" ou "inativa", no formato do FastAPI e com
+    `loc` no campo `cnpj`, como os outros 422 do cadastro."""
+    mensagem = CNPJ_RECUSADO_PELA_RECEITA.get(resultado.situacao)
+    if mensagem is not None:
+        raise RequestValidationError(
+            [{"type": "value_error", "loc": ("body", "cnpj"), "msg": mensagem, "input": cnpj}]
+        )
+
+
+def cnpj_verificado_em(resultado: ResultadoConsultaCNPJ) -> datetime | None:
+    return datetime.now(UTC) if resultado.situacao == "ativa" else None
+
 
 @router.post(
     "/register",
@@ -207,14 +264,22 @@ def cadastrar(
     tarefas: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
     provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
+    consulta: ConsultaCnpjDependencia,
 ) -> UsuarioResponse:
     email = normalizar_email(dados.email)
     if db.scalar(select(Usuario.id).where(Usuario.email == email)):
         raise _conflito("E-mail já cadastrado.")
     if db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj)):
         raise _conflito("CNPJ já cadastrado.")
+    receita = situacao_na_receita(db, consulta, dados.cnpj)
+    barrar_cnpj_recusado(receita, dados.cnpj)
 
-    empresa = Empresa(id=uuid.uuid4(), razao_social=dados.razao_social, cnpj=dados.cnpj)
+    empresa = Empresa(
+        id=uuid.uuid4(),
+        razao_social=dados.razao_social,
+        cnpj=dados.cnpj,
+        cnpj_verificado_em=cnpj_verificado_em(receita),
+    )
     usuario = Usuario(
         empresa_id=empresa.id,
         nome=dados.nome,
@@ -270,6 +335,7 @@ def verificar_cadastro(
     request: Request,
     dados: VerificacaoCadastroRequest,
     db: Annotated[Session, Depends(get_db)],
+    consulta: ConsultaCnpjDependencia,
 ) -> VerificacaoCadastroResponse:
     """Diz se o e-mail e o CNPJ ainda estão livres, antes do fim do cadastro (issue #80).
 
@@ -288,13 +354,24 @@ def verificar_cadastro(
     As duas consultas rodam sempre, mesmo quando a primeira já achou, para o
     tempo de resposta não depender de qual dos dois existe. Não loga o e-mail
     nem o CNPJ.
+
+    Situação na Receita (issue #119): só consulta quando o CNPJ ainda não tem
+    empresa no Ledgr (o tempo da consulta revela isso, mas `cnpj_disponivel`
+    já diz). Sem consulta, ou com ela indisponível, `cnpj_situacao` é
+    "nao_verificado". A razão social da Receita só vem com "ativa" ou
+    "inativa". O resultado fica 24 horas no cache, e o `/register` em seguida
+    não consulta de novo.
     """
     email_em_uso = db.scalar(
         select(Usuario.id).where(Usuario.email == normalizar_email(dados.email))
     )
     cnpj_em_uso = db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj))
+    receita = situacao_na_receita(db, consulta, dados.cnpj) if cnpj_em_uso is None else INDISPONIVEL
     return VerificacaoCadastroResponse(
-        email_disponivel=email_em_uso is None, cnpj_disponivel=cnpj_em_uso is None
+        email_disponivel=email_em_uso is None,
+        cnpj_disponivel=cnpj_em_uso is None,
+        cnpj_situacao="nao_verificado" if receita.situacao == "indisponivel" else receita.situacao,
+        razao_social=receita.razao_social,
     )
 
 
@@ -392,6 +469,7 @@ def cadastrar_google(
     tarefas: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
     provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
+    consulta: ConsultaCnpjDependencia,
 ) -> LoginResponse:
     """Cadastro pelo Google (issue #73): como o `/register`, com o e-mail e o
     `google_sub` do token e sem senha. Quem cadastra é o administrador da
@@ -410,8 +488,17 @@ def cadastrar_google(
     if db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj)):
         logger.info("cadastro_google resultado=cnpj_em_uso")
         raise _conflito("CNPJ já cadastrado.")
+    receita = situacao_na_receita(db, consulta, dados.cnpj)
+    if receita.situacao in CNPJ_RECUSADO_PELA_RECEITA:
+        logger.info("cadastro_google resultado=cnpj_%s", receita.situacao)
+    barrar_cnpj_recusado(receita, dados.cnpj)
 
-    empresa = Empresa(id=uuid.uuid4(), razao_social=dados.razao_social, cnpj=dados.cnpj)
+    empresa = Empresa(
+        id=uuid.uuid4(),
+        razao_social=dados.razao_social,
+        cnpj=dados.cnpj,
+        cnpj_verificado_em=cnpj_verificado_em(receita),
+    )
     usuario = Usuario(
         empresa_id=empresa.id,
         nome=nome,
