@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from app.parsers.ofx import OFXInvalidoError, parse_ofx
-from app.parsers.tipos import LancamentoNormalizado
+from app.parsers.tipos import LancamentoNormalizado, SaldoExtrato
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -131,3 +131,74 @@ def test_parse_ofx_transacao_malformada_sem_fitid_usa_posicao_sequencial_como_id
     # 1-based, posição sequencial entre todas as transações do arquivo —
     # a malformada é a segunda transação processada.
     assert resultado.erros[0].identificador == "transação 2"
+
+
+# Saldo do extrato (issue #118): LEDGERBAL (BALAMT e a data de DTASOF). Sem
+# ele, ou ilegível, o saldo fica None e o resto do arquivo segue normal.
+
+_LEDGERBAL = b"<LEDGERBAL>\n<BALAMT>1249.25\n<DTASOF>20260910120000\n</LEDGERBAL>\n"
+_AVAILBAL = b"<AVAILBAL>\n<BALAMT>999.99\n<DTASOF>20260911\n</AVAILBAL>\n"
+
+
+def _ofx_valido() -> bytes:
+    conteudo = (FIXTURES_DIR / "extrato_valido.ofx").read_bytes()
+    assert _LEDGERBAL in conteudo
+    return conteudo
+
+
+def test_parse_ofx_com_ledgerbal_devolve_saldo_e_data():
+    resultado = parse_ofx(_ofx_valido())
+
+    assert resultado.saldo == SaldoExtrato(valor=Decimal("1249.25"), data=date(2026, 9, 10))
+
+
+def test_parse_ofx_ignora_availbal():
+    resultado = parse_ofx(_ofx_valido().replace(_LEDGERBAL, _LEDGERBAL + _AVAILBAL))
+
+    assert resultado.saldo == SaldoExtrato(valor=Decimal("1249.25"), data=date(2026, 9, 10))
+
+
+@pytest.mark.parametrize(
+    "ledgerbal",
+    [
+        b"",
+        _AVAILBAL,
+        _LEDGERBAL.replace(b"1249.25", b"abc"),
+        _LEDGERBAL.replace(b"1249.25", b""),
+        _LEDGERBAL.replace(b"1249.25", b"NaN"),
+        _LEDGERBAL.replace(b"1249.25", b"1e15"),
+        _LEDGERBAL.replace(b"20260910120000", b"ontem"),
+        _LEDGERBAL.replace(b"<DTASOF>20260910120000\n", b"") + _AVAILBAL,
+    ],
+    ids=[
+        "sem_ledgerbal",
+        "so_availbal",
+        "balamt_ilegivel",
+        "balamt_vazio",
+        "balamt_nan",
+        "balamt_grande_demais",
+        "dtasof_ilegivel",
+        "sem_dtasof_com_availbal",
+    ],
+)
+def test_parse_ofx_sem_saldo_legivel_fica_none_e_le_o_resto(ledgerbal):
+    resultado = parse_ofx(_ofx_valido().replace(_LEDGERBAL, ledgerbal))
+
+    assert resultado.saldo is None
+    assert resultado.erros == []
+    assert [lancamento.valor for lancamento in resultado.lancamentos] == [
+        Decimal("1500.00"),
+        Decimal("-250.75"),
+    ]
+
+
+def test_parse_ofx_com_dois_extratos_nao_devolve_saldo():
+    conteudo = _ofx_valido()
+    inicio = conteudo.index(b"<STMTTRNRS>")
+    fim = conteudo.index(b"</STMTTRNRS>") + len(b"</STMTTRNRS>\n")
+    dois = conteudo[:fim] + conteudo[inicio:fim] + conteudo[fim:]
+
+    resultado = parse_ofx(dois)
+
+    assert len(resultado.lancamentos) == 4
+    assert resultado.saldo is None

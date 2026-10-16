@@ -25,6 +25,16 @@ algum banco/sistema real exigir formato diferente):
   decimal (ex: "1.500,75") não é suportado ainda.
 - Tipo (credito/debito) inferido pelo sinal do valor, igual o fallback que
   já existe no parser de OFX — CSV não tem um campo TRNTYPE equivalente.
+- Coluna `saldo` opcional (issue #118), com o mesmo tratamento de nome das
+  obrigatórias e o mesmo parse de número da coluna `valor`. O saldo do
+  arquivo é o da linha válida mais recente pela data; com mais de uma linha
+  nessa data, a última do dia na ordem do arquivo. A ordem do arquivo sai da
+  data da primeira e da última linha válida: crescente (ou tudo no mesmo
+  dia) pega a última dessas linhas no arquivo; decrescente, a primeira. A
+  data do saldo é a dessa linha. Se essa linha não tem saldo legível, o
+  saldo fica `None`, sem procurar em outra linha (o saldo de outra linha
+  não fecharia com os lançamentos do dia). Sem a coluna, `None` e sem erro.
+  Saldo nunca vira `ErroLinha`.
 - Encoding restrito a UTF-8, ISO-8859-1 (Latin-1) ou CP1252: os três
   praticamente usados por banco/sistema de gestão brasileiro. Restringir o
   universo de candidatos do charset-normalizer é intencional (não só
@@ -49,11 +59,18 @@ from charset_normalizer import from_bytes
 from dateutil.parser import ParserError
 from dateutil.parser import parse as dateutil_parse
 
-from app.parsers.tipos import ErroLinha, LancamentoNormalizado, ResultadoParsing
+from app.parsers.tipos import (
+    ErroLinha,
+    LancamentoNormalizado,
+    ResultadoParsing,
+    SaldoExtrato,
+    saldo_ou_none,
+)
 
 # Ver suposição de encoding no docstring do módulo.
 _ENCODINGS_CANDIDATOS = ["utf_8", "iso-8859-1", "cp1252"]
 _COLUNAS_OBRIGATORIAS = {"data", "valor", "descricao"}
+_COLUNA_SALDO = "saldo"
 
 
 class CSVInvalidoError(Exception):
@@ -104,6 +121,23 @@ def _parse_valor(bruto: str) -> Decimal:
         raise CSVInvalidoError(f"Valor inválido no CSV: {bruto!r}") from exc
 
 
+def _saldo_do_arquivo(linhas_validas: list[tuple[date, str]]) -> SaldoExtrato | None:
+    """Saldo da última linha do dia mais recente, a partir de (data, saldo
+    bruto) de cada linha válida na ordem do arquivo (regra no docstring do
+    módulo)."""
+    if not linhas_validas:
+        return None
+    crescente = linhas_validas[0][0] <= linhas_validas[-1][0]
+    data_saldo = max(data_linha for data_linha, _ in linhas_validas)
+    do_dia = [bruto for data_linha, bruto in linhas_validas if data_linha == data_saldo]
+    bruto = do_dia[-1] if crescente else do_dia[0]
+    try:
+        valor = _parse_valor(bruto)
+    except CSVInvalidoError:
+        return None
+    return saldo_ou_none(valor, data_saldo)
+
+
 def parse_csv(conteudo: bytes) -> ResultadoParsing:
     """Faz o parsing de um arquivo CSV e retorna lançamentos válidos + erros por linha.
 
@@ -133,8 +167,10 @@ def parse_csv(conteudo: bytes) -> ResultadoParsing:
             f"Colunas encontradas: {list(tabela.columns)}."
         )
 
+    tem_saldo = _COLUNA_SALDO in tabela.columns
     lancamentos: list[LancamentoNormalizado] = []
     erros: list[ErroLinha] = []
+    saldos_das_linhas: list[tuple[date, str]] = []
     for indice, linha in tabela.iterrows():
         # Linha 1 é o cabeçalho, a primeira linha de dado é a 2 — bate com
         # o que a pessoa vê abrindo o CSV num editor de texto.
@@ -153,4 +189,7 @@ def parse_csv(conteudo: bytes) -> ResultadoParsing:
                 tipo="credito" if valor >= 0 else "debito",
             )
         )
-    return ResultadoParsing(lancamentos=lancamentos, erros=erros)
+        if tem_saldo:
+            saldos_das_linhas.append((data_lancamento, str(linha[_COLUNA_SALDO])))
+    saldo = _saldo_do_arquivo(saldos_das_linhas) if tem_saldo else None
+    return ResultadoParsing(lancamentos=lancamentos, erros=erros, saldo=saldo)
