@@ -24,6 +24,13 @@ determinístico pela seed), então o número esperado de `match_exato` é
 exatamente N, e o script imprime esse número:
     python scripts/gerar_extratos_sinteticos.py --formato csv --par --quantidade 50 --sobreposicao 30 --seed 7
 
+Saldo (issue #118): todo OFX sai com LEDGERBAL coerente com os lançamentos,
+BALAMT = `_SALDO_INICIAL` + soma dos valores e DTASOF na maior data. No modo
+de par em CSV, o arquivo do banco sai do mais antigo para o mais novo, com a
+coluna `Saldo` acumulada linha a linha (o do sistema continua sem ela), então
+o saldo inicial que a API calcula é `_SALDO_INICIAL`. Valor fixo, fora do
+`rng`, pra não mudar os lançamentos gerados com a mesma seed.
+
 O `--seed` garante reprodutibilidade determinística (mesma seed + mesmos
 argumentos geram exatamente os mesmos lançamentos), inclusive no modo de par.
 """
@@ -85,6 +92,7 @@ _DESCRICOES_DEBITO = [
 
 _DATA_BASE = date(2026, 9, 1)
 _JANELA_DIAS = 30
+_SALDO_INICIAL = Decimal("10000.00")
 
 # Nomes de codec do Python pra cada opção de --encoding. "latin-1" é o nome
 # comum informal; "iso-8859-1" é o codec real do Python (mesma tabela).
@@ -143,6 +151,7 @@ def _montar_ofx(lancamentos: list[Lancamento]) -> str:
         dtend = max(lancamento.data for lancamento in lancamentos)
     else:
         dtstart = dtend = _DATA_BASE
+    saldo_final = _SALDO_INICIAL + sum(lancamento.valor for lancamento in lancamentos)
 
     return (
         "OFXHEADER:100\n"
@@ -186,8 +195,8 @@ def _montar_ofx(lancamentos: list[Lancamento]) -> str:
         f"{corpo_transacoes}\n"
         "</BANKTRANLIST>\n"
         "<LEDGERBAL>\n"
-        "<BALAMT>0.00\n"
-        f"<DTASOF>{_hoje():%Y%m%d}120000\n"
+        f"<BALAMT>{saldo_final}\n"
+        f"<DTASOF>{dtend:%Y%m%d}120000\n"
         "</LEDGERBAL>\n"
         "</STMTRS>\n"
         "</STMTTRNRS>\n"
@@ -206,13 +215,31 @@ def _corromper_ofx(texto_valido: str) -> str:
     return "".join(linha for linha in linhas if not linha.startswith("OFXHEADER:"))
 
 
-def _montar_csv(lancamentos: list[Lancamento]) -> str:
+def _montar_csv(lancamentos: list[Lancamento], com_saldo: bool = False) -> str:
+    """CSV dos lançamentos. `com_saldo` ordena pela data (do mais antigo para o
+    mais novo) e acrescenta a coluna `Saldo`, acumulada a partir de
+    `_SALDO_INICIAL` (issue #118)."""
     buffer = io.StringIO()
     escritor = csv.writer(buffer)
-    escritor.writerow(["Data", "Valor", "Descricao"])
-    for lancamento in lancamentos:
+    if not com_saldo:
+        escritor.writerow(["Data", "Valor", "Descricao"])
+        for lancamento in lancamentos:
+            escritor.writerow(
+                [f"{lancamento.data:%Y-%m-%d}", str(lancamento.valor), lancamento.descricao]
+            )
+        return buffer.getvalue()
+
+    escritor.writerow(["Data", "Valor", "Descricao", "Saldo"])
+    saldo = _SALDO_INICIAL
+    for lancamento in sorted(lancamentos, key=lambda item: item.data):
+        saldo += lancamento.valor
         escritor.writerow(
-            [f"{lancamento.data:%Y-%m-%d}", str(lancamento.valor), lancamento.descricao]
+            [
+                f"{lancamento.data:%Y-%m-%d}",
+                str(lancamento.valor),
+                lancamento.descricao,
+                str(saldo),
+            ]
         )
     return buffer.getvalue()
 
@@ -274,7 +301,11 @@ def _gerar_par(
 
 
 def _serializar(
-    formato: str, lancamentos: list[Lancamento], encoding: str, corromper: bool
+    formato: str,
+    lancamentos: list[Lancamento],
+    encoding: str,
+    corromper: bool,
+    com_saldo: bool = False,
 ) -> bytes:
     if formato == "ofx":
         texto = _montar_ofx(lancamentos)
@@ -284,7 +315,7 @@ def _serializar(
         # igual a fixture manual — --encoding não se aplica a este formato.
         return texto.encode("cp1252")
 
-    texto = _montar_csv(lancamentos)
+    texto = _montar_csv(lancamentos, com_saldo)
     if corromper:
         texto = _corromper_csv(texto)
     return texto.encode(_ENCODINGS[encoding])
@@ -409,7 +440,10 @@ def _main_par(args: argparse.Namespace, seed: int, rng: random.Random) -> None:
 
     caminhos = []
     for lado, lancamentos in (("banco", banco), ("sistema", sistema)):
-        conteudo = _serializar(args.formato, lancamentos, args.encoding, corromper=False)
+        # Extrato do banco em CSV sai com a coluna Saldo (issue #118).
+        conteudo = _serializar(
+            args.formato, lancamentos, args.encoding, corromper=False, com_saldo=lado == "banco"
+        )
         nome = _nome_arquivo_par(
             lado, args.formato, args.quantidade, args.sobreposicao, args.encoding, seed
         )

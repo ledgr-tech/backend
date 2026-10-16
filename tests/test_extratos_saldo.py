@@ -22,6 +22,8 @@ from sqlalchemy import event
 from app.core.database import engine
 from app.models import Lancamento, LinhaInvalida
 from main import app
+from scripts.gerar_extratos_sinteticos import _SALDO_INICIAL
+from scripts.gerar_extratos_sinteticos import main as gerar_extratos
 
 client = TestClient(app)
 
@@ -152,6 +154,35 @@ def test_upload_de_ofx_com_ledgerbal_devolve_o_saldo(db_session, criar_empresa, 
     # LEDGERBAL 1249.25 em 10/09; lançamentos 1500.00 e -250.75 antes dele.
     esperado = {"saldo_inicial": "0.00", "saldo_final": "1249.25", "saldo_data": "2026-09-10"}
     assert saldos == [esperado] * 3
+
+
+def test_extrato_do_banco_gerado_pelo_script_volta_ao_saldo_inicial(
+    db_session, criar_empresa, auth_headers, tmp_path
+):
+    gerar_extratos(
+        [
+            "--formato", "csv", "--par",
+            "--quantidade", "30",
+            "--sobreposicao", "20",
+            "--seed", "118",
+            "--saida", str(tmp_path),
+        ]
+    )  # fmt: skip
+    empresa = criar_empresa()
+    headers = auth_headers(empresa.id)
+    arquivo = next(tmp_path.glob("extrato_par_banco_*.csv"))
+
+    resposta = client.post(
+        "/extratos/upload",
+        headers=headers,
+        data={"origem": "banco"},
+        files={"arquivo": (arquivo.name, io.BytesIO(arquivo.read_bytes()), "text/csv")},
+    )
+    detalhe = client.get(f"/extratos/{resposta.json()['extrato_id']}", headers=headers).json()
+
+    assert detalhe["status"] == "concluido"
+    assert Decimal(detalhe["saldo_inicial"]) == _SALDO_INICIAL
+    assert detalhe["saldo_data"] == detalhe["periodo_fim"]
 
 
 def test_listagem_soma_os_saldos_numa_consulta_so(
