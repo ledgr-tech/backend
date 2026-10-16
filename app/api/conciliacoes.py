@@ -31,7 +31,10 @@ saem numa única query com outer join nos dois lançamentos, sempre filtrando po
 `empresa_id`, e a ordem é estável pra paginar: data do lançamento (a do banco,
 ou a do sistema quando não há do banco), valor e id da conciliação. `valor` e
 `score_confianca` são Decimal e vão como string no JSON, pra o cliente não
-tratar dinheiro como float.
+tratar dinheiro como float. Na raiz, `saldo_inicial`, `saldo_final` e
+`saldo_data` do extrato do banco (issue #118, regras em
+app/services/saldo.py), `null` quando ele não tem saldo; os saldos também são
+Decimal em string.
 
 `GET /conciliacoes/{extrato_id}/exportar` (issue #26): exporta em CSV (Excel
 BR — formato em app/services/exportacao.py) o mesmo recorte da listagem
@@ -79,7 +82,7 @@ from sqlalchemy.orm import Session, aliased
 from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
 from app.core.database import get_db
 from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento, Usuario
-from app.services import decisoes
+from app.services import decisoes, saldo
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
 from app.services.matching import conciliar_extratos
@@ -221,6 +224,9 @@ class ItemConciliacaoResponse(BaseModel):
 
 class ConciliacaoListaResponse(BaseModel):
     extrato_id: uuid.UUID
+    saldo_inicial: Decimal | None
+    saldo_final: Decimal | None
+    saldo_data: date | None
     total: int
     limit: int
     offset: int
@@ -330,7 +336,7 @@ def listar_conciliacoes(
     status: StatusConciliacao | None = None,
     extrato_sistema_id: uuid.UUID | None = None,
 ) -> ConciliacaoListaResponse:
-    _validar_extrato_banco(db, extrato_id, empresa_id)
+    extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
     consulta, filtros = _construir_consulta_itens(
         empresa_id, extrato_id, status, extrato_sistema_id
     )
@@ -358,7 +364,12 @@ def listar_conciliacoes(
             )
         )
     return ConciliacaoListaResponse(
-        extrato_id=extrato_id, total=total, limit=limit, offset=offset, itens=itens
+        extrato_id=extrato_id,
+        **vars(saldo.saldo_do_extrato(db, extrato_banco)),
+        total=total,
+        limit=limit,
+        offset=offset,
+        itens=itens,
     )
 
 
