@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     cnpj_consulta_url: str = "https://brasilapi.com.br/api/cnpj/v1"
     cnpj_consulta_chave: str = ""
 
+    # Plano e teste (issue #122): com esta variável ligada, o POST /conciliacoes
+    # responde 402 na primeira conciliação de um extrato do banco quando a
+    # empresa está sem plano ou com o teste encerrado (app/services/plano.py).
+    # Falsa por padrão, e só liga junto com o gateway de pagamento: antes dele,
+    # quem termina o teste não tem como pagar.
+    plano_bloqueio_habilitado: bool = False
+
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
     # boot com o motivo, em vez de deixar a API no ar sem log.

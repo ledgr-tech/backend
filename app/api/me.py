@@ -3,7 +3,10 @@
 `GET /me` devolve os dados da conta pro cabeçalho do front (issue #81): nome
 da empresa, CNPJ e os métodos de login. Desde a issue #69, também
 `administrador`: sem papéis (ADR-015), só quem cadastrou a empresa é
-administrador, e é ele quem convida e remove usuários.
+administrador, e é ele quem convida e remove usuários. Desde a issue #122,
+também `plano`, `teste_termina_em` (em UTC) e `situacao` da empresa, para
+todos os usuários dela, convidados inclusive: a mesma conta do
+`POST /empresa/plano` (app/api/plano.py) e do bloqueio do `POST /conciliacoes`.
 
 `POST /me/senha` troca a senha na hora, com a senha atual e a nova (mesma
 regra do cadastro). As regras vêm da issue:
@@ -49,6 +52,7 @@ resultado categorizado.
 
 import logging
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -58,6 +62,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.auth import SenhaNova
+from app.api.plano import resposta_do_plano
 from app.api.senha import agendar_aviso_senha_alterada, invalidar_links_de_recuperacao
 from app.core import senha
 from app.core.auth import (
@@ -68,6 +73,7 @@ from app.core.auth import (
     obter_usuario_autenticado,
 )
 from app.core.database import get_db
+from app.core.plano import Situacao
 from app.core.rate_limit import (
     LIMITE_CONSULTA_ME_POR_USUARIO,
     LIMITE_DESATIVACAO_CONTA_POR_USUARIO,
@@ -103,6 +109,9 @@ class MeResponse(BaseModel):
     cnpj: str
     administrador: bool
     metodos_login: list[str]
+    plano: str | None
+    teste_termina_em: datetime | None
+    situacao: Situacao
 
 
 def _metodos_login(usuario: Usuario) -> list[str]:
@@ -130,6 +139,7 @@ def obter_dados_da_conta(
         cnpj=empresa.cnpj,
         administrador=usuario.administrador,
         metodos_login=_metodos_login(usuario),
+        **resposta_do_plano(empresa).model_dump(),
     )
 
 

@@ -19,6 +19,12 @@ trava do mês (compartilhada) e a do extrato do banco, nessa ordem
 (app/services/travas.py); extrato sem período não tem competência e segue
 liberado.
 
+Plano (issue #122): com `PLANO_BLOQUEIO_HABILITADO`, entre (d) e (e), antes de
+qualquer trava ou processamento, a primeira conciliação de um extrato do banco
+(nenhuma execução dele ainda) dá 402 com `detail` em texto quando a empresa
+está "sem_plano" ou "teste_encerrado" (app/services/plano.py). Reconciliar um
+extrato do banco que já tem execução segue liberado.
+
 `GET /conciliacoes/{extrato_id}`: o `extrato_id` é o extrato do BANCO, porque a
 consulta parte de `extrato_banco_id`, que tem índice (ADR-007). Um extrato do
 sistema pode ter sido conciliado com vários extratos de banco, então consultar
@@ -68,6 +74,7 @@ o motivo quando `detail` é string. Nunca loga o texto da justificativa nem a
 descrição de lançamento.
 """
 
+import logging
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -86,6 +93,9 @@ from app.services import decisoes, saldo
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
 from app.services.matching import conciliar_extratos
+from app.services.plano import motivo_do_bloqueio
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/conciliacoes", tags=["conciliacoes"])
 
@@ -177,6 +187,11 @@ def criar_conciliacao(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="Um dos extratos ainda não terminou de processar ou falhou.",
         )
+
+    motivo = motivo_do_bloqueio(db, empresa_id, corpo.extrato_banco_id)
+    if motivo is not None:
+        logger.info("conciliacao resultado=bloqueada_pelo_plano")
+        raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail=motivo)
 
     _garantir_mes_aberto(db, empresa_id, extrato_banco)
     contagens = conciliar_extratos(db, empresa_id, corpo.extrato_banco_id, corpo.extrato_sistema_id)
