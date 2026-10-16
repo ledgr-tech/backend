@@ -1,7 +1,8 @@
 import uuid
 from datetime import date
+from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, Date, ForeignKey, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +31,15 @@ class Extrato(Base, TimestampMixin):
     continuam `NULL` se o processamento não gerou nenhum lançamento válido
     (status "erro"). O CHECK garante que os dois vêm juntos (ou nenhum) e que
     `periodo_inicio` nunca é depois de `periodo_fim`.
+
+    `saldo_final`/`saldo_data` (issue #118) são o saldo que o próprio arquivo
+    informa e a data dele: o LEDGERBAL do OFX, ou a coluna opcional `saldo`
+    do CSV (regras em app/parsers/). Gravados pela normalização na mesma
+    transação do status final, e `NULL` quando o arquivo não traz saldo
+    legível, enquanto processa e nos extratos enviados antes da #118 (o
+    arquivo bruto não é guardado, ADR-002, então não há de onde tirar). O
+    CHECK garante que os dois vêm juntos (ou nenhum). O saldo inicial não é
+    gravado: é calculado na leitura (app/services/saldo.py).
     """
 
     __tablename__ = "extratos"
@@ -46,6 +56,11 @@ class Extrato(Base, TimestampMixin):
             "AND periodo_inicio <= periodo_fim)",
             name="ck_extratos_periodo_consistente",
         ),
+        CheckConstraint(
+            "(saldo_final IS NULL AND saldo_data IS NULL) "
+            "OR (saldo_final IS NOT NULL AND saldo_data IS NOT NULL)",
+            name="ck_extratos_saldo_consistente",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -60,6 +75,8 @@ class Extrato(Base, TimestampMixin):
     quantidade_lancamentos: Mapped[int | None] = mapped_column(Integer, nullable=True)
     periodo_inicio: Mapped[date | None] = mapped_column(Date, nullable=True)
     periodo_fim: Mapped[date | None] = mapped_column(Date, nullable=True)
+    saldo_final: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    saldo_data: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
     lancamentos: Mapped[list["Lancamento"]] = relationship(back_populates="extrato")  # noqa: F821

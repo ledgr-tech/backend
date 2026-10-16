@@ -36,11 +36,14 @@ from pathlib import Path
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.core import bloqueio_login, senha
+from app.core import google as modulo_google
+from app.core.auth import DURACAO_SESSAO_SEGUNDOS
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
@@ -60,6 +63,7 @@ from app.models import (
     LinhaInvalida,
     Usuario,
 )
+from app.services.consulta_cnpj.cache import cache_por_cnpj as cache_consulta_cnpj
 from app.services.email import MensagemEmail
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -119,6 +123,38 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     `app.dependency_overrides`), que não passa por esta configuração."""
     monkeypatch.setattr(settings, "email_habilitado", False)
     monkeypatch.setattr(settings, "llm_habilitado", False)
+    # Bloqueio da conciliação pelo plano (issue #122): desligado, como em
+    # produção até o gateway; quem testa o bloqueio liga no próprio teste.
+    monkeypatch.setattr(settings, "plano_bloqueio_habilitado", False)
+
+
+@pytest.fixture(autouse=True)
+def _consulta_cnpj_de_verdade_desligada(monkeypatch):
+    """Nenhum teste consulta a Receita de verdade (issue #119): a consulta fica
+    desligada, e o cache dela, vazio entre testes. Quem testa a consulta troca
+    a dependency por um provedor com `httpx.MockTransport` (fixture `receita`
+    de tests/test_consulta_cnpj_cadastro.py)."""
+    monkeypatch.setattr(settings, "cnpj_consulta_habilitada", False)
+    cache_consulta_cnpj.limpar()
+    yield
+    cache_consulta_cnpj.limpar()
+
+
+class _ClienteDeChavesProibido:
+    """No lugar do `PyJWKClient` de app/core/google.py: nenhum teste busca as
+    chaves do Google de verdade."""
+
+    def get_signing_key_from_jwt(self, token):
+        raise AssertionError("teste tentou buscar as chaves do Google de verdade")
+
+
+@pytest.fixture(autouse=True)
+def _google_de_verdade_desligado(monkeypatch):
+    """Login pelo Google desligado (`GOOGLE_CLIENT_ID` vazio) e o cliente de
+    chaves trocado por um que falha (issue #73). Quem testa o Google usa a
+    fixture `google`, com chave RSA gerada na hora."""
+    monkeypatch.setattr(settings, "google_client_id", "")
+    monkeypatch.setattr(modulo_google, "_cliente_de_chaves", _ClienteDeChavesProibido())
 
 
 @pytest.fixture(autouse=True)
@@ -139,25 +175,37 @@ def _logs_de_app_chegam_ao_caplog(monkeypatch):
     monkeypatch.setattr(logging.getLogger("app"), "propagate", True)
 
 
+# Valor padrão de `auth_time` em `gerar_token`: o login acabou de acontecer.
+LOGIN_AGORA = object()
+
+
 @pytest.fixture
 def gerar_token():
-    """Simula o JWT que o NextAuth emite (contrato em app/core/auth.py)."""
+    """Simula o JWT que o NextAuth emite (contrato em app/core/auth.py).
+
+    Desde a issue #75, toda rota autenticada carrega o usuário do `sub`: para
+    passar, o token precisa do id de um usuário real da empresa (ou use
+    `auth_headers`, que cria um). `auth_time` é o login, em segundos
+    inteiros; `None` tira o claim do token."""
 
     def _gerar(
         empresa_id: uuid.UUID | str | None,
         secret: str = SECRET_TESTE,
-        expira_em: timedelta = timedelta(days=7),
+        expira_em: timedelta = timedelta(seconds=DURACAO_SESSAO_SEGUNDOS),
         usuario_id: uuid.UUID | str | None = None,
+        auth_time: object = LOGIN_AGORA,
     ) -> str:
         agora = datetime.now(UTC)
         claims = {
-            # `sub` aleatório basta pras rotas que só leem `empresa_id`; as
-            # rotas por usuário (issue #66) precisam do id de um usuário real.
             "sub": str(usuario_id or uuid.uuid4()),
             "email": "usuario@teste.com",
             "iat": agora,
             "exp": agora + expira_em,
         }
+        if auth_time is LOGIN_AGORA:
+            claims["auth_time"] = int(agora.timestamp())
+        elif auth_time is not None:
+            claims["auth_time"] = auth_time
         if empresa_id is not None:
             claims["empresa_id"] = str(empresa_id)
         return jwt.encode(claims, secret, algorithm="HS256")
@@ -166,11 +214,105 @@ def gerar_token():
 
 
 @pytest.fixture
-def auth_headers(gerar_token):
+def auth_headers(gerar_token, request):
+    """Cabeçalho com o token de um usuário real da empresa (issue #75). Na
+    primeira chamada para cada empresa, cria um usuário nela, sem senha e
+    sem ser administrador, que `criar_usuario` apaga no fim. A empresa
+    precisa existir no banco."""
+    usuarios: dict[str, uuid.UUID] = {}
+
     def _headers(empresa_id: uuid.UUID | str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {gerar_token(empresa_id)}"}
+        chave = str(empresa_id)
+        if chave not in usuarios:
+            criar_usuario = request.getfixturevalue("criar_usuario")
+            usuarios[chave] = criar_usuario(com_senha=False, empresa_id=uuid.UUID(chave)).id
+        token = gerar_token(empresa_id, usuario_id=usuarios[chave])
+        return {"Authorization": f"Bearer {token}"}
 
     return _headers
+
+
+GOOGLE_CLIENT_ID_TESTE = "ledgr-teste.apps.googleusercontent.com"
+KID_GOOGLE_TESTE = "kid-de-teste"
+
+
+@pytest.fixture(scope="session")
+def _chaves_rsa():
+    """Duas chaves RSA, geradas uma vez por sessão: a do "Google" e outra,
+    para a assinatura errada."""
+    return tuple(rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in "12")
+
+
+class ClienteDeChavesFalso:
+    """Faz o papel do `PyJWKClient`: devolve a chave pública do `kid` do
+    token, sem rede. Com `falha_de_conexao`, falha como o Google fora do ar.
+    `buscas` conta as chamadas; `conexoes_em_uso` guarda quantas conexões do
+    pool estavam em uso em cada uma."""
+
+    def __init__(self, chave_publica) -> None:
+        jwk = jwt.algorithms.RSAAlgorithm.to_jwk(chave_publica, as_dict=True)
+        self._chaves = {
+            KID_GOOGLE_TESTE: jwt.PyJWK({**jwk, "kid": KID_GOOGLE_TESTE, "alg": "RS256"})
+        }
+        self.falha_de_conexao = False
+        self.buscas = 0
+        self.conexoes_em_uso: list[int] = []
+
+    def get_signing_key_from_jwt(self, token):
+        self.buscas += 1
+        self.conexoes_em_uso.append(engine.pool.checkedout())
+        if self.falha_de_conexao:
+            raise jwt.PyJWKClientConnectionError("Google fora do ar (teste)")
+        kid = jwt.get_unverified_header(token).get("kid")
+        if kid not in self._chaves:
+            raise jwt.PyJWKClientError(f"Unable to find a signing key that matches: {kid!r}")
+        return self._chaves[kid]
+
+
+class GoogleFalso:
+    """Emite ID tokens como o Google, assinados com a chave de teste."""
+
+    def __init__(self, chave_privada, outra_chave, cliente: ClienteDeChavesFalso) -> None:
+        self._chave_privada = chave_privada
+        self._outra_chave = outra_chave
+        self.cliente = cliente
+
+    def id_token(
+        self,
+        email: str | None = "maria@gmail.com",
+        nome: str | None = "Maria Google",
+        assinar_com_outra_chave: bool = False,
+        kid: str = KID_GOOGLE_TESTE,
+        **claims,
+    ) -> str:
+        """`claims` sobrescreve qualquer claim; valor `None` tira o claim."""
+        agora = datetime.now(UTC)
+        payload = {
+            "iss": "https://accounts.google.com",
+            "azp": GOOGLE_CLIENT_ID_TESTE,
+            "aud": GOOGLE_CLIENT_ID_TESTE,
+            "sub": f"1{random.randint(10**19, 10**20 - 1)}",
+            "email": email,
+            "email_verified": True,
+            "name": nome,
+            "iat": agora,
+            "exp": agora + timedelta(hours=1),
+            **claims,
+        }
+        payload = {chave: valor for chave, valor in payload.items() if valor is not None}
+        chave = self._outra_chave if assinar_com_outra_chave else self._chave_privada
+        return jwt.encode(payload, chave, algorithm="RS256", headers={"kid": kid})
+
+
+@pytest.fixture
+def google(monkeypatch, _chaves_rsa):
+    """Login pelo Google ligado com `GOOGLE_CLIENT_ID_TESTE` e o cliente de
+    chaves falso. Nada sai para a rede."""
+    chave_privada, outra_chave = _chaves_rsa
+    cliente = ClienteDeChavesFalso(chave_privada.public_key())
+    monkeypatch.setattr(settings, "google_client_id", GOOGLE_CLIENT_ID_TESTE)
+    monkeypatch.setattr(modulo_google, "_cliente_de_chaves", cliente)
+    return GoogleFalso(chave_privada, outra_chave, cliente)
 
 
 def _postgres_disponivel() -> bool:

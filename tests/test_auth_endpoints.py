@@ -1,8 +1,10 @@
 """Testes de POST /register e POST /login (issue #57)."""
 
+import math
 import random
 import re
 import string
+import time
 import uuid
 
 import bcrypt
@@ -183,6 +185,8 @@ def test_cadastro_com_campo_invalido_retorna_422(sobrescrita):
         ("1234567800019", None),
         ("123456780001955", None),
         ("12ABC34501DE3A", None),
+        ("12ABC34501DE36", None),  # alfanumérico com o verificador errado
+        ("12ABC34501DE53", None),  # verificadores trocados
     ],
 )
 def test_normalizar_cnpj(entrada, esperado):
@@ -198,7 +202,28 @@ def test_login_com_credenciais_validas_devolve_usuario_e_empresa(cadastro):
     response = _login(f"  {cadastrado['email'].upper()} ")
 
     assert response.status_code == 200
-    assert response.json() == cadastrado
+    corpo = response.json()
+    corpo.pop("auth_time")
+    assert corpo == cadastrado
+
+
+def test_login_devolve_auth_time_no_relogio_do_backend(cadastro):
+    """Issue #75: o front grava este valor no token. Inteiro, em segundos
+    desde a época, e do instante do login."""
+    email = _registrar(cadastro()).json()["email"]
+
+    antes = time.time()
+    response = _login(email)
+    depois = time.time()
+
+    assert response.status_code == 200
+    auth_time = response.json()["auth_time"]
+    assert type(auth_time) is int
+    assert math.floor(antes) <= auth_time <= depois
+
+
+def test_register_nao_devolve_auth_time(cadastro):
+    assert "auth_time" not in _registrar(cadastro()).json()
 
 
 def test_login_com_senha_errada_retorna_401(cadastro):

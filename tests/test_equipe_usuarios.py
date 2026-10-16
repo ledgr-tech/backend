@@ -222,7 +222,9 @@ def test_removido_nao_entra_e_recebe_a_resposta_de_senha_errada(db_session, equi
 
 def test_removido_recebe_401_nas_rotas_que_carregam_o_usuario(db_session, equipe, cabecalho_de):
     admin, convidado = equipe
-    cabecalho = cabecalho_de(convidado)  # o JWT já emitido continua assinado (issue #75)
+    # O JWT já emitido continua assinado. As rotas que só leem o `empresa_id`
+    # também recusam o removido desde a #75 (tests/test_revogacao_sessao.py).
+    cabecalho = cabecalho_de(convidado)
     assert client.get("/me", headers=cabecalho).status_code == 200
 
     _remover(cabecalho_de(admin), convidado.id)
