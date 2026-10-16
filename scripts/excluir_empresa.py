@@ -28,7 +28,6 @@ CNPJ mascarado.
 
 import argparse
 import hashlib
-import re
 import sys
 import uuid
 from collections.abc import Callable
@@ -47,6 +46,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
+from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.config import settings
 from app.models import (
     Base,
@@ -253,7 +253,9 @@ def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input)
             if not executado_por:
                 print("Sem quem executou, não há registro. Nada foi apagado.")
                 return 1
-            digitado = re.sub(r"\D", "", perguntar("Digite o CNPJ completo da empresa: "))
+            # Com ou sem máscara, numérico ou alfanumérico (antes, tirar tudo
+            # que não era dígito apagava as letras do CNPJ alfanumérico).
+            digitado = normalizar_cnpj(perguntar("Digite o CNPJ completo da empresa: "))
             if digitado != cnpj:
                 print("O CNPJ digitado não confere. Nada foi apagado.")
                 return 1

@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core import senha
+from app.core.cnpj import digito_verificador
 from app.core.config import settings
 from app.models import (
     Base,
@@ -349,15 +350,42 @@ def test_simulacao_mostra_as_contagens_e_nao_apaga_nada(db_session, empresa_povo
         assert texto not in saida
 
 
-def test_executar_com_o_cnpj_certo_apaga(db_session, empresa_povoada, registros, capsys):
+def _cnpj_alfanumerico() -> str:
+    """CNPJ alfanumérico único, com os dígitos verificadores certos."""
+    base = f"{uuid.uuid4().hex[:8].upper()}0001"
+    base += digito_verificador(base)
+    return base + digito_verificador(base)
+
+
+def _com_mascara(cnpj: str) -> str:
+    return f"{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}"
+
+
+def _empresa_com_cnpj(db_session, empresa_povoada, tipo: str):
     empresa, linhas = empresa_povoada()
+    if tipo == "alfanumerico":
+        empresa.cnpj = _cnpj_alfanumerico()
+        db_session.commit()
+    return empresa, linhas
+
+
+@pytest.mark.parametrize("tipo", ["numerico", "alfanumerico"])
+@pytest.mark.parametrize(
+    "digitar",
+    [_com_mascara, lambda cnpj: cnpj, lambda cnpj: f"  {_com_mascara(cnpj).lower()} "],
+    ids=["com_mascara", "sem_mascara", "minusculas_e_espacos"],
+)
+def test_executar_com_o_cnpj_certo_apaga(
+    db_session, empresa_povoada, registros, capsys, tipo, digitar
+):
+    empresa, linhas = _empresa_com_cnpj(db_session, empresa_povoada, tipo)
     empresa_id, cnpj = empresa.id, empresa.cnpj
     registros(empresa_id)
-    formatado = f"{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}"
+    assert cnpj.isdigit() is (tipo == "numerico")
 
     codigo = script.main(
         ["--empresa-id", str(empresa_id), "--executar"],
-        perguntar=_Respostas("rafael", formatado),
+        perguntar=_Respostas("rafael", digitar(cnpj)),
     )
 
     saida = capsys.readouterr().out
@@ -373,14 +401,47 @@ def test_executar_com_o_cnpj_certo_apaga(db_session, empresa_povoada, registros,
         assert texto not in saida
 
 
+@pytest.mark.parametrize("tipo", ["numerico", "alfanumerico"])
 @pytest.mark.parametrize(
-    "respostas", [("rafael", "00000000000000"), ("", "qualquer")], ids=["cnpj_errado", "sem_quem"]
+    "respostas",
+    [
+        lambda cnpj: ("rafael", "00000000000000"),
+        lambda cnpj: ("rafael", "12.345.678/0001-95"),
+        lambda cnpj: ("rafael", _cnpj_alfanumerico()),
+        lambda cnpj: ("rafael", cnpj[:-1] + str((int(cnpj[-1]) + 1) % 10)),
+        lambda cnpj: ("rafael", ""),
+        lambda cnpj: ("", cnpj),
+    ],
+    ids=[
+        "zeros",
+        "outro_numerico",
+        "outro_alfanumerico",
+        "verificador_errado",
+        "vazio",
+        "sem_quem",
+    ],
 )
-def test_executar_sem_a_confirmacao_nao_apaga(db_session, empresa_povoada, respostas, capsys):
-    empresa, linhas = empresa_povoada()
+def test_executar_sem_a_confirmacao_nao_apaga(db_session, empresa_povoada, respostas, capsys, tipo):
+    empresa, linhas = _empresa_com_cnpj(db_session, empresa_povoada, tipo)
 
     codigo = script.main(
-        ["--empresa-id", str(empresa.id), "--executar"], perguntar=_Respostas(*respostas)
+        ["--empresa-id", str(empresa.id), "--executar"],
+        perguntar=_Respostas(*respostas(empresa.cnpj)),
+    )
+
+    assert codigo == 1
+    assert "Nada foi apagado." in capsys.readouterr().out
+    assert len(_existentes(db_session, linhas)) == len(linhas)
+
+
+def test_cnpj_alfanumerico_sem_as_letras_nao_confere(db_session, empresa_povoada, capsys):
+    """O que o script fazia antes com o digitado: tirar tudo que não é dígito."""
+    empresa, linhas = _empresa_com_cnpj(db_session, empresa_povoada, "alfanumerico")
+    so_os_digitos = "".join(c for c in empresa.cnpj if c.isdigit())
+
+    codigo = script.main(
+        ["--empresa-id", str(empresa.id), "--executar"],
+        perguntar=_Respostas("rafael", so_os_digitos),
     )
 
     assert codigo == 1
