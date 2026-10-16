@@ -48,6 +48,11 @@ período fica `NULL`, e também fica `NULL` enquanto o extrato está
 fluxo. Reprocessar o mesmo arquivo dá o mesmo período, porque o cálculo é
 determinístico a partir do mesmo `resultado.lancamentos`.
 
+Saldo do extrato (issue #118): `saldo_final`/`saldo_data` vêm de
+`resultado.saldo` (regras do OFX e do CSV nos parsers) e são gravados na
+mesma transação do status final, para qualquer origem; quem usa é o lado do
+banco. Sem saldo no arquivo, ou com erro estrutural, ficam `NULL`.
+
 O try/except amplo no nível mais alto da função existe porque uma exceção
 não tratada numa BackgroundTask do FastAPI é só logada pelo servidor e
 nunca chega no cliente (a resposta HTTP já foi enviada) — sem ele, um erro
@@ -237,6 +242,10 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
         else:
             extrato.periodo_inicio = None
             extrato.periodo_fim = None
+        # Saldo (issue #118): o que o arquivo informa, ou NULL nos dois (ver
+        # CHECK ck_extratos_saldo_consistente).
+        extrato.saldo_final = resultado.saldo.valor if resultado.saldo else None
+        extrato.saldo_data = resultado.saldo.data if resultado.saldo else None
         db.commit()
     except Exception as exc:  # noqa: BLE001 - amplo de propósito, ver abaixo
         # Amplo de propósito — ver docstring do módulo: garante que o
