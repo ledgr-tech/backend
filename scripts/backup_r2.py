@@ -257,7 +257,8 @@ def executar(
     return 0
 
 
-def criar_cliente_r2(cfg: ConfigBackup):
+def cliente_r2(endpoint: str, chave_id: str, segredo: str):
+    """Cliente S3 do R2. Usado pelo serviço e pelo scripts/baixar_backup_r2.py."""
     # Import aqui dentro: o boto3 só existe na imagem do serviço de backup
     # (backup/requirements.txt), não no requirements.txt da API nem da suíte.
     import boto3
@@ -265,10 +266,10 @@ def criar_cliente_r2(cfg: ConfigBackup):
 
     return boto3.client(
         "s3",
-        endpoint_url=cfg.r2_endpoint,
+        endpoint_url=endpoint,
         region_name="auto",
-        aws_access_key_id=cfg.r2_access_key_id,
-        aws_secret_access_key=cfg.r2_secret_access_key,
+        aws_access_key_id=chave_id,
+        aws_secret_access_key=segredo,
         # As versões novas do boto3 mandam checksums por padrão, que o R2 já
         # recusou; "when_required" volta ao comportamento antigo.
         config=Config(
@@ -276,6 +277,10 @@ def criar_cliente_r2(cfg: ConfigBackup):
             response_checksum_validation="when_required",
         ),
     )
+
+
+def criar_cliente_r2(cfg: ConfigBackup):
+    return cliente_r2(cfg.r2_endpoint, cfg.r2_access_key_id, cfg.r2_secret_access_key)
 
 
 def _versao_pg_dump() -> str:
