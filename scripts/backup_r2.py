@@ -40,6 +40,11 @@ logger = logging.getLogger("backup")
 
 PG_MAJOR = 18
 TIMEOUT_HEALTHCHECK_SEGUNDOS = 10
+# O banco hoje rende poucos MB; uma hora é folga larga. Sem limite, um pg_dump
+# esperando lock prende o serviço, e o cron do Railway pula as execuções
+# seguintes enquanto esta não terminar.
+TIMEOUT_DUMP_SEGUNDOS = 60 * 60
+TIMEOUT_VERSAO_SEGUNDOS = 30
 
 VARIAVEIS_OBRIGATORIAS = (
     "DATABASE_URL",
@@ -93,6 +98,8 @@ def ler_config(env: Mapping[str, str]) -> ConfigBackup:
     invalidas = []
     if not valores["BACKUP_AGE_RECIPIENT"].startswith("age1"):
         invalidas.append("BACKUP_AGE_RECIPIENT (chave pública do age, começa com age1)")
+    if not valores["R2_ENDPOINT"].startswith("https://"):
+        invalidas.append("R2_ENDPOINT (tem de ser https)")
     if not valores["HEALTHCHECK_URL"].startswith("https://"):
         invalidas.append("HEALTHCHECK_URL (tem de ser https)")
     if invalidas:
@@ -142,6 +149,7 @@ def gerar_dump_cifrado(
     *,
     comando_dump: list[str] | None = None,
     comando_cifra: list[str] | None = None,
+    timeout_segundos: float = TIMEOUT_DUMP_SEGUNDOS,
 ) -> int:
     """`pg_dump | age` direto para `destino`, sem o dump legível passar pelo
     disco. Devolve o tamanho do arquivo criptografado. Em qualquer falha apaga
@@ -151,6 +159,7 @@ def gerar_dump_cifrado(
     binários por dublês."""
     comando_dump = comando_dump or comando_pg_dump(cfg.database_url)
     comando_cifra = comando_cifra or comando_age(cfg.age_recipient, destino)
+    dump = cifra = None
     try:
         # stderr=DEVNULL nos dois: o do pg_dump traz host e usuário, e o que
         # sai no stderr do container vira log no Railway (regra da #34).
@@ -161,8 +170,12 @@ def gerar_dump_cifrado(
         # Sem esta cópia no pai, o pg_dump não recebe SIGPIPE se o age morrer
         # e fica bloqueado escrevendo num pipe que ninguém lê.
         dump.stdout.close()
-        codigo_cifra = cifra.wait()
-        codigo_dump = dump.wait()
+        limite = time.monotonic() + timeout_segundos
+        try:
+            codigo_cifra = cifra.wait(timeout=timeout_segundos)
+            codigo_dump = dump.wait(timeout=max(limite - time.monotonic(), 0))
+        except subprocess.TimeoutExpired:
+            raise BackupFalhou(f"dump passou do tempo limite de {timeout_segundos:.0f} s") from None
         # O age primeiro: quando ele morre (chave pública inválida, disco cheio),
         # o pg_dump morre junto por SIGPIPE (-13), e culpar o pg_dump esconderia
         # a causa. Se quem falhou foi o pg_dump, o age recebe EOF e sai com 0.
@@ -175,6 +188,12 @@ def gerar_dump_cifrado(
             raise BackupFalhou("dump criptografado vazio")
         return tamanho
     except BaseException:
+        # Nenhum processo fica para trás (timeout, ou age que nem chegou a
+        # subir com o pg_dump já rodando).
+        for processo in (cifra, dump):
+            if processo is not None and processo.poll() is None:
+                processo.kill()
+                processo.wait()
         destino.unlink(missing_ok=True)
         raise
 
@@ -285,12 +304,25 @@ def criar_cliente_r2(cfg: ConfigBackup):
 
 def _versao_pg_dump() -> str:
     return subprocess.run(
-        ["pg_dump", "--version"], capture_output=True, text=True, check=True
+        ["pg_dump", "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=TIMEOUT_VERSAO_SEGUNDOS,
     ).stdout
 
 
-def main() -> int:
+def configurar_logs() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # O httpx loga cada requisição em INFO com a URL inteira, e a URL do
+    # Healthchecks é o token do check: quem tiver o token manda ping de sucesso
+    # falso e esconde uma falha real. Só WARNING para cima dessas bibliotecas.
+    for nome in ("httpx", "httpcore"):
+        logging.getLogger(nome).setLevel(logging.WARNING)
+
+
+def main() -> int:
+    configurar_logs()
     try:
         cfg = ler_config(os.environ)
     except ConfigInvalida as exc:
@@ -298,10 +330,19 @@ def main() -> int:
         # avisa sozinho quando o ping do dia não chegar.
         logger.error("configuração inválida: %s", exc)
         return 1
+    healthcheck = Healthcheck(cfg.healthcheck_url)
+    try:
+        cliente_s3 = criar_cliente_r2(cfg)
+    except Exception as exc:  # noqa: BLE001 - mesma regra do executar: /fail e código 1
+        # A mensagem de um erro do boto3 traz o endpoint; vai só o nome da classe.
+        healthcheck.inicio()
+        logger.error("backup falhou: %s ao criar o cliente do R2", type(exc).__name__)
+        healthcheck.falha()
+        return 1
     return executar(
         cfg,
-        criar_cliente_r2(cfg),
-        Healthcheck(cfg.healthcheck_url),
+        cliente_s3,
+        healthcheck,
         datetime.now(UTC),
         versao_pg_dump=_versao_pg_dump,
     )

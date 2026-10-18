@@ -92,3 +92,15 @@ def test_age_que_morre_cedo_e_culpado_nao_o_pg_dump(tmp_path):
     with pytest.raises(b.BackupFalhou, match="age.*3"):
         b.gerar_dump_cifrado(CFG, destino, comando_dump=muito, comando_cifra=sai_ja)
     assert not destino.exists()
+
+
+def test_dump_travado_estoura_o_tempo_e_nao_deixa_arquivo(tmp_path):
+    # pg_dump esperando lock para sempre: o cron do Railway pula as próximas
+    # execuções enquanto esta não terminar, então o processo tem de sair.
+    destino = tmp_path / "x.dump.age"
+    travado = [PY, "-c", "import time\nwhile True: time.sleep(1)"]
+    with pytest.raises(b.BackupFalhou, match="tempo"):
+        b.gerar_dump_cifrado(
+            CFG, destino, comando_dump=travado, comando_cifra=copia(destino), timeout_segundos=1
+        )
+    assert not destino.exists()

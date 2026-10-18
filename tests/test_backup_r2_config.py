@@ -116,3 +116,8 @@ def test_chaves_usa_utc():
     # 23:30 de sábado em Brasília = 02:30 de domingo em UTC
     agora = datetime(2026, 10, 17, 23, 30, tzinfo=timezone(timedelta(hours=-3)))
     assert b.chaves_do_dia(agora)[1] == "semanal/ledgr-20261018-0230.dump.age"
+
+
+def test_r2_endpoint_tem_de_ser_https():
+    with pytest.raises(b.ConfigInvalida, match="R2_ENDPOINT"):
+        b.ler_config({**ENV_OK, "R2_ENDPOINT": "abc.r2.cloudflarestorage.com"})

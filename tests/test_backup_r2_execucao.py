@@ -220,3 +220,39 @@ def test_main_sem_config_devolve_1_sem_pingar(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger="backup"):
         assert b.main() == 1
     assert "DATABASE_URL" in caplog.text
+
+
+def test_logs_de_bibliotecas_nao_mostram_url_do_healthcheck(caplog):
+    # O httpx loga cada requisição em INFO com a URL inteira, e a URL do
+    # Healthchecks é o token do check. Captura no logger raiz, de propósito.
+    nivel_antes = {nome: logging.getLogger(nome).level for nome in ("httpx", "httpcore")}
+    try:
+        b.configurar_logs()
+        hc = b.Healthcheck(
+            "https://hc-ping.com/uuid-do-check",
+            httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200))),
+        )
+        with caplog.at_level(logging.DEBUG):
+            hc.inicio()
+            hc.sucesso()
+        assert "uuid-do-check" not in caplog.text
+    finally:
+        for nome, nivel in nivel_antes.items():
+            logging.getLogger(nome).setLevel(nivel)
+
+
+def test_main_com_falha_ao_criar_cliente_r2_manda_fail_sem_vazar(monkeypatch, caplog):
+    for nome, valor in ENV_OK.items():
+        monkeypatch.setenv(nome, valor)
+    hc = HealthcheckFalso()
+    monkeypatch.setattr(b, "Healthcheck", lambda url: hc)
+
+    def endpoint_invalido(cfg):
+        raise ValueError("Invalid endpoint: https://abc.r2.cloudflarestorage.com")
+
+    monkeypatch.setattr(b, "criar_cliente_r2", endpoint_invalido)
+    with caplog.at_level(logging.DEBUG):
+        assert b.main() == 1
+    assert hc.chamadas == ["inicio", "falha"]
+    assert "ValueError" in caplog.text
+    assert "cloudflarestorage" not in caplog.text
