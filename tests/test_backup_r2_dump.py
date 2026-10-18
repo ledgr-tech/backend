@@ -81,3 +81,14 @@ def test_mensagem_de_falha_nao_traz_stderr(tmp_path, capfd):
     assert "senha-secreta" not in str(erro.value)
     # nem no stderr do processo (que vira log no Railway)
     assert "senha-secreta" not in capfd.readouterr().err
+
+
+def test_age_que_morre_cedo_e_culpado_nao_o_pg_dump(tmp_path):
+    # O age recusa a chave e sai sem ler nada; o pg_dump, escrevendo num pipe
+    # sem leitor, morre por SIGPIPE. A causa a apontar é o age.
+    destino = tmp_path / "x.dump.age"
+    muito = [PY, "-c", "import sys\nwhile True: sys.stdout.buffer.write(b'x' * 65536)"]
+    sai_ja = [PY, "-c", "import sys; sys.exit(3)"]
+    with pytest.raises(b.BackupFalhou, match="age.*3"):
+        b.gerar_dump_cifrado(CFG, destino, comando_dump=muito, comando_cifra=sai_ja)
+    assert not destino.exists()

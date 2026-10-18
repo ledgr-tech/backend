@@ -163,10 +163,13 @@ def gerar_dump_cifrado(
         dump.stdout.close()
         codigo_cifra = cifra.wait()
         codigo_dump = dump.wait()
-        if codigo_dump != 0:
-            raise BackupFalhou(f"pg_dump saiu com código {codigo_dump}")
+        # O age primeiro: quando ele morre (chave pública inválida, disco cheio),
+        # o pg_dump morre junto por SIGPIPE (-13), e culpar o pg_dump esconderia
+        # a causa. Se quem falhou foi o pg_dump, o age recebe EOF e sai com 0.
         if codigo_cifra != 0:
             raise BackupFalhou(f"age saiu com código {codigo_cifra}")
+        if codigo_dump != 0:
+            raise BackupFalhou(f"pg_dump saiu com código {codigo_dump}")
         tamanho = destino.stat().st_size if destino.exists() else 0
         if tamanho == 0:
             raise BackupFalhou("dump criptografado vazio")
