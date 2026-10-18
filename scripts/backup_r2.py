@@ -23,9 +23,11 @@ agente nem contra produção fora do serviço do Railway.
 """
 
 import re
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 PG_MAJOR = 18
 
@@ -46,6 +48,11 @@ DOMINGO = 6  # datetime.weekday()
 
 class ConfigInvalida(ValueError):
     """Variável obrigatória ausente ou inválida. A mensagem só traz nomes."""
+
+
+class BackupFalhou(RuntimeError):
+    """Etapa do backup que falhou e o código de saída. Nunca stderr: a mensagem
+    vai para o log."""
 
 
 @dataclass(frozen=True)
@@ -109,3 +116,51 @@ def chaves_do_dia(agora: datetime) -> list[str]:
     if utc.weekday() == DOMINGO:
         chaves.append(PREFIXO_SEMANAL + nome)
     return chaves
+
+
+def comando_pg_dump(url: str) -> list[str]:
+    return ["pg_dump", "--format=custom", "--no-owner", f"--dbname={url}"]
+
+
+def comando_age(recipient: str, destino: Path) -> list[str]:
+    return ["age", "--recipient", recipient, "--output", str(destino)]
+
+
+def gerar_dump_cifrado(
+    cfg: ConfigBackup,
+    destino: Path,
+    *,
+    comando_dump: list[str] | None = None,
+    comando_cifra: list[str] | None = None,
+) -> int:
+    """`pg_dump | age` direto para `destino`, sem o dump legível passar pelo
+    disco. Devolve o tamanho do arquivo criptografado. Em qualquer falha apaga
+    `destino`, para nunca sobrar (nem ser enviado) um arquivo parcial.
+
+    `comando_dump` e `comando_cifra` existem só para os testes trocarem os
+    binários por dublês."""
+    comando_dump = comando_dump or comando_pg_dump(cfg.database_url)
+    comando_cifra = comando_cifra or comando_age(cfg.age_recipient, destino)
+    try:
+        # stderr=DEVNULL nos dois: o do pg_dump traz host e usuário, e o que
+        # sai no stderr do container vira log no Railway (regra da #34).
+        dump = subprocess.Popen(comando_dump, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        cifra = subprocess.Popen(
+            comando_cifra, stdin=dump.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        # Sem esta cópia no pai, o pg_dump não recebe SIGPIPE se o age morrer
+        # e fica bloqueado escrevendo num pipe que ninguém lê.
+        dump.stdout.close()
+        codigo_cifra = cifra.wait()
+        codigo_dump = dump.wait()
+        if codigo_dump != 0:
+            raise BackupFalhou(f"pg_dump saiu com código {codigo_dump}")
+        if codigo_cifra != 0:
+            raise BackupFalhou(f"age saiu com código {codigo_cifra}")
+        tamanho = destino.stat().st_size if destino.exists() else 0
+        if tamanho == 0:
+            raise BackupFalhou("dump criptografado vazio")
+        return tamanho
+    except BaseException:
+        destino.unlink(missing_ok=True)
+        raise
