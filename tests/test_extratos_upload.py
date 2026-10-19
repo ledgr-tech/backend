@@ -9,51 +9,47 @@ from main import app
 
 client = TestClient(app)
 
-EMPRESA_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-
-# Estes testes cobrem só a validação de extensão/tamanho (issue #7), que
-# acontece antes de qualquer acesso ao banco — por isso rodam sem precisar
-# de um Postgres real (ver comentário no ci.yml). O caso de sucesso (upload
-# válido persistindo no banco) é o critério de aceite manual da issue,
-# verificado via Swagger/Postman contra um Postgres real.
+# Os quatro primeiros cobrem só a validação de extensão/tamanho (issue #7),
+# que acontece antes de gravar qualquer coisa. Desde a issue #75 o token
+# precisa de um usuário real da empresa, então eles também usam o Postgres.
 
 
-def test_upload_rejeita_extensao_nao_suportada(auth_headers):
+def test_upload_rejeita_extensao_nao_suportada(criar_empresa, auth_headers):
     arquivo = io.BytesIO(b"conteudo qualquer")
     response = client.post(
         "/extratos/upload",
-        headers=auth_headers(EMPRESA_ID),
+        headers=auth_headers(criar_empresa().id),
         data={"origem": "banco"},
         files={"arquivo": ("extrato.pdf", arquivo, "application/pdf")},
     )
     assert response.status_code == 400
 
 
-def test_upload_rejeita_arquivo_maior_que_5mb(auth_headers):
+def test_upload_rejeita_arquivo_maior_que_5mb(criar_empresa, auth_headers):
     conteudo_grande = b"0" * (5 * 1024 * 1024 + 1)
     arquivo = io.BytesIO(conteudo_grande)
     response = client.post(
         "/extratos/upload",
-        headers=auth_headers(EMPRESA_ID),
+        headers=auth_headers(criar_empresa().id),
         data={"origem": "banco"},
         files={"arquivo": ("extrato.csv", arquivo, "text/csv")},
     )
     assert response.status_code == 413
 
 
-def test_upload_sem_origem_retorna_422(auth_headers):
+def test_upload_sem_origem_retorna_422(criar_empresa, auth_headers):
     response = client.post(
         "/extratos/upload",
-        headers=auth_headers(EMPRESA_ID),
+        headers=auth_headers(criar_empresa().id),
         files={"arquivo": ("extrato.csv", io.BytesIO(b"x"), "text/csv")},
     )
     assert response.status_code == 422
 
 
-def test_upload_com_origem_invalida_retorna_422(auth_headers):
+def test_upload_com_origem_invalida_retorna_422(criar_empresa, auth_headers):
     response = client.post(
         "/extratos/upload",
-        headers=auth_headers(EMPRESA_ID),
+        headers=auth_headers(criar_empresa().id),
         data={"origem": "outra"},
         files={"arquivo": ("extrato.csv", io.BytesIO(b"x"), "text/csv")},
     )

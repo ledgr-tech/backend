@@ -12,6 +12,11 @@ OFXInvalidoError/CSVInvalidoError). São dataclasses em memória — não
 confundir com o model de banco `app.models.linha_invalida.LinhaInvalida`,
 que é o registro persistido a partir de um `ErroLinha` (ver
 app/services/normalizacao.py).
+
+`SaldoExtrato` (issue #118) é o saldo que o próprio arquivo informa e a data
+dele (LEDGERBAL no OFX, coluna `saldo` no CSV). É opcional: `None` quando o
+arquivo não traz, ou traz ilegível, e nunca vira erro do arquivo nem
+`ErroLinha`.
 """
 
 from dataclasses import dataclass
@@ -37,9 +42,31 @@ class ErroLinha:
     motivo: str
 
 
+# Maior valor absoluto que cabe em NUMERIC(14, 2), a coluna `extratos.saldo_final`.
+_SALDO_LIMITE = Decimal("1e12")
+
+
+@dataclass(frozen=True)
+class SaldoExtrato:
+    """Saldo informado pelo arquivo do extrato e a data a que ele se refere."""
+
+    valor: Decimal
+    data: date
+
+
+def saldo_ou_none(valor: Decimal, data: date) -> SaldoExtrato | None:
+    """`SaldoExtrato`, ou `None` se o valor não couber na coluna (NaN,
+    infinito ou grande demais): saldo ilegível fica nulo, não derruba o arquivo."""
+    if not valor.is_finite() or abs(valor) >= _SALDO_LIMITE:
+        return None
+    return SaldoExtrato(valor=valor, data=data)
+
+
 @dataclass(frozen=True)
 class ResultadoParsing:
-    """Saída de `parse_ofx`/`parse_csv`: lançamentos válidos + erros por linha."""
+    """Saída de `parse_ofx`/`parse_csv`: lançamentos válidos + erros por linha,
+    e o saldo do arquivo quando ele traz um legível (issue #118)."""
 
     lancamentos: list[LancamentoNormalizado]
     erros: list[ErroLinha]
+    saldo: SaldoExtrato | None = None

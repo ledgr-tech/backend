@@ -78,8 +78,8 @@ def test_get_extrato_sem_erros_retorna_lista_de_erros_vazia(
     assert corpo["erros"] == []
 
 
-def test_get_extrato_inexistente_retorna_404(db_session, auth_headers):
-    response = client.get(f"/extratos/{uuid.uuid4()}", headers=auth_headers(uuid.uuid4()))
+def test_get_extrato_inexistente_retorna_404(db_session, criar_empresa, auth_headers):
+    response = client.get(f"/extratos/{uuid.uuid4()}", headers=auth_headers(criar_empresa().id))
 
     assert response.status_code == 404
 

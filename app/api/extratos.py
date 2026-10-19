@@ -39,6 +39,13 @@ qualquer que seja o tamanho dela: a dos itens, com a contagem e o
 `conciliado` em subconsultas correlacionadas, e a do total. Reenviar o mesmo
 arquivo ainda cria outro extrato (pendência registrada, fora da #70).
 
+Saldo (issue #118): `GET /extratos` (em cada item) e `GET /extratos/{id}`
+devolvem `saldo_inicial`, `saldo_final` e `saldo_data`, sempre presentes,
+`null` quando não há saldo (regras em app/services/saldo.py). Na listagem,
+as somas dos lançamentos da página saem de uma terceira consulta, agrupada,
+feita só quando algum item da página tem saldo e nenhuma linha não lida: o
+número de consultas continua sem depender do tamanho da página.
+
 Desde a issue #14, os endpoints exigem JWT (app/core/auth.py, ADR-003):
 o `empresa_id` do Extrato vem do token, nunca do form. `GET` de extrato de
 outra empresa devolve 404 (não 403) pra não confirmar a existência do ID
@@ -48,6 +55,7 @@ outra empresa devolve 404 (não 403) pra não confirmar a existência do ID
 import os
 import uuid
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import (
@@ -71,6 +79,7 @@ from app.core.auth import obter_empresa_id_autenticada
 from app.core.database import get_db
 from app.core.rate_limit import LIMITE_UPLOAD, chave_por_empresa, limiter
 from app.models import ExecucaoConciliacao, Extrato, LinhaInvalida
+from app.services import saldo
 from app.services.normalizacao import normalizar_extrato
 
 router = APIRouter(prefix="/extratos", tags=["extratos"])
@@ -96,6 +105,9 @@ class ExtratoDetalheResponse(BaseModel):
     quantidade_lancamentos: int | None
     periodo_inicio: date | None
     periodo_fim: date | None
+    saldo_inicial: Decimal | None
+    saldo_final: Decimal | None
+    saldo_data: date | None
     erros: list[ErroLinhaResponse]
 
 
@@ -167,6 +179,9 @@ class ItemExtratoResponse(BaseModel):
     linhas_nao_lidas: int
     periodo_inicio: date | None
     periodo_fim: date | None
+    saldo_inicial: Decimal | None
+    saldo_final: Decimal | None
+    saldo_data: date | None
     enviado_em: datetime
     conciliado: bool
 
@@ -216,6 +231,8 @@ def listar_extratos(
             Extrato.quantidade_lancamentos,
             Extrato.periodo_inicio,
             Extrato.periodo_fim,
+            Extrato.saldo_final,
+            Extrato.saldo_data,
             Extrato.criado_em,
             linhas_nao_lidas.label("linhas_nao_lidas"),
             conciliado.label("conciliado"),
@@ -226,6 +243,16 @@ def listar_extratos(
         .offset(offset)
     ).all()
     total = db.scalar(select(func.count()).select_from(Extrato).where(*filtros))
+    # Saldo inicial (issue #118): só soma os extratos que vão usar a soma.
+    somas = saldo.somar_lancamentos_ate_saldo_data(
+        db,
+        empresa_id,
+        [
+            linha.id
+            for linha in linhas
+            if linha.saldo_final is not None and not linha.linhas_nao_lidas
+        ],
+    )
 
     itens = [
         ItemExtratoResponse(
@@ -238,6 +265,14 @@ def listar_extratos(
             linhas_nao_lidas=linha.linhas_nao_lidas,
             periodo_inicio=linha.periodo_inicio,
             periodo_fim=linha.periodo_fim,
+            **vars(
+                saldo.montar_saldo(
+                    linha.saldo_final,
+                    linha.saldo_data,
+                    linha.linhas_nao_lidas,
+                    somas.get(linha.id, Decimal(0)),
+                )
+            ),
             enviado_em=linha.criado_em.replace(tzinfo=UTC),
             conciliado=linha.conciliado,
         )
@@ -271,5 +306,6 @@ async def obter_extrato(
         quantidade_lancamentos=extrato.quantidade_lancamentos,
         periodo_inicio=extrato.periodo_inicio,
         periodo_fim=extrato.periodo_fim,
+        **vars(saldo.saldo_do_extrato(db, extrato)),
         erros=erros,
     )

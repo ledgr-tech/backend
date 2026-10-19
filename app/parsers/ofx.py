@@ -20,14 +20,33 @@ chega a ser "por transação". Já uma transação que falha só na hora de
 *nós* construirmos o `LancamentoNormalizado` a partir dela (issue #13) não
 aborta mais o arquivo: vira um `ErroLinha` no resultado, e o parsing segue
 pras próximas transações.
+
+Saldo (issue #118): o saldo do arquivo é o LEDGERBAL do extrato, BALAMT e a
+data de DTASOF (convertida como a DTPOSTED dos lançamentos, pra comparar na
+mesma régua). AVAILBAL é ignorado. O ofxtools exige LEDGERBAL válido em todo
+extrato e, sem ele ou com BALAMT/DTASOF ilegível, derrubaria o arquivo
+inteiro no `convert()`. Por isso o LEDGERBAL é lido antes, direto da árvore,
+e, se faltar ou não for legível, trocado por um provisório só pro
+`convert()` passar: o saldo fica `None` e o resto do arquivo segue normal,
+nunca vira erro do arquivo nem `ErroLinha`. Com mais de um extrato no mesmo
+arquivo (mais de uma conta), o saldo também fica `None`: os lançamentos de
+todas as contas entram juntos, e o saldo de uma só não fecharia com eles.
 """
 
 import io
+import xml.etree.ElementTree as ET
 from decimal import Decimal
 
+from ofxtools.models import LEDGERBAL
 from ofxtools.Parser import OFXTree
 
-from app.parsers.tipos import ErroLinha, LancamentoNormalizado, ResultadoParsing
+from app.parsers.tipos import (
+    ErroLinha,
+    LancamentoNormalizado,
+    ResultadoParsing,
+    SaldoExtrato,
+    saldo_ou_none,
+)
 
 # TRNTYPE conforme a spec OFX (seção "Banking Transaction Types"). Não é uma
 # lista exaustiva de todos os valores possíveis da spec, só dos tipos
@@ -54,6 +73,22 @@ _TRNTYPES_DEBITO = {
 # cobrem falhas de estrutura inesperada que escapam dessa hierarquia.
 _ERROS_OFX_INVALIDO = (SyntaxError, ValueError, KeyError, AttributeError, IndexError)
 
+# BALAMT ilegível sai do ofxtools como decimal.InvalidOperation (ArithmeticError).
+_ERROS_LEDGERBAL = (ArithmeticError, TypeError, *_ERROS_OFX_INVALIDO)
+
+# Agregados de extrato que trazem LEDGERBAL: conta corrente e cartão.
+_AGREGADOS_EXTRATO = {"STMTRS", "CCSTMTRS"}
+# Filhos que a spec põe depois do LEDGERBAL; o provisório entra antes deles.
+_DEPOIS_DO_LEDGERBAL = {
+    "AVAILBAL",
+    "CASHADVBALAMT",
+    "INTRATE",
+    "BALLIST",
+    "MKTGINFO",
+    "REWARDINFO",
+    "INV401KBAL",
+}
+
 
 class OFXInvalidoError(Exception):
     """Conteúdo informado não é um OFX válido.
@@ -74,6 +109,45 @@ def _tipo_normalizado(trntype: str | None, valor: Decimal) -> str:
     return "credito" if valor >= 0 else "debito"
 
 
+def _ledgerbal_provisorio() -> ET.Element:
+    elemento = ET.Element("LEDGERBAL")
+    ET.SubElement(elemento, "BALAMT").text = "0"
+    ET.SubElement(elemento, "DTASOF").text = "19700101"
+    return elemento
+
+
+def _ler_ledgerbal(agregado: ET.Element) -> SaldoExtrato | None:
+    """Saldo do LEDGERBAL deste extrato, ou `None` sem ele ou ilegível. Nesse
+    caso troca (ou insere) um LEDGERBAL provisório, só pro `convert()` do
+    ofxtools não derrubar o arquivo; o valor dele nunca é lido."""
+    elemento = agregado.find("LEDGERBAL")
+    if elemento is not None:
+        try:
+            ledgerbal = LEDGERBAL.from_etree(elemento)
+            return saldo_ou_none(ledgerbal.balamt, ledgerbal.dtasof.date())
+        except _ERROS_LEDGERBAL:
+            pass
+        posicao = list(agregado).index(elemento)
+        agregado.remove(elemento)
+    else:
+        filhos = list(agregado)
+        posicao = next(
+            (i for i, filho in enumerate(filhos) if filho.tag in _DEPOIS_DO_LEDGERBAL),
+            len(filhos),
+        )
+    agregado.insert(posicao, _ledgerbal_provisorio())
+    return None
+
+
+def _extrair_saldo(tree: OFXTree) -> SaldoExtrato | None:
+    """Lê o LEDGERBAL de cada extrato do arquivo (consertando os que faltam
+    ou são ilegíveis, ver `_ler_ledgerbal`) e devolve o saldo só quando o
+    arquivo tem um extrato só."""
+    agregados = [e for e in tree.getroot().iter() if e.tag in _AGREGADOS_EXTRATO]
+    saldos = [_ler_ledgerbal(agregado) for agregado in agregados]
+    return saldos[0] if len(saldos) == 1 else None
+
+
 def parse_ofx(conteudo: bytes) -> ResultadoParsing:
     """Faz o parsing de um arquivo OFX e retorna lançamentos válidos + erros por transação.
 
@@ -85,6 +159,7 @@ def parse_ofx(conteudo: bytes) -> ResultadoParsing:
     tree = OFXTree()
     try:
         tree.parse(io.BytesIO(conteudo))
+        saldo = _extrair_saldo(tree)
         ofx = tree.convert()
     except _ERROS_OFX_INVALIDO as exc:
         raise OFXInvalidoError(f"Arquivo OFX inválido: {exc}") from exc
@@ -109,4 +184,4 @@ def parse_ofx(conteudo: bytes) -> ResultadoParsing:
                 fitid = getattr(transacao, "fitid", None)
                 identificador = fitid if fitid else f"transação {posicao}"
                 erros.append(ErroLinha(identificador=identificador, motivo=str(exc)))
-    return ResultadoParsing(lancamentos=lancamentos, erros=erros)
+    return ResultadoParsing(lancamentos=lancamentos, erros=erros, saldo=saldo)

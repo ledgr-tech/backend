@@ -1,4 +1,4 @@
-"""Textos dos e-mails transacionais (issues #66, #69 e #78, ADR-012).
+"""Textos dos e-mails transacionais (issues #66, #68, #69 e #78, ADR-012).
 
 Cada mensagem sai em texto puro e em HTML simples, sem imagem nem
 rastreamento. Tudo o que vem do usuário (nome, razão social) é escapado no
@@ -169,6 +169,48 @@ def mensagem_convite(
     return MensagemEmail(
         para=para,
         assunto="Convite para usar a Ledgr",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def mensagem_conta_desativada(
+    *,
+    para: str,
+    nome: str,
+    razao_social_sem_acesso: str | None,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Depois de a pessoa desativar a própria conta (issue #68), para o e-mail
+    que a conta tinha. Quem não reconhece a desativação precisa saber que foi
+    feita. `razao_social_sem_acesso` vem quando era o administrador sozinho:
+    a empresa fica sem acesso, e os dados dela só saem a pedido."""
+    texto = (
+        f"Olá, {nome}.\n\n"
+        "A sua conta na Ledgr foi desativada a seu pedido. Ela não entra mais, e "
+        "este e-mail fica livre para um cadastro novo.\n\n"
+    )
+    html = (
+        f"<p>Olá, {escape(nome)}.</p>"
+        "<p>A sua conta na Ledgr foi desativada a seu pedido. Ela não entra mais, e "
+        "este e-mail fica livre para um cadastro novo.</p>"
+    )
+    if razao_social_sem_acesso is not None:
+        texto += (
+            f"Os dados da empresa {razao_social_sem_acesso} continuam guardados, sem "
+            "acesso de ninguém. Para pedir a exclusão deles, escreva ao nosso suporte.\n\n"
+        )
+        html += (
+            f"<p>Os dados da empresa {escape(razao_social_sem_acesso)} continuam guardados, "
+            "sem acesso de ninguém. Para pedir a exclusão deles, escreva ao nosso "
+            "suporte.</p>"
+        )
+    texto += "Se não foi você, avise o nosso suporte agora.\n\nEquipe Ledgr"
+    html += "<p>Se não foi você, avise o nosso suporte agora.</p><p>Equipe Ledgr</p>"
+    return MensagemEmail(
+        para=para,
+        assunto="Sua conta da Ledgr foi desativada",
         texto=texto,
         html=html,
         chave_idempotencia=chave_idempotencia,
