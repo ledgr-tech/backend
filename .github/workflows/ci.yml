@@ -24,11 +24,15 @@ jobs:
         # postgres:18-alpine pra CI testar a mesma major da produção
         # (o Postgres do Railway é 18, imagem postgres-ssl:18 — issue #65).
         # Antes era 16: a CI passava numa major que produção não usa.
-        # Do espelho público da AWS, não do Docker Hub: sem login, o Docker Hub
-        # limita os downloads por IP e o runner compartilhado do GitHub batia
-        # em "toomanyrequests" antes de rodar qualquer teste (PR #109). É a
-        # mesma imagem oficial (docker/library), PostgreSQL 18.
-        image: public.ecr.aws/docker/library/postgres:18-alpine
+        # Do Docker Hub com login (issue #127). Sem login, o Docker Hub limita
+        # os downloads por IP e o runner compartilhado do GitHub batia em
+        # "toomanyrequests" antes de rodar qualquer teste; o espelho público
+        # da AWS adotado no PR #109 também caía em "toomanyrequests", porque
+        # limita o download anônimo. Com login, o limite passa a ser o da conta.
+        image: postgres:18-alpine
+        credentials:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
         env:
           POSTGRES_USER: ci
           POSTGRES_PASSWORD: ci
@@ -74,11 +78,15 @@ jobs:
         # postgres:18-alpine pra CI testar a mesma major da produção
         # (o Postgres do Railway é 18, imagem postgres-ssl:18 — issue #65).
         # Antes era 16: a CI passava numa major que produção não usa.
-        # Do espelho público da AWS, não do Docker Hub: sem login, o Docker Hub
-        # limita os downloads por IP e o runner compartilhado do GitHub batia
-        # em "toomanyrequests" antes de rodar qualquer teste (PR #109). É a
-        # mesma imagem oficial (docker/library), PostgreSQL 18.
-        image: public.ecr.aws/docker/library/postgres:18-alpine
+        # Do Docker Hub com login (issue #127). Sem login, o Docker Hub limita
+        # os downloads por IP e o runner compartilhado do GitHub batia em
+        # "toomanyrequests" antes de rodar qualquer teste; o espelho público
+        # da AWS adotado no PR #109 também caía em "toomanyrequests", porque
+        # limita o download anônimo. Com login, o limite passa a ser o da conta.
+        image: postgres:18-alpine
+        credentials:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
         env:
           POSTGRES_USER: ci
           POSTGRES_PASSWORD: ci
