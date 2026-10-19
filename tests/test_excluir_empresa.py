@@ -13,10 +13,10 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from conftest import _gerar_cnpj_alfanumerico
 from sqlalchemy import func, select
 
 from app.core import senha
-from app.core.cnpj import digito_verificador
 from app.core.config import settings
 from app.models import (
     Base,
@@ -350,13 +350,6 @@ def test_simulacao_mostra_as_contagens_e_nao_apaga_nada(db_session, empresa_povo
         assert texto not in saida
 
 
-def _cnpj_alfanumerico() -> str:
-    """CNPJ alfanumérico único, com os dígitos verificadores certos."""
-    base = f"{uuid.uuid4().hex[:8].upper()}0001"
-    base += digito_verificador(base)
-    return base + digito_verificador(base)
-
-
 def _com_mascara(cnpj: str) -> str:
     return f"{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}"
 
@@ -364,7 +357,7 @@ def _com_mascara(cnpj: str) -> str:
 def _empresa_com_cnpj(db_session, empresa_povoada, tipo: str):
     empresa, linhas = empresa_povoada()
     if tipo == "alfanumerico":
-        empresa.cnpj = _cnpj_alfanumerico()
+        empresa.cnpj = _gerar_cnpj_alfanumerico()
         db_session.commit()
     return empresa, linhas
 
@@ -407,7 +400,7 @@ def test_executar_com_o_cnpj_certo_apaga(
     [
         lambda cnpj: ("rafael", "00000000000000"),
         lambda cnpj: ("rafael", "12.345.678/0001-95"),
-        lambda cnpj: ("rafael", _cnpj_alfanumerico()),
+        lambda cnpj: ("rafael", _gerar_cnpj_alfanumerico()),
         lambda cnpj: ("rafael", cnpj[:-1] + str((int(cnpj[-1]) + 1) % 10)),
         lambda cnpj: ("rafael", ""),
         lambda cnpj: ("", cnpj),

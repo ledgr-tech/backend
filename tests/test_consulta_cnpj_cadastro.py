@@ -10,11 +10,10 @@ import uuid
 
 import httpx
 import pytest
-from conftest import _gerar_cnpj
+from conftest import _gerar_cnpj, _gerar_cnpj_alfanumerico
 from fastapi.testclient import TestClient
 from test_consulta_cnpj import NAO_ENCONTRADO_BRASILAPI, corpo_brasilapi
 
-from app.core.cnpj import digito_verificador
 from app.core.database import engine
 from app.models import Configuracao, Empresa, Usuario
 from app.services.consulta_cnpj import ConsultaBrasilAPI, obter_consulta_cnpj_dependencia
@@ -329,9 +328,7 @@ def test_indisponivel_nao_fica_em_cache(db_session, receita, cadastrar):
 def test_cnpj_alfanumerico_recusado_pela_api_vira_nao_verificado_e_nao_bloqueia(
     db_session, receita, cadastrar, rota
 ):
-    base = f"{uuid.uuid4().hex[:8].upper()}0001"
-    base += digito_verificador(base)
-    cnpj = base + digito_verificador(base)
+    cnpj = _gerar_cnpj_alfanumerico()
     receita.resposta = httpx.Response(
         400, json={"message": "CNPJ deve conter 14 dígitos.", "type": "bad_request"}
     )
