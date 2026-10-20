@@ -1,17 +1,16 @@
 """Testes de POST /register e POST /login (issue #57)."""
 
 import math
-import random
 import re
-import string
 import time
 import uuid
 
 import bcrypt
 import pytest
+from conftest import _gerar_cnpj_alfanumerico
 from fastapi.testclient import TestClient
 
-from app.core.cnpj import digito_verificador, normalizar
+from app.core.cnpj import normalizar
 from app.models import Configuracao, Empresa, Usuario
 from main import app
 
@@ -87,9 +86,7 @@ def test_cadastro_cria_empresa_configuracao_e_usuario(db_session, cadastro, gera
 
 
 def test_cadastro_aceita_cnpj_alfanumerico_e_grava_em_maiusculas(db_session, cadastro):
-    base = "".join(random.choices(string.ascii_uppercase + string.digits, k=8)) + "0001"
-    base += digito_verificador(base)
-    cnpj = base + digito_verificador(base)
+    cnpj = _gerar_cnpj_alfanumerico()
 
     response = _registrar(cadastro(cnpj=cnpj.lower()))
 

@@ -27,6 +27,7 @@ import hashlib
 import logging
 import os
 import random
+import string
 import subprocess
 import sys
 import uuid
@@ -349,6 +350,19 @@ def db_session(postgres_disponivel):
 def _gerar_cnpj() -> str:
     """CNPJ fictício com dígitos verificadores válidos (passa no /register)."""
     base = f"{random.randint(0, 10**8 - 1):08d}0001"
+    base += digito_verificador(base)
+    return base + digito_verificador(base)
+
+
+def _gerar_cnpj_alfanumerico() -> str:
+    """CNPJ alfanumérico fictício com dígitos verificadores válidos e sempre
+    com letra na raiz: a primeira posição é sorteada só entre as letras. A raiz
+    vinha de uuid4().hex[:8], que só tem 0-9 e A-F; em (10/16)^8 ≈ 2,3% das
+    vezes saía só dígito e o CNPJ "alfanumérico" era numérico."""
+    raiz = random.choice(string.ascii_uppercase) + "".join(
+        random.choices(string.ascii_uppercase + string.digits, k=7)
+    )
+    base = f"{raiz}0001"
     base += digito_verificador(base)
     return base + digito_verificador(base)
 
