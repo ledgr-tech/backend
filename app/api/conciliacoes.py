@@ -21,6 +21,12 @@ trava do mês (compartilhada) e a do extrato do banco, nessa ordem
 (app/services/travas.py); extrato sem período não tem competência e segue
 liberado.
 
+Explicação automática (issue #140, ADR-011): com
+`EXPLICACAO_AUTOMATICA_HABILITADA` e `LLM_HABILITADO` ligadas, o POST agenda
+em `BackgroundTasks`, depois do commit e da resposta, a explicação das
+divergências do par (app/services/ia/geracao.py). A resposta e o tempo do
+POST não mudam: a IA não fica no caminho da requisição.
+
 Plano (issue #122): com `PLANO_BLOQUEIO_HABILITADO`, entre (d) e (e), antes de
 qualquer trava ou processamento, a primeira conciliação de um extrato do banco
 (nenhuma execução dele ainda) dá 402 com `detail` em texto quando a empresa
@@ -51,6 +57,16 @@ do extrato (`_validar_extrato_banco`) e a montagem da query
 (`_construir_consulta_itens`) da listagem — mesmas validações, mesmos
 códigos, mesmos filtros e mesma ordenação; o que muda é que a exportação não
 pagina e devolve CSV em vez de JSON.
+
+Explicação (issue #140): cada item traz `explicacao`, o texto da IA ligado à
+linha (`conciliacoes.explicacao_chave`, pela geração automática ou pelo
+clique no `POST /explicacoes`), e `gerada_por_ia`, `true` só quando há esse
+texto. Sem texto da IA (geração desligada, teto, limite, falha ou ainda não
+gerado), `explicacao` é `null` e `gerada_por_ia` é `false`; o texto fixo por
+categoria não sai aqui, o front tem o dele. Com `LLM_HABILITADO` desligado,
+`null` em todos os itens, mesmo com cache (o interruptor de emergência do
+ADR-011). O texto vem num join com o cache, pela empresa da linha: nenhuma
+consulta por item, e a explicação de uma empresa nunca aparece em outra.
 
 Decisões por linha (issue #83, regras em app/services/decisoes.py): cada
 item da listagem traz `chave` (identifica a linha em todas as rodadas),
@@ -101,7 +117,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from fastapi import status as http_status
 from pydantic import BaseModel
 from sqlalchemy import Select, func, select
@@ -115,10 +131,16 @@ from app.core.auth import (
 )
 from app.core.config import settings
 from app.core.database import get_db
-from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento
+from app.models import Conciliacao, DecisaoLinha, ExplicacaoDivergencia, Extrato, Lancamento
 from app.services import decisoes, saldo
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
+from app.services.ia import ProvedorDeIA
+from app.services.ia.geracao import (
+    automatica_ligada,
+    gerar_explicacoes_do_par,
+    obter_provedor_dependencia,
+)
 from app.services.matching import conciliar_extratos
 from app.services.plano import motivo_do_bloqueio
 
@@ -188,8 +210,10 @@ def _obter_extrato_da_empresa(db: Session, extrato_id: uuid.UUID, empresa_id: uu
 )
 def criar_conciliacao(
     corpo: ConciliacaoRequest,
+    tarefas: BackgroundTasks,
     ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeIA | None, Depends(obter_provedor_dependencia)],
 ) -> ConciliacaoResponse:
     empresa_id = ativa.empresa.id
     extrato_banco = _obter_extrato_da_empresa(db, corpo.extrato_banco_id, empresa_id)
@@ -223,6 +247,15 @@ def criar_conciliacao(
 
     _garantir_mes_aberto(db, empresa_id, extrato_banco)
     contagens = conciliar_extratos(db, empresa_id, corpo.extrato_banco_id, corpo.extrato_sistema_id)
+    if provedor is not None and automatica_ligada():
+        # Depois do commit de `conciliar_extratos` e da resposta.
+        tarefas.add_task(
+            gerar_explicacoes_do_par,
+            empresa_id,
+            corpo.extrato_banco_id,
+            corpo.extrato_sistema_id,
+            provedor,
+        )
     return ConciliacaoResponse(
         extrato_banco_id=corpo.extrato_banco_id,
         extrato_sistema_id=corpo.extrato_sistema_id,
@@ -277,6 +310,8 @@ class ItemConciliacaoResponse(BaseModel):
     chave: str
     decisao: DecisaoResponse | None
     eventos: list[DecisaoResponse]
+    explicacao: str | None
+    gerada_por_ia: bool
 
 
 class ConciliacaoListaResponse(BaseModel):
@@ -398,6 +433,15 @@ def listar_conciliacoes(
     consulta, filtros = _construir_consulta_itens(
         empresa_id, extrato_id, status, extrato_sistema_id
     )
+    if settings.llm_habilitado:
+        # O texto da IA ligado à linha, no mesmo SELECT e pela empresa dela.
+        consulta = consulta.add_columns(
+            ExplicacaoDivergencia.texto.label("explicacao_texto")
+        ).outerjoin(
+            ExplicacaoDivergencia,
+            (ExplicacaoDivergencia.empresa_id == Conciliacao.empresa_id)
+            & (ExplicacaoDivergencia.chave == Conciliacao.explicacao_chave),
+        )
     linhas = db.execute(consulta.limit(limit).offset(offset)).all()
     total = db.scalar(select(func.count()).select_from(Conciliacao).where(*filtros))
 
@@ -419,6 +463,8 @@ def listar_conciliacoes(
                 chave=chave,
                 decisao=_decisao_response(decisoes.decisao_vigente(eventos)),
                 eventos=[_evento_response(evento) for evento in eventos],
+                explicacao=getattr(linha, "explicacao_texto", None),
+                gerada_por_ia=getattr(linha, "explicacao_texto", None) is not None,
             )
         )
     return ConciliacaoListaResponse(
