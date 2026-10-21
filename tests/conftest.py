@@ -2,7 +2,11 @@
 
 Testes que gravam no banco (issue #12 em diante — normalização grava
 lançamento de verdade) usam a fixture `db_session` abaixo, e as fábricas
-`criar_empresa`/`criar_extrato` pra montar dado de teste. A CI roda um
+`criar_conta`/`criar_empresa`/`criar_usuario`/`criar_extrato` pra montar dado
+de teste. Desde a issue #133 (ADR-019), o tenant é a conta: `criar_empresa()`
+cria uma conta nova com uma empresa, de id DIFERENTE do da conta (para nenhum
+bug que confunda os dois passar escondido), e `criar_empresa(conta_id=...)`
+acrescenta uma empresa cliente a uma conta que já existe. A CI roda um
 service container de Postgres real desde a issue #12 (antecipado do
 Sprint 6 — ver .github/workflows/ci.yml: `ON CONFLICT DO NOTHING` é
 sintaxe de dialeto Postgres, não dava pra validar sem banco de verdade).
@@ -38,13 +42,13 @@ from pathlib import Path
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.core import bloqueio_login, senha
 from app.core import google as modulo_google
-from app.core.auth import DURACAO_SESSAO_SEGUNDOS
+from app.core.auth import CABECALHO_EMPRESA, DURACAO_SESSAO_SEGUNDOS
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import digito_verificador
 from app.core.config import settings
@@ -53,6 +57,7 @@ from app.core.rate_limit import limiter
 from app.models import (
     Conciliacao,
     Configuracao,
+    Conta,
     Convite,
     DecisaoLinha,
     Empresa,
@@ -185,16 +190,21 @@ def gerar_token():
     """Simula o JWT que o NextAuth emite (contrato em app/core/auth.py).
 
     Desde a issue #75, toda rota autenticada carrega o usuário do `sub`: para
-    passar, o token precisa do id de um usuário real da empresa (ou use
+    passar, o token precisa do id de um usuário real da conta (ou use
     `auth_headers`, que cria um). `auth_time` é o login, em segundos
-    inteiros; `None` tira o claim do token."""
+    inteiros; `None` tira o claim do token.
+
+    O primeiro argumento é o id da CONTA (issue #133), no claim `conta_id`
+    (vetor v3 do ADR-005). `claim="empresa_id"` emite o token legado, de antes
+    da #133, com o mesmo valor no claim `empresa_id`."""
 
     def _gerar(
-        empresa_id: uuid.UUID | str | None,
+        conta_id: uuid.UUID | str | None,
         secret: str = SECRET_TESTE,
         expira_em: timedelta = timedelta(seconds=DURACAO_SESSAO_SEGUNDOS),
         usuario_id: uuid.UUID | str | None = None,
         auth_time: object = LOGIN_AGORA,
+        claim: str = "conta_id",
     ) -> str:
         agora = datetime.now(UTC)
         claims = {
@@ -207,8 +217,8 @@ def gerar_token():
             claims["auth_time"] = int(agora.timestamp())
         elif auth_time is not None:
             claims["auth_time"] = auth_time
-        if empresa_id is not None:
-            claims["empresa_id"] = str(empresa_id)
+        if conta_id is not None:
+            claims[claim] = str(conta_id)
         return jwt.encode(claims, secret, algorithm="HS256")
 
     return _gerar
@@ -216,19 +226,34 @@ def gerar_token():
 
 @pytest.fixture
 def auth_headers(gerar_token, request):
-    """Cabeçalho com o token de um usuário real da empresa (issue #75). Na
-    primeira chamada para cada empresa, cria um usuário nela, sem senha e
-    sem ser administrador, que `criar_usuario` apaga no fim. A empresa
-    precisa existir no banco."""
-    usuarios: dict[str, uuid.UUID] = {}
+    """Cabeçalhos de um usuário real da conta da empresa (issues #75 e #133):
+    o token, com o `conta_id`, e `X-Ledgr-Empresa` com a empresa, que vira a
+    empresa ativa. Na primeira chamada para cada conta, cria um usuário nela,
+    sem senha e com papel 'gestor', que `criar_usuario` apaga no fim. A
+    empresa precisa existir no banco. `ativa=False` tira o cabeçalho da
+    empresa (o front de antes da #133)."""
+    usuarios: dict[uuid.UUID, tuple[uuid.UUID, uuid.UUID]] = {}
 
-    def _headers(empresa_id: uuid.UUID | str) -> dict[str, str]:
-        chave = str(empresa_id)
-        if chave not in usuarios:
+    def _headers(empresa_id: uuid.UUID | str, ativa: bool = True) -> dict[str, str]:
+        empresa_id = uuid.UUID(str(empresa_id))
+        if empresa_id not in usuarios:
+            db_session = request.getfixturevalue("db_session")
+            conta_id = db_session.get(Empresa, empresa_id).conta_id
             criar_usuario = request.getfixturevalue("criar_usuario")
-            usuarios[chave] = criar_usuario(com_senha=False, empresa_id=uuid.UUID(chave)).id
-        token = gerar_token(empresa_id, usuario_id=usuarios[chave])
-        return {"Authorization": f"Bearer {token}"}
+            usuario_id = (
+                next(
+                    (u for u, c in usuarios.values() if c == conta_id),
+                    None,
+                )
+                or criar_usuario(com_senha=False, conta_id=conta_id).id
+            )
+            usuarios[empresa_id] = (usuario_id, conta_id)
+        usuario_id, conta_id = usuarios[empresa_id]
+        token = gerar_token(conta_id, usuario_id=usuario_id)
+        headers = {"Authorization": f"Bearer {token}"}
+        if ativa:
+            headers[CABECALHO_EMPRESA] = str(empresa_id)
+        return headers
 
     return _headers
 
@@ -373,15 +398,54 @@ def gerar_cnpj():
 
 
 @pytest.fixture
-def criar_empresa(db_session):
-    """Fábrica de Empresa real no banco. A limpeza no fim do teste apaga só
-    o que essa fábrica criou: a empresa e qualquer extrato/lançamento/linha
-    inválida/configuração/execução de conciliação gravado contra ela durante
-    o teste — inclusive via HTTP, não só pelos outros helpers deste arquivo."""
+def criar_conta(db_session):
+    """Fábrica de Conta real no banco (issue #133), sem empresa. A limpeza no
+    fim do teste apaga a conta, os convites e os usuários dela, inclusive os
+    criados via HTTP (aceite de convite), e qualquer empresa que tenha sobrado
+    nela. Roda depois da limpeza de `criar_empresa`, que depende desta."""
+    contas_criadas: list[uuid.UUID] = []
+
+    def _criar(razao_social: str = "Conta de teste", cnpj: str | None = None) -> Conta:
+        conta = Conta(razao_social=razao_social, cnpj=cnpj or _gerar_cnpj())
+        db_session.add(conta)
+        db_session.commit()
+        contas_criadas.append(conta.id)
+        return conta
+
+    yield _criar
+
+    db_session.rollback()
+    for conta_id in contas_criadas:
+        db_session.query(Convite).filter_by(conta_id=conta_id).delete()
+        db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
+        db_session.query(Empresa).filter_by(conta_id=conta_id).delete()
+        db_session.query(Conta).filter_by(id=conta_id).delete()
+    db_session.commit()
+
+
+@pytest.fixture
+def criar_empresa(db_session, criar_conta):
+    """Fábrica de Empresa real no banco. Sem `conta_id`, cria uma conta nova
+    com a mesma razão social e o mesmo CNPJ, como o `/register`, e a empresa
+    com id próprio, diferente do da conta. Com `conta_id`, acrescenta uma
+    empresa cliente à conta.
+
+    A limpeza no fim do teste apaga só o que essa fábrica criou: a empresa e
+    qualquer extrato/lançamento/linha inválida/configuração/execução de
+    conciliação gravado contra ela durante o teste — inclusive via HTTP, não
+    só pelos outros helpers deste arquivo. A conta sai na limpeza de
+    `criar_conta`."""
     empresas_criadas: list[uuid.UUID] = []
 
-    def _criar(razao_social: str = "Empresa de teste") -> Empresa:
-        empresa = Empresa(razao_social=razao_social, cnpj=_gerar_cnpj())
+    def _criar(
+        razao_social: str = "Empresa de teste",
+        conta_id: uuid.UUID | None = None,
+        cnpj: str | None = None,
+    ) -> Empresa:
+        cnpj = cnpj or _gerar_cnpj()
+        if conta_id is None:
+            conta_id = criar_conta(razao_social, cnpj).id
+        empresa = Empresa(conta_id=conta_id, razao_social=razao_social, cnpj=cnpj)
         db_session.add(empresa)
         db_session.commit()
         empresas_criadas.append(empresa.id)
@@ -422,12 +486,44 @@ def criar_empresa(db_session):
         # issue #28/ADR-011 acrescenta o cache de explicações).
         db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
         db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
-        # Convites e usuários criados pelo aceite de convite (issue #69), que
-        # não passam por `criar_usuario`.
-        db_session.query(Convite).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(Usuario).filter_by(empresa_id=empresa_id).delete()
+        # Convites e usuários são da conta desde a issue #133 e saem na
+        # limpeza de `criar_conta`.
         db_session.query(Empresa).filter_by(id=empresa_id).delete()
     db_session.commit()
+
+
+def empresa_unica(db_session, conta_id: uuid.UUID) -> uuid.UUID:
+    """O id da única empresa da conta: a que `criar_usuario()` e o `/register`
+    criam junto com a conta (issue #133)."""
+    (empresa_id,) = db_session.scalars(select(Empresa.id).where(Empresa.conta_id == conta_id))
+    return empresa_id
+
+
+def cabecalhos(token: str, empresa_id: uuid.UUID | None = None) -> dict[str, str]:
+    """`Authorization` com o token e, com `empresa_id`, a empresa ativa."""
+    headers = {"Authorization": f"Bearer {token}"}
+    if empresa_id is not None:
+        headers[CABECALHO_EMPRESA] = str(empresa_id)
+    return headers
+
+
+def apagar_contas_por_cnpj(db_session, cnpjs: list[str]) -> None:
+    """Apaga o que o cadastro pela API cria (issue #133): a conta, a primeira
+    empresa, a configuração dela e os usuários da conta, achados pelo CNPJ da
+    conta. Para os testes do `/register` e do `/register/google`, que não
+    passam pelas fábricas. Sem commit."""
+    conta_ids = list(db_session.scalars(select(Conta.id).where(Conta.cnpj.in_(cnpjs))))
+    empresa_ids = list(
+        db_session.scalars(select(Empresa.id).where(Empresa.conta_id.in_(conta_ids)))
+    )
+    db_session.query(Usuario).filter(Usuario.conta_id.in_(conta_ids)).delete(
+        synchronize_session=False
+    )
+    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
+        synchronize_session=False
+    )
+    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
+    db_session.query(Conta).filter(Conta.id.in_(conta_ids)).delete(synchronize_session=False)
 
 
 class ProvedorEmailFalso:
@@ -461,26 +557,33 @@ def provedor(monkeypatch):
 @pytest.fixture
 def criar_usuario(db_session, criar_empresa):
     """Usuário real no banco, com a senha `SENHA_USUARIO_TESTE` (ou sem senha,
-    como conta do Google). Sem `empresa_id`, numa empresa nova e como
-    administrador dela, como no `/register`; com `empresa_id`, entra na
-    empresa como convidado, sem ser administrador (issue #69). Apaga só os
-    que criou, antes da limpeza de `criar_empresa` (os tokens de
-    `tokens_email` caem junto, pelo ON DELETE CASCADE)."""
+    como conta do Google). Sem `empresa_id` nem `conta_id`, numa conta nova
+    (com uma empresa) e com papel 'admin', como no `/register`; com um dos
+    dois, entra na conta (a da empresa, com `empresa_id`) com papel 'gestor',
+    o que os convidados de antes da issue #133 viraram, ou com o `papel`
+    dado. Apaga só os que criou, antes da limpeza de `criar_empresa` (os
+    tokens de `tokens_email` caem junto, pelo ON DELETE CASCADE)."""
     criados: list[uuid.UUID] = []
 
     def _criar(
-        com_senha: bool = True, empresa_id: uuid.UUID | None = None, nome: str = "Maria Financeiro"
+        com_senha: bool = True,
+        empresa_id: uuid.UUID | None = None,
+        nome: str = "Maria Financeiro",
+        conta_id: uuid.UUID | None = None,
+        papel: str | None = None,
     ) -> Usuario:
-        administrador = empresa_id is None
-        if empresa_id is None:
-            empresa_id = criar_empresa().id
+        if empresa_id is not None:
+            conta_id = db_session.get(Empresa, empresa_id).conta_id
+        if conta_id is None:
+            conta_id = criar_empresa().conta_id
+            papel = papel or "admin"
         usuario = Usuario(
-            empresa_id=empresa_id,
+            conta_id=conta_id,
             nome=nome,
             email=f"{uuid.uuid4().hex[:12]}@teste.com",
             senha_hash=senha.gerar_hash(SENHA_USUARIO_TESTE) if com_senha else None,
             google_sub=None if com_senha else f"google-{uuid.uuid4().hex}",
-            administrador=administrador,
+            papel=papel or "gestor",
         )
         db_session.add(usuario)
         db_session.commit()
@@ -571,6 +674,13 @@ def inserir_lancamentos(db_session):
         return criados
 
     return _inserir
+
+
+# A última revisão antes das contas (issue #133). Os testes das migrações
+# anteriores inserem empresa e usuário no esquema de antes dela (empresa sem
+# `conta_id`, usuário com `empresa_id` e `administrador`): sobem até aqui, que
+# é o esquema que eles testam, e não até o head.
+REVISAO_ANTES_DAS_CONTAS = "d5a8f1c3e690"
 
 
 # Migrações: banco descartável no mesmo servidor, nunca o de desenvolvimento.

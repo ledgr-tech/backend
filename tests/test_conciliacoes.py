@@ -597,9 +597,10 @@ def test_get_emite_poucos_selects_e_nao_cresce_com_o_tamanho_da_pagina(
 
     pequena, cheia = selects_da_chamada(5), selects_da_chamada(30)
 
-    # usuário do token (issue #75, uma busca por chave primária), validação do
-    # extrato, query dos itens (com join) e contagem: sem N+1
-    assert pequena <= 5 and cheia <= 5
+    # usuário do token (issue #75, uma busca por chave primária), empresa ativa
+    # (issue #133, outra busca por chave primária), validação do extrato, query
+    # dos itens (com join) e contagem: sem N+1
+    assert pequena <= 6 and cheia <= 6
     assert pequena == cheia
 
 

@@ -33,7 +33,7 @@ def admin(db_session, criar_usuario):
 @pytest.fixture
 def cabecalho_de(gerar_token):
     def _cabecalho(usuario) -> dict[str, str]:
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
         return {"Authorization": f"Bearer {token}"}
 
     return _cabecalho
@@ -67,7 +67,7 @@ def _aceitar(token: str, id_token: str, **extra):
 
 def _convite(db_session, admin) -> Convite:
     db_session.expire_all()
-    return db_session.scalars(select(Convite).where(Convite.empresa_id == admin.empresa_id)).one()
+    return db_session.scalars(select(Convite).where(Convite.conta_id == admin.conta_id)).one()
 
 
 def test_aceite_com_o_mesmo_email_cria_o_usuario_sem_senha(
@@ -81,8 +81,8 @@ def test_aceite_com_o_mesmo_email_cria_o_usuario_sem_senha(
 
     assert response.status_code == 201
     corpo = response.json()
-    assert set(corpo) == {"id", "empresa_id", "nome", "email", "auth_time"}
-    assert corpo["empresa_id"] == str(admin.empresa_id)
+    assert set(corpo) == {"id", "conta_id", "empresa_id", "nome", "email", "auth_time"}
+    assert corpo["conta_id"] == corpo["empresa_id"] == str(admin.conta_id)
     assert corpo["email"] == email
     assert corpo["nome"] == "Maria Google"
     assert math.floor(antes) <= corpo["auth_time"] <= time.time()
@@ -90,18 +90,18 @@ def test_aceite_com_o_mesmo_email_cria_o_usuario_sem_senha(
     usuario = db_session.get(Usuario, uuid.UUID(corpo["id"]))
     assert usuario.senha_hash is None
     assert usuario.google_sub == "20000000000000000001"
-    assert usuario.administrador is False
+    assert usuario.papel == "analista"
     assert _convite(db_session, admin).usado_em is not None
 
     # O token montado com a resposta passa, e o login pelo Google acha a conta.
     cabecalho = {
         "Authorization": "Bearer "
-        + gerar_token(admin.empresa_id, usuario_id=usuario.id, auth_time=corpo["auth_time"])
+        + gerar_token(admin.conta_id, usuario_id=usuario.id, auth_time=corpo["auth_time"])
     }
     me = client.get("/me", headers=cabecalho)
     assert me.status_code == 200
     assert me.json()["metodos_login"] == ["google"]
-    assert me.json()["administrador"] is False
+    assert (me.json()["papel"], me.json()["administrador"]) == ("analista", False)
     login = client.post(
         "/login/google", json={"id_token": google.id_token(email=email, sub=usuario.google_sub)}
     )
@@ -140,9 +140,7 @@ def test_email_do_google_diferente_do_convidado_e_409_e_nao_consome(
         "detail": "O e-mail da conta Google é diferente do e-mail convidado."
     }
     assert _convite(db_session, admin).usado_em is None
-    assert (
-        db_session.scalar(select(func.count()).where(Usuario.empresa_id == admin.empresa_id)) == 1
-    )
+    assert db_session.scalar(select(func.count()).where(Usuario.conta_id == admin.conta_id)) == 1
 
 
 def test_convite_usado_e_400(db_session, google, convidar):
@@ -161,7 +159,7 @@ def test_convite_vencido_e_400(db_session, google, admin, convidar):
     token = convidar(email)
     db_session.execute(
         update(Convite)
-        .where(Convite.empresa_id == admin.empresa_id)
+        .where(Convite.conta_id == admin.conta_id)
         .values(expira_em=func.now() - timedelta(minutes=1))
     )
     db_session.commit()

@@ -8,7 +8,7 @@ import subprocess
 import uuid
 
 import pytest
-from conftest import alembic_cli
+from conftest import REVISAO_ANTES_DAS_CONTAS, alembic_cli
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -41,7 +41,7 @@ def test_upgrade_cria_e_downgrade_remove(url_banco_descartavel):
     assert UNICO_ADMINISTRADOR not in indices
     assert tem_convites is False
 
-    alembic_cli(url, "upgrade", "head")
+    alembic_cli(url, "upgrade", REVISAO_ANTES_DAS_CONTAS)
     colunas, indices, tem_convites, indices_convites = _estado(url)
     assert {"administrador", "removido_em"} <= colunas
     assert indices[UNICO_ADMINISTRADOR]["unique"]
@@ -107,7 +107,7 @@ def test_backfill_torna_administrador_o_usuario_mais_antigo_de_cada_empresa(
             c_menor = _inserir_usuario(conn, empresa_c, "2026-09-07 10:00", id=uuid.UUID(int=1))
             c_maior = _inserir_usuario(conn, empresa_c, "2026-09-07 10:00", id=uuid.UUID(int=2))
 
-        alembic_cli(url, "upgrade", "head")
+        alembic_cli(url, "upgrade", REVISAO_ANTES_DAS_CONTAS)
 
         with engine.connect() as conn:
             administradores = dict(
@@ -127,8 +127,8 @@ def test_backfill_torna_administrador_o_usuario_mais_antigo_de_cada_empresa(
 
 @pytest.fixture
 def banco_migrado(url_banco_descartavel):
-    """Banco no head com uma empresa e o administrador dela."""
-    alembic_cli(url_banco_descartavel, "upgrade", "head")
+    """Banco na revisão anterior às contas (issue #133) com uma empresa e o administrador dela."""
+    alembic_cli(url_banco_descartavel, "upgrade", REVISAO_ANTES_DAS_CONTAS)
     engine = create_engine(url_banco_descartavel)
     with engine.begin() as conn:
         empresa_id = _inserir_empresa(conn, "12345678000199")

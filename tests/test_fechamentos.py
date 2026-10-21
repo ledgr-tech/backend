@@ -10,6 +10,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
+from conftest import cabecalhos, empresa_unica
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -29,11 +30,11 @@ def conta(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancament
 
     def _nova():
         usuario = criar_usuario()
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
-        headers = {"Authorization": f"Bearer {token}"}
+        empresa_id = empresa_unica(db_session, usuario.conta_id)
+        headers = cabecalhos(gerar_token(usuario.conta_id, usuario_id=usuario.id), empresa_id)
 
         def extrato(origem, itens, periodo=SETEMBRO):
-            novo = criar_extrato_da_empresa(usuario.empresa_id, origem)
+            novo = criar_extrato_da_empresa(empresa_id, origem)
             inserir_lancamentos(novo, list(itens))
             novo.periodo_inicio, novo.periodo_fim = periodo if periodo else (None, None)
             db_session.commit()
@@ -84,6 +85,7 @@ def conta(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancament
 
         return SimpleNamespace(
             usuario=usuario,
+            empresa_id=empresa_id,
             headers=headers,
             extrato=extrato,
             conciliar=conciliar,
@@ -365,7 +367,7 @@ def _espera_ate_soltar(chave, *funcoes):
 def test_conciliar_e_decidir_esperam_a_trava_exclusiva_do_mes(conta):
     c = conta()
     banco, sistema = c.par([("10.00", "a"), ("20.00", "b")], [("10.00", "a")])
-    chave = chave_do_mes(c.usuario.empresa_id, "2026-09")
+    chave = chave_do_mes(c.empresa_id, "2026-09")
 
     (conciliacao,) = _espera_ate_soltar(chave, lambda: c.conciliar(banco, sistema))
     (decisao,) = _espera_ate_soltar(chave, lambda: c.decidir(banco, "20.00", "conferida"))
@@ -378,7 +380,7 @@ def test_decisao_e_rodada_nova_esperam_a_trava_do_extrato_do_banco(conta):
     c = conta()
     banco, sistema = c.par([("10.00", "a"), ("20.00", "b")], [("10.00", "a")])
     v2 = c.extrato("sistema", [("10.00", "a")])
-    chave = chave_do_extrato_banco(c.usuario.empresa_id, banco.id)
+    chave = chave_do_extrato_banco(c.empresa_id, banco.id)
 
     rodada, decisao = _espera_ate_soltar(
         chave,

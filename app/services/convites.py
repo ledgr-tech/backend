@@ -1,4 +1,4 @@
-"""Regras do convite compartilhadas entre as rotas do administrador
+"""Regras do convite compartilhadas entre as rotas do admin
 (app/api/equipe.py) e as públicas (app/api/convites.py), issue #69, ADR-015.
 """
 

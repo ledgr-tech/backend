@@ -14,12 +14,13 @@ import uuid
 
 import pytest
 from conftest import SENHA_USUARIO_TESTE as SENHA
+from conftest import apagar_contas_por_cnpj, empresa_unica
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.me import LIMITE_DESATIVACAO_CONTA_POR_USUARIO
 from app.core.auth import LOGIN_RECENTE_SEGUNDOS
-from app.models import Configuracao, Convite, DecisaoLinha, Empresa, Usuario
+from app.models import Conta, Convite, DecisaoLinha, Empresa, Usuario
 from app.models.usuario import DOMINIO_EMAIL_REMOVIDO
 from app.services.usuarios import remover_usuario
 from main import app
@@ -34,7 +35,7 @@ CONVITE_INVALIDO = {"detail": "Convite inválido ou expirado. Peça um novo conv
 def cabecalho_de(gerar_token):
     def _cabecalho(usuario, auth_time=None) -> dict[str, str]:
         extra = {} if auth_time is None else {"auth_time": auth_time}
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id, **extra)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, **extra)
         return {"Authorization": f"Bearer {token}"}
 
     return _cabecalho
@@ -55,17 +56,11 @@ def _login(email: str, senha: str = SENHA):
 
 @pytest.fixture
 def limpar_cadastro(db_session):
-    """Apaga a empresa e o usuário que um `/register` do teste criou."""
+    """Apaga a conta, a empresa e o usuário que um `/register` do teste criou."""
     cnpjs: list[str] = []
     yield cnpjs.append
     db_session.rollback()
-    for cnpj in cnpjs:
-        empresa_id = db_session.scalar(select(Empresa.id).where(Empresa.cnpj == cnpj))
-        if empresa_id is None:
-            continue
-        db_session.query(Usuario).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(Empresa).filter_by(id=empresa_id).delete()
+    apagar_contas_por_cnpj(db_session, cnpjs)
     db_session.commit()
 
 
@@ -179,13 +174,13 @@ def test_login_recente_e_de_cinco_minutos():
 
 def test_administrador_com_outro_usuario_ativo_e_409(db_session, criar_usuario, cabecalho_de):
     admin = criar_usuario()
-    convidado = criar_usuario(empresa_id=admin.empresa_id)
+    convidado = criar_usuario(conta_id=admin.conta_id)
 
     response = _desativar(cabecalho_de(admin), {"senha_atual": SENHA})
 
     assert response.status_code == 409
     assert response.json() == {
-        "detail": "Remova os outros usuários da empresa antes de desativar a sua conta."
+        "detail": "Remova os outros usuários da conta antes de desativar a sua conta."
     }
     assert _recarregar(db_session, admin).removido_em is None
     assert _recarregar(db_session, convidado).removido_em is None
@@ -195,7 +190,7 @@ def test_administrador_com_convite_pendente_e_outro_usuario_nao_perde_o_convite(
     db_session, provedor, criar_usuario, cabecalho_de
 ):
     admin = criar_usuario()
-    criar_usuario(empresa_id=admin.empresa_id)
+    criar_usuario(conta_id=admin.conta_id)
     assert (
         client.post(
             "/empresa/convites", json={"email": "novo@teste.com"}, headers=cabecalho_de(admin)
@@ -206,23 +201,22 @@ def test_administrador_com_convite_pendente_e_outro_usuario_nao_perde_o_convite(
     assert _desativar(cabecalho_de(admin), {"senha_atual": SENHA}).status_code == 409
 
     db_session.expire_all()
-    convite = db_session.scalars(
-        select(Convite).where(Convite.empresa_id == admin.empresa_id)
-    ).one()
+    convite = db_session.scalars(select(Convite).where(Convite.conta_id == admin.conta_id)).one()
     assert convite.cancelado_em is None
 
 
 def test_administrador_sozinho_desativa_e_a_empresa_fica(db_session, criar_usuario, cabecalho_de):
     admin = criar_usuario()
-    remover_usuario(db_session, criar_usuario(empresa_id=admin.empresa_id))
+    remover_usuario(db_session, criar_usuario(conta_id=admin.conta_id))
     db_session.commit()
 
     response = _desativar(cabecalho_de(admin), {"senha_atual": SENHA})
 
     assert response.status_code == 204
     assert _recarregar(db_session, admin).removido_em is not None
-    # Os dados da empresa só saem pelo script (scripts/excluir_empresa.py).
-    assert db_session.get(Empresa, admin.empresa_id) is not None
+    # Os dados da conta só saem pelo script (scripts/excluir_empresa.py).
+    assert db_session.get(Conta, admin.conta_id) is not None
+    assert db_session.get(Empresa, empresa_unica(db_session, admin.conta_id)) is not None
 
 
 def test_desativacao_cancela_os_convites_pendentes_de_quem_saiu(
@@ -255,11 +249,12 @@ def test_convidado_desativa_e_as_decisoes_continuam_com_o_nome(
     db_session, criar_usuario, cabecalho_de, criar_extrato_da_empresa
 ):
     admin = criar_usuario()
-    convidado = criar_usuario(empresa_id=admin.empresa_id, nome="Bruno Convidado")
-    banco = criar_extrato_da_empresa(admin.empresa_id, "banco")
-    sistema = criar_extrato_da_empresa(admin.empresa_id, "sistema")
+    convidado = criar_usuario(conta_id=admin.conta_id, nome="Bruno Convidado")
+    empresa_id = empresa_unica(db_session, admin.conta_id)
+    banco = criar_extrato_da_empresa(empresa_id, "banco")
+    sistema = criar_extrato_da_empresa(empresa_id, "sistema")
     decisao = DecisaoLinha(
-        empresa_id=admin.empresa_id,
+        empresa_id=empresa_id,
         extrato_banco_id=banco.id,
         chave="c" * 64,
         tipo="conferida",
@@ -291,7 +286,7 @@ def test_aviso_vai_para_o_email_antigo_depois_da_desativacao(
     db_session, provedor, criar_usuario, cabecalho_de
 ):
     admin = criar_usuario(nome="Ana Administradora")
-    convidado = criar_usuario(empresa_id=admin.empresa_id, nome="Bruno Convidado")
+    convidado = criar_usuario(conta_id=admin.conta_id, nome="Bruno Convidado")
     email = convidado.email
 
     assert _desativar(cabecalho_de(convidado), {"senha_atual": SENHA}).status_code == 204
@@ -348,8 +343,8 @@ def test_rate_limit_por_usuario(db_session, criar_usuario, cabecalho_de):
 def test_logs_nao_tem_email_nem_nome(db_session, provedor, criar_usuario, cabecalho_de, caplog):
     caplog.set_level(logging.DEBUG)
     admin = criar_usuario(nome="Ana Administradora")
-    convidado = criar_usuario(empresa_id=admin.empresa_id, nome="Bruno Convidado")
-    google = criar_usuario(com_senha=False, empresa_id=admin.empresa_id, nome="Carla Google")
+    convidado = criar_usuario(conta_id=admin.conta_id, nome="Bruno Convidado")
+    google = criar_usuario(com_senha=False, conta_id=admin.conta_id, nome="Carla Google")
     emails = [admin.email, convidado.email, google.email]
 
     _desativar(cabecalho_de(convidado), {"senha_atual": "errada"})

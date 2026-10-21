@@ -14,11 +14,11 @@ import uuid
 
 import httpx
 import pytest
-from conftest import FRONTEND_URL_TESTE
+from conftest import FRONTEND_URL_TESTE, apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.models import Configuracao, Empresa, Usuario
+from app.models import Usuario
 from app.services.email import ProvedorEmailIndisponivel, ProvedorResend
 from app.services.email.envio import obter_provedor_email_dependencia
 from app.services.email.mensagens import mensagem_boas_vindas
@@ -53,12 +53,8 @@ def cadastro(db_session, gerar_cnpj):
     yield _payload
 
     db_session.rollback()
-    empresa_ids = [e.id for e in db_session.query(Empresa.id).filter(Empresa.cnpj.in_(cnpjs))]
     db_session.query(Usuario).filter(Usuario.email.in_(emails)).delete(synchronize_session=False)
-    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
+    apagar_contas_por_cnpj(db_session, cnpjs)
     db_session.commit()
 
 
@@ -143,7 +139,7 @@ def test_com_email_desligado_o_cadastro_responde_igual_e_nada_e_enviado(
 
     assert response.status_code == 201
     corpo = response.json()
-    assert set(corpo) == {"id", "empresa_id", "nome", "email"}
+    assert set(corpo) == {"id", "conta_id", "empresa_id", "nome", "email"}
     assert (corpo["nome"], corpo["email"]) == (NOME, dados["email"])
     assert "boas_vindas resultado=desabilitado" in caplog.text
     assert "resultado=enviado" not in caplog.text

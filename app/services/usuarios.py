@@ -33,7 +33,7 @@ def email_de_removido(usuario: Usuario) -> str:
 def remover_usuario(db: Session, usuario: Usuario) -> None:
     """Aplica a remoção na sessão, sem commit: quem chama decide a transação
     (e deve ter carregado o usuário com `FOR UPDATE`). Não confere permissão
-    nem se é o administrador; isso é regra de quem chama."""
+    nem se é o admin da conta; isso é regra de quem chama."""
     usuario.removido_em = func.now()
     usuario.email = email_de_removido(usuario)
     usuario.senha_hash = None

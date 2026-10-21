@@ -56,6 +56,10 @@ CONSTRAINT_TOLERANCIA = "ck_configuracoes_tolerancia_dias_nao_negativa"
 # mínimo (CHECK >= 0); o máximo é regra de produto da API (issue #85), então
 # nenhuma linha restaurada deveria passar de 5 — é isso que o ensaio confere.
 TOLERANCIA_DIAS_MAXIMA = 5
+# Tabela que a própria migração cria já preenchida, e a tabela de onde vêm as
+# linhas: `contas` nasce com uma conta por empresa (issue #133, ADR-019). As
+# outras tabelas novas continuam tendo de nascer vazias.
+TABELAS_PREENCHIDAS_PELA_MIGRACAO = {"contas": "empresas"}
 SEGUNDOS_ESPERA_BANCO = 90
 CAMINHO_DUMP_NO_CONTAINER = "/tmp/ensaio.dump"
 
@@ -327,10 +331,15 @@ def conferir(antes: Inventario, depois: Inventario, heads: list[str]) -> list[Co
     )
 
     novas = [t for t in depois.contagens if t not in antes.contagens]
-    novas_com_linha = [t for t in novas if depois.contagens[t] != 0]
+
+    def _esperado(tabela: str) -> int:
+        origem = TABELAS_PREENCHIDAS_PELA_MIGRACAO.get(tabela)
+        return antes.contagens.get(origem, 0) if origem else 0
+
+    novas_com_linha = [t for t in novas if depois.contagens[t] != _esperado(t)]
     conferencias.append(
         Conferencia(
-            "tabelas criadas pela migração estão vazias",
+            "tabelas criadas pela migração estão vazias (`contas`: uma por empresa)",
             not novas_com_linha,
             (
                 ("novas: " + ", ".join(novas) if novas else "a migração não criou tabela")

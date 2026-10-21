@@ -35,7 +35,7 @@ ROTAS_DE_LEITURA = ["/extratos", "/me"]
 @pytest.fixture
 def token_de(gerar_token):
     def _token(usuario: Usuario, **kwargs) -> dict[str, str]:
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id, **kwargs)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, **kwargs)
         return {"Authorization": f"Bearer {token}"}
 
     return _token
@@ -182,7 +182,7 @@ def test_troca_de_um_usuario_nao_derruba_o_outro_da_mesma_empresa(
     db_session, criar_usuario, token_de
 ):
     usuario = criar_usuario()
-    colega = criar_usuario(empresa_id=usuario.empresa_id)
+    colega = criar_usuario(conta_id=usuario.conta_id)
     do_colega = token_de(colega, auth_time=_login_ha(60))
 
     client.post(
@@ -202,7 +202,7 @@ def test_login_logo_depois_da_troca_no_mesmo_segundo_passa(db_session, criar_usu
     troca = datetime(2026, 10, 13, 15, 0, 0, 200_000, tzinfo=UTC)
 
     def cabecalho(auth_time: int) -> dict[str, str]:
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id, auth_time=auth_time)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, auth_time=auth_time)
         return {"Authorization": f"Bearer {token}"}
 
     with freeze_time(troca) as relogio:
@@ -274,7 +274,7 @@ def test_removido_perde_o_acesso_nas_rotas_que_so_leem_a_empresa(
     db_session, criar_usuario, token_de
 ):
     admin = criar_usuario()
-    convidado = criar_usuario(empresa_id=admin.empresa_id)
+    convidado = criar_usuario(conta_id=admin.conta_id)
     cabecalho = token_de(convidado, auth_time=_login_ha(60))
     assert client.get("/extratos", headers=cabecalho).status_code == 200
 
@@ -301,7 +301,7 @@ def test_removido_perde_o_acesso_nas_rotas_que_so_leem_a_empresa(
 
 def test_remocao_grava_o_encerramento_das_sessoes(db_session, criar_usuario, token_de):
     admin = criar_usuario()
-    convidado = criar_usuario(empresa_id=admin.empresa_id)
+    convidado = criar_usuario(conta_id=admin.conta_id)
 
     client.delete(f"/empresa/usuarios/{convidado.id}", headers=token_de(admin))
 

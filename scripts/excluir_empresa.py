@@ -1,21 +1,30 @@
-"""Exclusão dos dados de uma empresa, a pedido (issue #68, ADR-017).
+"""Exclusão dos dados de uma conta, a pedido (issues #68 e #133, ADR-017).
+
+O nome do arquivo ficou do tempo em que a empresa era o tenant. Desde a issue
+#133 (ADR-019), o tenant é a CONTA, e este script exclui a conta inteira: os
+usuários, os convites, todas as empresas clientes dela e os dados de cada uma.
+Excluir uma empresa cliente sozinha fica para a issue #138.
 
 Não há rota para isto: a pessoa desativa a própria conta pelo `DELETE /me`,
-e a exclusão da empresa é um processo interno, feito pelo time depois de
+e a exclusão dos dados é um processo interno, feito pelo time depois de
 confirmar o pedido. O roteiro de quem atende está em
 07-tecnico/processo-de-exclusao-de-dados.md, no vault.
 
 Uso, no diretório do backend:
 
-    ./venv/bin/python scripts/excluir_empresa.py --empresa-id <uuid>
-    ./venv/bin/python scripts/excluir_empresa.py --empresa-id <uuid> --executar
+    ./venv/bin/python scripts/excluir_empresa.py --conta-id <uuid>
+    ./venv/bin/python scripts/excluir_empresa.py --conta-id <uuid> --executar
 
-Sem `--executar`, só simula: mostra a razão social, o CNPJ mascarado e
-quantas linhas sairiam de cada tabela, sem apagar nada. Com `--executar`,
-pede quem está executando e o CNPJ completo da empresa, digitados, e apaga
-tudo numa transação só, na ordem de `ETAPAS`. Na mesma transação grava uma
-linha em `registros_exclusao`, com as contagens e o sha256 do CNPJ, sem nada
-dos dados apagados. Se qualquer passo falhar, nada é apagado.
+`--empresa-id` continua aceito, como nome antigo de `--conta-id`: a migração
+da #133 deu a cada conta o id da empresa de que veio.
+
+Sem `--executar`, só simula: mostra a razão social e o CNPJ mascarado da
+conta, quantas empresas clientes ela tem e quantas linhas sairiam de cada
+tabela, sem apagar nada. Com `--executar`, pede quem está executando e o CNPJ
+completo da conta, digitados, e apaga tudo numa transação só, na ordem de
+`ETAPAS`. Na mesma transação grava uma linha em `registros_exclusao`, com o id
+da conta, as contagens e o sha256 do CNPJ da conta, sem nada dos dados
+apagados. Se qualquer passo falhar, nada é apagado.
 
 Banco: o de DATABASE_URL, que em máquina de desenvolvimento aponta para o
 Railway pelo `.env`. Por isso, por padrão, a guarda de
@@ -52,6 +61,7 @@ from app.models import (
     Base,
     Conciliacao,
     Configuracao,
+    Conta,
     Convite,
     DecisaoLinha,
     Empresa,
@@ -67,32 +77,43 @@ from app.models import (
 )
 
 
-def _extratos_da_empresa(empresa_id: uuid.UUID):
-    return select(Extrato.id).where(Extrato.empresa_id == empresa_id)
+def _empresas_da_conta(conta_id: uuid.UUID):
+    return select(Empresa.id).where(Empresa.conta_id == conta_id)
 
 
-def _usuarios_da_empresa(empresa_id: uuid.UUID):
-    return select(Usuario.id).where(Usuario.empresa_id == empresa_id)
+def _extratos_da_conta(conta_id: uuid.UUID):
+    return select(Extrato.id).where(Extrato.empresa_id.in_(_empresas_da_conta(conta_id)))
+
+
+def _usuarios_da_conta(conta_id: uuid.UUID):
+    return select(Usuario.id).where(Usuario.conta_id == conta_id)
+
+
+def _da_conta(coluna_empresa_id):
+    """Condição das tabelas por `empresa_id`: as linhas de todas as empresas da conta."""
+    return lambda c: coluna_empresa_id.in_(_empresas_da_conta(c))
 
 
 # Ordem das FKs, conferida nos models: quem aponta para uma tabela sai antes
-# dela. `linhas_invalidas` e `tokens_email` não têm `empresa_id` e saem pelo
-# extrato e pelo usuário. tests/test_excluir_empresa.py confere a ordem e que
-# nenhuma tabela ligada à empresa ficou de fora.
+# dela. As tabelas por `empresa_id` saem pelas empresas da conta;
+# `linhas_invalidas` e `tokens_email` saem pelo extrato e pelo usuário.
+# tests/test_excluir_empresa.py confere a ordem e que nenhuma tabela ligada à
+# conta ou às empresas dela ficou de fora.
 ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...] = (
-    (ExplicacaoDivergencia, lambda e: ExplicacaoDivergencia.empresa_id == e),
-    (DecisaoLinha, lambda e: DecisaoLinha.empresa_id == e),
-    (Conciliacao, lambda e: Conciliacao.empresa_id == e),
-    (ExecucaoConciliacao, lambda e: ExecucaoConciliacao.empresa_id == e),
-    (Fechamento, lambda e: Fechamento.empresa_id == e),
-    (LinhaInvalida, lambda e: LinhaInvalida.extrato_id.in_(_extratos_da_empresa(e))),
-    (Lancamento, lambda e: Lancamento.empresa_id == e),
-    (Extrato, lambda e: Extrato.empresa_id == e),
-    (Convite, lambda e: Convite.empresa_id == e),
-    (TokenEmail, lambda e: TokenEmail.usuario_id.in_(_usuarios_da_empresa(e))),
-    (Configuracao, lambda e: Configuracao.empresa_id == e),
-    (Usuario, lambda e: Usuario.empresa_id == e),
-    (Empresa, lambda e: Empresa.id == e),
+    (ExplicacaoDivergencia, _da_conta(ExplicacaoDivergencia.empresa_id)),
+    (DecisaoLinha, _da_conta(DecisaoLinha.empresa_id)),
+    (Conciliacao, _da_conta(Conciliacao.empresa_id)),
+    (ExecucaoConciliacao, _da_conta(ExecucaoConciliacao.empresa_id)),
+    (Fechamento, _da_conta(Fechamento.empresa_id)),
+    (LinhaInvalida, lambda c: LinhaInvalida.extrato_id.in_(_extratos_da_conta(c))),
+    (Lancamento, _da_conta(Lancamento.empresa_id)),
+    (Extrato, _da_conta(Extrato.empresa_id)),
+    (Convite, lambda c: Convite.conta_id == c),
+    (TokenEmail, lambda c: TokenEmail.usuario_id.in_(_usuarios_da_conta(c))),
+    (Configuracao, _da_conta(Configuracao.empresa_id)),
+    (Usuario, lambda c: Usuario.conta_id == c),
+    (Empresa, lambda c: Empresa.conta_id == c),
+    (Conta, lambda c: Conta.id == c),
 )
 
 # Tem `empresa_id`, mas fica: é o registro da própria exclusão.
@@ -103,11 +124,11 @@ def tabelas_apagadas() -> list[str]:
     return [model.__tablename__ for model, _ in ETAPAS]
 
 
-def contar_linhas(db: Session, empresa_id: uuid.UUID) -> dict[str, int]:
-    """Quantas linhas de cada tabela são da empresa, na ordem de `ETAPAS`."""
+def contar_linhas(db: Session, conta_id: uuid.UUID) -> dict[str, int]:
+    """Quantas linhas de cada tabela são da conta, na ordem de `ETAPAS`."""
     return {
         model.__tablename__: db.scalar(
-            select(func.count()).select_from(model).where(cond(empresa_id))
+            select(func.count()).select_from(model).where(cond(conta_id))
         )
         for model, cond in ETAPAS
     }
@@ -128,29 +149,31 @@ class Exclusao:
     contagens: dict[str, int]
 
 
-def excluir_empresa(db: Session, empresa_id: uuid.UUID, executado_por: str) -> Exclusao:
-    """Apaga a empresa e tudo o que é dela, grava o registro e faz o commit,
-    numa transação só. Qualquer erro desfaz tudo e sobe.
+def excluir_conta(db: Session, conta_id: uuid.UUID, executado_por: str) -> Exclusao:
+    """Apaga a conta, as empresas dela e tudo o que é delas, grava o registro e
+    faz o commit, numa transação só. Qualquer erro desfaz tudo e sobe.
 
-    A linha da empresa é travada antes de tudo: as tabelas com `empresa_id`
-    têm FK para ela, então um upload ou cadastro simultâneo espera e depois
-    falha pela FK, em vez de deixar linha órfã."""
+    A linha da conta e as das empresas dela são travadas antes de tudo: as
+    tabelas com `empresa_id` têm FK para a empresa, e usuários, convites e
+    empresas, para a conta, então um upload ou cadastro simultâneo espera e
+    depois falha pela FK, em vez de deixar linha órfã."""
     try:
-        empresa = db.scalar(select(Empresa).where(Empresa.id == empresa_id).with_for_update())
-        if empresa is None:
-            raise LookupError("empresa não encontrada")
-        cnpj = empresa.cnpj
+        conta = db.scalar(select(Conta).where(Conta.id == conta_id).with_for_update())
+        if conta is None:
+            raise LookupError("conta não encontrada")
+        db.execute(select(Empresa.id).where(Empresa.conta_id == conta_id).with_for_update())
+        cnpj = conta.cnpj
         contagens = {}
         for model, cond in ETAPAS:
             resultado = db.execute(
-                delete(model).where(cond(empresa_id)),
+                delete(model).where(cond(conta_id)),
                 execution_options={"synchronize_session": False},
             )
             contagens[model.__tablename__] = resultado.rowcount
         registro_id = uuid.uuid4()
         registro = RegistroExclusao(
             id=registro_id,
-            empresa_id=empresa_id,
+            empresa_id=conta_id,
             cnpj_sha256=hash_cnpj(cnpj),
             contagens=contagens,
             executado_por=executado_por,
@@ -170,10 +193,18 @@ def _criar_engine(url: str) -> Engine:
 def _argumentos(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Exclui os dados de uma empresa, a pedido (issue #68). Sem --executar, " "só simula."
+            "Exclui uma conta, com todas as empresas clientes e os dados delas, a pedido "
+            "(issues #68 e #133). Sem --executar, só simula."
         )
     )
-    parser.add_argument("--empresa-id", required=True, type=uuid.UUID, help="id da empresa")
+    parser.add_argument(
+        "--conta-id",
+        "--empresa-id",
+        dest="conta_id",
+        required=True,
+        type=uuid.UUID,
+        help="id da conta (--empresa-id é o nome antigo)",
+    )
     parser.add_argument(
         "--executar",
         action="store_true",
@@ -221,26 +252,25 @@ def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input)
     engine = _criar_engine(url)
     try:
         with Session(engine) as db:
-            empresa = db.get(Empresa, args.empresa_id)
-            if empresa is None:
-                print(
-                    f"Empresa {args.empresa_id} não encontrada em {destino.host}/{destino.database}."
-                )
+            conta = db.get(Conta, args.conta_id)
+            if conta is None:
+                print(f"Conta {args.conta_id} não encontrada em {destino.host}/{destino.database}.")
                 return 1
-            razao_social, cnpj = empresa.razao_social, empresa.cnpj
+            razao_social, cnpj = conta.razao_social, conta.cnpj
             usuarios_ativos = db.scalar(
                 select(func.count()).where(
-                    Usuario.empresa_id == empresa.id, Usuario.removido_em.is_(None)
+                    Usuario.conta_id == conta.id, Usuario.removido_em.is_(None)
                 )
             )
-            contagens = contar_linhas(db, empresa.id)
+            contagens = contar_linhas(db, conta.id)
             # Fecha a leitura antes de esperar o que for digitado.
             db.rollback()
 
             print(f"Banco:           {destino.host}/{destino.database}")
-            print(f"Empresa:         {args.empresa_id}")
+            print(f"Conta:           {args.conta_id}")
             print(f"Razão social:    {razao_social}")
             print(f"CNPJ:            {cnpj_mascarado(cnpj)}")
+            print(f"Empresas:        {contagens[Empresa.__tablename__]}")
             print(f"Usuários ativos: {usuarios_ativos}")
             print("Linhas que seriam apagadas:" if not args.executar else "Linhas a apagar:")
             _imprimir_contagens(contagens)
@@ -255,13 +285,13 @@ def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input)
                 return 1
             # Com ou sem máscara, numérico ou alfanumérico (antes, tirar tudo
             # que não era dígito apagava as letras do CNPJ alfanumérico).
-            digitado = normalizar_cnpj(perguntar("Digite o CNPJ completo da empresa: "))
+            digitado = normalizar_cnpj(perguntar("Digite o CNPJ completo da conta: "))
             if digitado != cnpj:
                 print("O CNPJ digitado não confere. Nada foi apagado.")
                 return 1
 
-            exclusao = excluir_empresa(db, args.empresa_id, executado_por)
-            print("Empresa excluída. Linhas apagadas:")
+            exclusao = excluir_conta(db, args.conta_id, executado_por)
+            print("Conta excluída. Linhas apagadas:")
             _imprimir_contagens(exclusao.contagens)
             print(f"Registro da exclusão: {exclusao.registro_id}")
             return 0

@@ -1,4 +1,4 @@
-"""Plano da empresa e período de teste (issue #122): a situação no `GET /me`,
+"""Plano da conta e período de teste (issues #122 e #133): a situação no `GET /me`,
 o `POST /empresa/plano` e a virada do teste no relógio congelado. O bloqueio
 do `POST /conciliacoes` está em tests/test_plano_bloqueio.py.
 
@@ -15,8 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core import auth
-from app.core.plano import DURACAO_TESTE, PLANOS, situacao_da_empresa
-from app.models import Empresa
+from app.core.plano import DURACAO_TESTE, PLANOS, situacao_da_conta
+from app.models import Conta
 from main import app
 
 client = TestClient(app)
@@ -36,14 +36,14 @@ def cabecalho(gerar_token):
 
     def _cabecalho(usuario) -> dict[str, str]:
         auth_time = math.floor(auth._agora().timestamp())
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id, auth_time=auth_time)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, auth_time=auth_time)
         return {"Authorization": f"Bearer {token}"}
 
     return _cabecalho
 
 
-def _definir_situacao(db_session, empresa_id, situacao: str) -> None:
-    empresa = db_session.get(Empresa, empresa_id)
+def _definir_situacao(db_session, conta_id, situacao: str) -> None:
+    empresa = db_session.get(Conta, conta_id)
     agora = auth._agora()
     empresa.assinatura_ativa = situacao == "ativo"
     if situacao in ("sem_plano", "ativo"):
@@ -65,9 +65,9 @@ def _escolher(headers, plano):
     return client.post("/empresa/plano", headers=headers, json={"plano": plano})
 
 
-def _empresa(db_session, empresa_id) -> Empresa:
+def _empresa(db_session, conta_id) -> Conta:
     db_session.expire_all()
-    return db_session.get(Empresa, empresa_id)
+    return db_session.get(Conta, conta_id)
 
 
 # --- a regra -------------------------------------------------------------------
@@ -88,10 +88,10 @@ def test_planos_escolhiveis_sao_os_tres_sem_volume():
         (True, "padrao", T0 - timedelta(days=1), "ativo"),
     ],
 )
-def test_situacao_da_empresa(ativa, plano, fim, esperada):
+def test_situacao_da_conta(ativa, plano, fim, esperada):
     empresa = SimpleNamespace(assinatura_ativa=ativa, plano=plano, teste_termina_em=fim)
 
-    assert situacao_da_empresa(empresa, T0) == esperada
+    assert situacao_da_conta(empresa, T0) == esperada
 
 
 # --- GET /me ------------------------------------------------------------------------
@@ -112,9 +112,9 @@ def test_me_devolve_a_situacao_para_o_administrador_e_o_convidado(
     db_session, criar_usuario, cabecalho, situacao
 ):
     administrador = criar_usuario()
-    convidado = criar_usuario(empresa_id=administrador.empresa_id, nome="Bruno Convidado")
-    _definir_situacao(db_session, administrador.empresa_id, situacao)
-    empresa = _empresa(db_session, administrador.empresa_id)
+    convidado = criar_usuario(conta_id=administrador.conta_id, nome="Bruno Convidado")
+    _definir_situacao(db_session, administrador.conta_id, situacao)
+    empresa = _empresa(db_session, administrador.conta_id)
 
     for usuario in (administrador, convidado):
         corpo = _me(cabecalho(usuario))
@@ -147,7 +147,7 @@ def test_primeira_escolha_comeca_o_teste_de_14_dias(
         "teste_termina_em": fim.isoformat().replace("+00:00", "Z"),
         "situacao": "teste",
     }
-    empresa = _empresa(db_session, administrador.empresa_id)
+    empresa = _empresa(db_session, administrador.conta_id)
     assert (empresa.plano, empresa.teste_termina_em) == ("essencial", fim)
     assert _me(cabecalho(administrador))["situacao"] == "teste"
     assert "escolha_plano resultado=teste_iniciado" in caplog.text
@@ -164,7 +164,7 @@ def test_trocar_de_plano_nao_muda_o_fim_do_teste(db_session, criar_usuario, cabe
     assert resposta.status_code == 200
     assert resposta.json()["plano"] == "avancado"
     assert resposta.json()["situacao"] == "teste"
-    empresa = _empresa(db_session, administrador.empresa_id)
+    empresa = _empresa(db_session, administrador.conta_id)
     assert (empresa.plano, empresa.teste_termina_em) == ("avancado", T0 + DURACAO_TESTE)
 
 
@@ -172,13 +172,13 @@ def test_trocar_de_plano_com_o_teste_encerrado_nao_reabre_o_teste(
     db_session, criar_usuario, cabecalho
 ):
     administrador = criar_usuario()
-    _definir_situacao(db_session, administrador.empresa_id, "teste_encerrado")
-    fim = _empresa(db_session, administrador.empresa_id).teste_termina_em
+    _definir_situacao(db_session, administrador.conta_id, "teste_encerrado")
+    fim = _empresa(db_session, administrador.conta_id).teste_termina_em
 
     resposta = _escolher(cabecalho(administrador), "essencial")
 
     assert resposta.json()["situacao"] == "teste_encerrado"
-    assert _empresa(db_session, administrador.empresa_id).teste_termina_em == fim
+    assert _empresa(db_session, administrador.conta_id).teste_termina_em == fim
 
 
 def test_mesmo_plano_de_novo_nao_muda_nada(
@@ -188,14 +188,14 @@ def test_mesmo_plano_de_novo_nao_muda_nada(
     _congelar(monkeypatch, T0)
     administrador = criar_usuario()
     primeira = _escolher(cabecalho(administrador), "padrao").json()
-    antes = _empresa(db_session, administrador.empresa_id).atualizado_em
+    antes = _empresa(db_session, administrador.conta_id).atualizado_em
 
     _congelar(monkeypatch, T0 + timedelta(days=1))
     segunda = _escolher(cabecalho(administrador), "padrao")
 
     assert segunda.status_code == 200
     assert segunda.json() == primeira
-    empresa = _empresa(db_session, administrador.empresa_id)
+    empresa = _empresa(db_session, administrador.conta_id)
     assert (empresa.plano, empresa.teste_termina_em) == ("padrao", T0 + DURACAO_TESTE)
     assert empresa.atualizado_em == antes
     assert "escolha_plano resultado=mesmo_plano" in caplog.text
@@ -205,7 +205,7 @@ def test_com_assinatura_ativa_a_troca_vale_e_a_situacao_continua_ativo(
     db_session, criar_usuario, cabecalho
 ):
     administrador = criar_usuario()
-    _definir_situacao(db_session, administrador.empresa_id, "ativo")
+    _definir_situacao(db_session, administrador.conta_id, "ativo")
 
     primeira = _escolher(cabecalho(administrador), "essencial").json()
     troca = _escolher(cabecalho(administrador), "avancado").json()
@@ -227,18 +227,18 @@ def test_plano_fora_da_lista_da_422_no_campo(db_session, criar_usuario, cabecalh
 
     assert resposta.status_code == 422
     assert resposta.json()["detail"][0]["loc"] == ["body", "plano"]
-    assert _empresa(db_session, administrador.empresa_id).plano is None
+    assert _empresa(db_session, administrador.conta_id).plano is None
 
 
 def test_so_o_administrador_escolhe_o_plano(db_session, criar_usuario, cabecalho):
     administrador = criar_usuario()
-    convidado = criar_usuario(empresa_id=administrador.empresa_id, nome="Bruno Convidado")
+    convidado = criar_usuario(conta_id=administrador.conta_id, nome="Bruno Convidado")
 
     resposta = _escolher(cabecalho(convidado), "essencial")
 
     assert resposta.status_code == 403
-    assert resposta.json()["detail"] == "Só o administrador da empresa pode fazer isso."
-    assert _empresa(db_session, administrador.empresa_id).plano is None
+    assert resposta.json()["detail"] == "Só o admin da conta pode fazer isso."
+    assert _empresa(db_session, administrador.conta_id).plano is None
 
 
 def test_sem_token_da_401():

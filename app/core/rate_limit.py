@@ -2,7 +2,7 @@
 
 A chave padrão é o IP do cliente (`ip_do_cliente`). As rotas logadas limitam
 pelo token: as da própria conta por usuário (`chave_por_usuario`), o upload
-por empresa (`chave_por_empresa`).
+por conta (`chave_por_conta`, issue #133).
 
 O IP do cliente (issue #64) não é o da conexão: na Railway, toda requisição
 chega pelo proxy dela, e o limite viraria um só para o produto inteiro. Vale,
@@ -27,7 +27,7 @@ from fastapi import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from app.core.auth import ALGORITMO_JWT
+from app.core.auth import ALGORITMO_JWT, conta_id_do_claim
 from app.core.config import settings
 
 CABECALHO_IP_CLIENTE = "X-Ledgr-IP-Cliente"
@@ -61,8 +61,9 @@ def ip_do_cliente(request: Request) -> str:
 
 limiter = Limiter(key_func=ip_do_cliente)
 
-# Por empresa (o `empresa_id` do token), não por IP: o upload chega pelo
-# servidor do Next, com o IP da Vercel.
+# Por conta (o `conta_id` do token, ou o legado `empresa_id`), não por IP: o
+# upload chega pelo servidor do Next, com o IP da Vercel. Por conta, e não por
+# empresa cliente, desde a issue #133: trocar de empresa não multiplica o limite.
 LIMITE_UPLOAD = "10/minute"
 # O /login, o /register e o /senha/* são chamados pelo servidor do Next: o
 # limite por IP só separa os usuários quando o front repassa o IP do
@@ -91,8 +92,8 @@ LIMITE_DESATIVACAO_CONTA_POR_USUARIO = "5/minute"
 LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 
 
-def _claim_do_token(request: Request, nome: str) -> str | None:
-    """O claim do Bearer, só quando a assinatura confere.
+def _claims_do_token(request: Request) -> dict | None:
+    """Os claims do Bearer, só quando a assinatura confere.
 
     O slowapi só confere o limite depois das dependencies da rota, então o
     token já foi validado quando as chaves abaixo rodam. A assinatura é
@@ -102,25 +103,27 @@ def _claim_do_token(request: Request, nome: str) -> str | None:
     if esquema.lower() != "bearer" or not token or not settings.nextauth_secret.strip():
         return None
     try:
-        claims = jwt.decode(
+        return jwt.decode(
             token,
             settings.nextauth_secret,
             algorithms=[ALGORITMO_JWT],
-            options={"require": ["exp", nome]},
+            options={"require": ["exp"]},
         )
     except jwt.PyJWTError:
         return None
-    return str(claims[nome])
 
 
 def chave_por_usuario(request: Request) -> str:
     """O `sub` do token, quando a assinatura confere; senão, o IP do cliente."""
-    sub = _claim_do_token(request, "sub")
+    claims = _claims_do_token(request)
+    sub = claims.get("sub") if claims else None
     return f"usuario:{sub}" if sub else ip_do_cliente(request)
 
 
-def chave_por_empresa(request: Request) -> str:
-    """O `empresa_id` do token, quando a assinatura confere; senão, o IP do
+def chave_por_conta(request: Request) -> str:
+    """O id da conta do token (`conta_id` ou o legado `empresa_id`, pela mesma
+    regra de app/core/auth.py), quando a assinatura confere; senão, o IP do
     cliente."""
-    empresa_id = _claim_do_token(request, "empresa_id")
-    return f"empresa:{empresa_id}" if empresa_id else ip_do_cliente(request)
+    claims = _claims_do_token(request)
+    conta_id = conta_id_do_claim(claims) if claims else None
+    return f"conta:{conta_id}" if conta_id else ip_do_cliente(request)

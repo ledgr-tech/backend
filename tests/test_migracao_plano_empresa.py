@@ -68,8 +68,11 @@ def test_upgrade_cria_colunas_empresa_antiga_fica_sem_plano_e_downgrade_remove(
     alembic_cli(url, "downgrade", REVISAO_ANTERIOR)
     assert not COLUNAS & set(_colunas_empresas(url))
 
-    alembic_cli(url, "upgrade", "head")
+    alembic_cli(url, "upgrade", REVISAO)
     assert COLUNAS <= set(_colunas_empresas(url))
+    # Desde a issue #133, as colunas moram em `contas`.
+    alembic_cli(url, "upgrade", "head")
+    assert not COLUNAS & set(_colunas_empresas(url))
 
 
 @pytest.mark.parametrize(

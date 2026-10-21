@@ -1,5 +1,10 @@
-"""Testes de autenticação (issue #14): JWT HS256 com claim empresa_id,
+"""Testes de autenticação (issue #14): JWT HS256 com o claim do tenant,
 isolamento entre empresas (BOLA/IDOR) e rate limit do upload.
+
+Desde a issue #133 (ADR-019, vetor v3 do ADR-005), o claim é `conta_id`; o
+legado `empresa_id` continua aceito quando `conta_id` não vem, e os dois são
+lidos como o id da conta. Os dois juntos e diferentes: 401. As regras da
+empresa ativa (`X-Ledgr-Empresa`) estão em tests/test_empresa_ativa.py.
 
 Tokens gerados com pyjwt (fixture `gerar_token`), simulando o NextAuth.
 Desde a issue #75, cada token é de um usuário real (`usuario`), para o 401
@@ -9,9 +14,11 @@ de `auth_time` e de sessão encerrada estão em tests/test_revogacao_sessao.py.
 
 import io
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
+from conftest import SECRET_TESTE
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
@@ -48,28 +55,77 @@ def test_get_sem_authorization_retorna_401():
 
 def test_token_com_assinatura_invalida_retorna_401(usuario, gerar_token):
     token = gerar_token(
-        usuario.empresa_id, secret="outro-secret-com-32-bytes-ou-mais-ok", usuario_id=usuario.id
+        usuario.conta_id, secret="outro-secret-com-32-bytes-ou-mais-ok", usuario_id=usuario.id
     )
     assert _upload({"Authorization": f"Bearer {token}"}).status_code == 401
 
 
 def test_token_expirado_retorna_401(usuario, gerar_token):
-    token = gerar_token(usuario.empresa_id, expira_em=timedelta(seconds=-10), usuario_id=usuario.id)
+    token = gerar_token(usuario.conta_id, expira_em=timedelta(seconds=-10), usuario_id=usuario.id)
     assert _upload({"Authorization": f"Bearer {token}"}).status_code == 401
 
 
-def test_token_sem_empresa_id_retorna_401(usuario, gerar_token):
+def test_token_sem_conta_id_nem_empresa_id_retorna_401(usuario, gerar_token):
     token = gerar_token(None, usuario_id=usuario.id)
     assert _upload({"Authorization": f"Bearer {token}"}).status_code == 401
 
 
-def test_token_com_empresa_id_invalido_retorna_401(usuario, gerar_token):
-    token = gerar_token("nao-e-uuid", usuario_id=usuario.id)
+@pytest.mark.parametrize("claim", ["conta_id", "empresa_id"])
+def test_token_com_id_da_conta_invalido_retorna_401(usuario, gerar_token, claim):
+    token = gerar_token("nao-e-uuid", usuario_id=usuario.id, claim=claim)
     assert _upload({"Authorization": f"Bearer {token}"}).status_code == 401
 
 
+def _token(usuario, **tenant) -> dict[str, str]:
+    agora = datetime.now(UTC)
+    claims = {
+        "sub": str(usuario.id),
+        "email": "usuario@teste.com",
+        "iat": agora,
+        "exp": agora + timedelta(hours=1),
+        "auth_time": int(agora.timestamp()),
+        **{nome: str(valor) for nome, valor in tenant.items()},
+    }
+    return {"Authorization": f"Bearer {jwt.encode(claims, SECRET_TESTE, algorithm='HS256')}"}
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [["conta_id"], ["empresa_id"], ["conta_id", "empresa_id"]],
+    ids=["conta_id", "legado_empresa_id", "os_dois_iguais"],
+)
+def test_token_com_conta_id_ou_com_o_legado_e_aceito(db_session, usuario, claims):
+    """O front de antes da #133 manda `empresa_id` com o valor que o login
+    devolvia, que a migração fez virar o id da conta."""
+    headers = _token(usuario, **dict.fromkeys(claims, usuario.conta_id))
+
+    resposta = client.get("/me", headers=headers)
+
+    assert resposta.status_code == 200
+    assert resposta.json()["conta_id"] == str(usuario.conta_id)
+    assert _upload(headers).status_code == 201
+
+
+def test_token_com_conta_id_e_empresa_id_divergentes_retorna_401(
+    db_session, usuario, criar_usuario
+):
+    outra_conta = criar_usuario().conta_id
+
+    for conta_id, empresa_id in [(usuario.conta_id, outra_conta), (outra_conta, usuario.conta_id)]:
+        headers = _token(usuario, conta_id=conta_id, empresa_id=empresa_id)
+        assert client.get("/me", headers=headers).status_code == 401
+        assert _upload(headers).status_code == 401
+
+
+def test_legado_com_o_id_da_empresa_cliente_retorna_401(db_session, usuario):
+    """Só o id da conta vale no claim, nunca o de uma empresa cliente dela."""
+    (empresa,) = usuario.conta.empresas
+
+    assert client.get("/me", headers=_token(usuario, empresa_id=empresa.id)).status_code == 401
+
+
 def test_secret_vazio_falha_explicitamente_em_vez_de_validar(usuario, gerar_token, monkeypatch):
-    token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+    token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
     monkeypatch.setattr(settings, "nextauth_secret", "")
     with pytest.raises(RuntimeError, match="NEXTAUTH_SECRET"):
         TestClient(app).post(
@@ -80,7 +136,7 @@ def test_secret_vazio_falha_explicitamente_em_vez_de_validar(usuario, gerar_toke
         )
 
 
-def test_upload_usa_empresa_id_do_token(db_session, criar_empresa, auth_headers):
+def test_upload_usa_a_empresa_ativa(db_session, criar_empresa, auth_headers):
     empresa = criar_empresa()
 
     response = _upload(auth_headers(empresa.id))

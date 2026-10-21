@@ -6,8 +6,10 @@ o resultado em `conciliacoes` (ADR-007). `GET /conciliacoes/{extrato_id}`
 É síncrono de propósito (sem BackgroundTasks): o motor exato é só agrupamento
 em memória e um insert em lote, e a resposta já traz as contagens.
 
-Exige JWT (app/core/auth.py, ADR-003): o `empresa_id` vem do token. Extrato
-inexistente ou de outra empresa devolve 404 igual, sem confirmar a existência
+Exige JWT (app/core/auth.py, ADR-003): o `empresa_id` é o da empresa ativa
+(cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a issue
+#133). Extrato inexistente ou de outra empresa, inclusive de outra empresa da
+mesma conta, devolve 404 igual, sem confirmar a existência
 do ID (mitigação de BOLA/IDOR, mesmo padrão de app/api/extratos.py).
 
 Validações, nesta ordem: (a) os dois extratos existem e são da empresa do
@@ -86,9 +88,9 @@ from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
+from app.core.auth import EmpresaAtiva, obter_empresa_ativa, obter_empresa_id_ativa
 from app.core.database import get_db
-from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento, Usuario
+from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento
 from app.services import decisoes, saldo
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
@@ -161,9 +163,10 @@ def _obter_extrato_da_empresa(db: Session, extrato_id: uuid.UUID, empresa_id: uu
 )
 def criar_conciliacao(
     corpo: ConciliacaoRequest,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ConciliacaoResponse:
+    empresa_id = ativa.empresa.id
     extrato_banco = _obter_extrato_da_empresa(db, corpo.extrato_banco_id, empresa_id)
     extrato_sistema = _obter_extrato_da_empresa(db, corpo.extrato_sistema_id, empresa_id)
 
@@ -188,7 +191,7 @@ def criar_conciliacao(
             detail="Um dos extratos ainda não terminou de processar ou falhou.",
         )
 
-    motivo = motivo_do_bloqueio(db, empresa_id, corpo.extrato_banco_id)
+    motivo = motivo_do_bloqueio(db, ativa.empresa, corpo.extrato_banco_id)
     if motivo is not None:
         logger.info("conciliacao resultado=bloqueada_pelo_plano")
         raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail=motivo)
@@ -344,7 +347,7 @@ def _construir_consulta_itens(
 @router.get("/{extrato_id}", response_model=ConciliacaoListaResponse)
 def listar_conciliacoes(
     extrato_id: uuid.UUID,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -391,7 +394,7 @@ def listar_conciliacoes(
 @router.get("/{extrato_id}/exportar")
 def exportar_conciliacoes(
     extrato_id: uuid.UUID,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     status: StatusConciliacao | None = None,
     extrato_sistema_id: uuid.UUID | None = None,
@@ -472,10 +475,10 @@ def _linha_da_chave(
 def registrar_decisao(
     extrato_id: uuid.UUID,
     corpo: DecisaoRequest,
-    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> DecisaoResponse | None:
-    empresa_id = usuario.empresa_id
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
 
     # As travas (mês e extrato do banco) vêm ANTES da rodada: uma rodada nova

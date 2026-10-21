@@ -1,12 +1,18 @@
 """Rotas da própria conta de quem está logado (issue #66, ADR-012).
 
-`GET /me` devolve os dados da conta pro cabeçalho do front (issue #81): nome
-da empresa, CNPJ e os métodos de login. Desde a issue #69, também
-`administrador`: sem papéis (ADR-015), só quem cadastrou a empresa é
-administrador, e é ele quem convida e remove usuários. Desde a issue #122,
-também `plano`, `teste_termina_em` (em UTC) e `situacao` da empresa, para
-todos os usuários dela, convidados inclusive: a mesma conta do
-`POST /empresa/plano` (app/api/plano.py) e do bloqueio do `POST /conciliacoes`.
+`GET /me` devolve os dados da conta pro cabeçalho do front (issue #81) e os
+métodos de login. Desde a issue #133 (ADR-019), a conta é o tenant: vêm
+`conta_id`, o `papel` do usuário ('admin', 'gestor' ou 'analista'), a razão
+social e o CNPJ da conta, e `empresas`, as empresas clientes da conta (id,
+razão social e CNPJ), ordenadas pela razão social, para o seletor da empresa
+ativa. Ignora o cabeçalho `X-Ledgr-Empresa`. `plano`, `teste_termina_em` (em
+UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
+mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
+`POST /conciliacoes`.
+
+Obsoletos, mantidos até o front migrar: `empresa_id`, igual a `conta_id` (o
+valor que o front grava no token, que o backend lê como id da conta), e
+`administrador`, igual a `papel == "admin"` (issue #69, ADR-015).
 
 `POST /me/senha` troca a senha na hora, com a senha atual e a nova (mesma
 regra do cadastro). As regras vêm da issue:
@@ -38,8 +44,10 @@ exclusão dos dados da empresa não tem rota: é processo interno, a pedido
   recente, com `auth_time` de no máximo `LOGIN_RECENTE_SEGUNDOS` atrás
   (app/core/auth.py, mesmo relógio da #75). Senão, 409: o front pede o
   Google de novo e repete.
-- Administrador com outro usuário ativo na empresa: 409. Sozinho, pode
-  desativar; a empresa fica sem acesso, e os dados só saem pelo script.
+- Admin com outro usuário ativo na conta: 409. Sozinho, pode desativar; a
+  conta fica sem acesso, e os dados só saem pelo script. A conta tem sempre
+  um admin, e a transferência do papel (parte 2 da issue #133) é o caminho
+  para o admin sair com a equipe ficando.
 - Rate limit por usuário, como a troca de senha.
 
 A desativação é `remover_usuario` (app/services/usuarios.py): a linha fica
@@ -81,7 +89,8 @@ from app.core.rate_limit import (
     chave_por_usuario,
     limiter,
 )
-from app.models import Convite, Usuario
+from app.models import Convite, Empresa, Usuario
+from app.models.usuario import Papel
 from app.services.convites import condicoes_pendente
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
@@ -100,14 +109,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/me", tags=["conta"])
 
 
-class MeResponse(BaseModel):
+class EmpresaDaConta(BaseModel):
     id: uuid.UUID
-    empresa_id: uuid.UUID
-    nome: str
-    email: str
     razao_social: str
     cnpj: str
-    administrador: bool
+
+
+class MeResponse(BaseModel):
+    id: uuid.UUID
+    conta_id: uuid.UUID
+    empresa_id: uuid.UUID = Field(
+        description="Obsoleto: igual a `conta_id` (issue #133). Use `conta_id`.",
+        json_schema_extra={"deprecated": True},
+    )
+    nome: str
+    email: str
+    papel: Papel
+    administrador: bool = Field(
+        description='Obsoleto: igual a `papel == "admin"` (issue #133). Use `papel`.',
+        json_schema_extra={"deprecated": True},
+    )
+    razao_social: str
+    cnpj: str
+    empresas: list[EmpresaDaConta]
     metodos_login: list[str]
     plano: str | None
     teste_termina_em: datetime | None
@@ -128,18 +152,30 @@ def _metodos_login(usuario: Usuario) -> list[str]:
 def obter_dados_da_conta(
     request: Request,
     usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> MeResponse:
-    empresa = usuario.empresa  # única consulta extra; a dependency já carregou o usuário
+    conta = usuario.conta  # a dependency já carregou o usuário
+    empresas = db.scalars(
+        select(Empresa)
+        .where(Empresa.conta_id == conta.id)
+        .order_by(Empresa.razao_social, Empresa.id)
+    )
     return MeResponse(
         id=usuario.id,
-        empresa_id=usuario.empresa_id,
+        conta_id=conta.id,
+        empresa_id=conta.id,
         nome=usuario.nome,
         email=usuario.email,
-        razao_social=empresa.razao_social,
-        cnpj=empresa.cnpj,
-        administrador=usuario.administrador,
+        papel=usuario.papel,
+        administrador=usuario.papel == "admin",
+        razao_social=conta.razao_social,
+        cnpj=conta.cnpj,
+        empresas=[
+            EmpresaDaConta(id=empresa.id, razao_social=empresa.razao_social, cnpj=empresa.cnpj)
+            for empresa in empresas
+        ],
         metodos_login=_metodos_login(usuario),
-        **resposta_do_plano(empresa).model_dump(),
+        **resposta_do_plano(conta).model_dump(),
     )
 
 
@@ -194,7 +230,7 @@ def desativar_conta(
 ) -> None:
     usuario = sessao.usuario
     # FOR UPDATE: duas desativações, ou a desativação e a remoção pelo
-    # administrador, não passam as duas.
+    # admin, não passam as duas.
     db.refresh(usuario, with_for_update=True)
     if usuario.removido_em is not None:
         raise HTTPException(
@@ -227,9 +263,10 @@ def desativar_conta(
         .where(Convite.convidado_por_id == usuario.id, *condicoes_pendente())
         .values(cancelado_em=func.now())
     )
-    if usuario.administrador and db.scalar(
+    admin = usuario.papel == "admin"
+    if admin and db.scalar(
         select(func.count()).where(
-            Usuario.empresa_id == usuario.empresa_id,
+            Usuario.conta_id == usuario.conta_id,
             Usuario.removido_em.is_(None),
             Usuario.id != usuario.id,
         )
@@ -238,14 +275,14 @@ def desativar_conta(
         logger.info("desativacao_conta resultado=administrador_com_usuarios")
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
-            detail="Remova os outros usuários da empresa antes de desativar a sua conta.",
+            detail="Remova os outros usuários da conta antes de desativar a sua conta.",
         )
 
     # Antes da remoção, que troca o e-mail, e do commit, que expira o objeto.
     mensagem = mensagem_conta_desativada(
         para=usuario.email,
         nome=usuario.nome,
-        razao_social_sem_acesso=usuario.empresa.razao_social if usuario.administrador else None,
+        razao_social_sem_acesso=usuario.conta.razao_social if admin else None,
         chave_idempotencia=f"conta_desativada/{usuario.id}",
     )
     remover_usuario(db, usuario)

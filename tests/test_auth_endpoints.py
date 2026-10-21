@@ -7,11 +7,11 @@ import uuid
 
 import bcrypt
 import pytest
-from conftest import _gerar_cnpj_alfanumerico
+from conftest import _gerar_cnpj_alfanumerico, apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 
 from app.core.cnpj import normalizar
-from app.models import Configuracao, Empresa, Usuario
+from app.models import Conta, Usuario
 from main import app
 
 client = TestClient(app)
@@ -44,15 +44,8 @@ def cadastro(db_session, gerar_cnpj):
     yield _payload
 
     db_session.rollback()
-    empresa_ids = [e.id for e in db_session.query(Empresa.id).filter(Empresa.cnpj.in_(cnpjs)).all()]
     db_session.query(Usuario).filter(Usuario.email.in_(emails)).delete(synchronize_session=False)
-    db_session.query(Usuario).filter(Usuario.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
+    apagar_contas_por_cnpj(db_session, cnpjs)
     db_session.commit()
 
 
@@ -67,7 +60,7 @@ def _login(email: str, senha: str = SENHA):
 # --- cadastro -------------------------------------------------------------
 
 
-def test_cadastro_cria_empresa_configuracao_e_usuario(db_session, cadastro, gerar_cnpj):
+def test_cadastro_cria_conta_empresa_configuracao_e_admin(db_session, cadastro, gerar_cnpj):
     d = gerar_cnpj()
     dados = cadastro(cnpj=f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}")
 
@@ -75,14 +68,21 @@ def test_cadastro_cria_empresa_configuracao_e_usuario(db_session, cadastro, gera
 
     assert response.status_code == 201
     corpo = response.json()
-    assert set(corpo) == {"id", "empresa_id", "nome", "email"}
+    assert set(corpo) == {"id", "conta_id", "empresa_id", "nome", "email"}
     assert corpo["email"] == dados["email"]
+    # `empresa_id` obsoleto, com o valor da conta, até o front migrar (issue #133)
+    assert corpo["empresa_id"] == corpo["conta_id"]
 
     usuario = db_session.get(Usuario, uuid.UUID(corpo["id"]))
-    assert str(usuario.empresa_id) == corpo["empresa_id"]
-    assert usuario.administrador is True  # issue #69
-    assert usuario.empresa.cnpj == d
-    assert usuario.empresa.configuracao is not None
+    assert str(usuario.conta_id) == corpo["conta_id"]
+    assert usuario.papel == "admin"  # issues #69 e #133
+    conta = usuario.conta
+    assert (conta.cnpj, conta.razao_social) == (d, "Empresa de teste")
+    # A primeira empresa cliente tem o mesmo CNPJ e a mesma razão social.
+    (empresa,) = conta.empresas
+    assert (empresa.cnpj, empresa.razao_social) == (d, "Empresa de teste")
+    assert empresa.id != conta.id
+    assert empresa.configuracao is not None
 
 
 def test_cadastro_aceita_cnpj_alfanumerico_e_grava_em_maiusculas(db_session, cadastro):
@@ -91,8 +91,9 @@ def test_cadastro_aceita_cnpj_alfanumerico_e_grava_em_maiusculas(db_session, cad
     response = _registrar(cadastro(cnpj=cnpj.lower()))
 
     assert response.status_code == 201
-    empresa = db_session.get(Empresa, uuid.UUID(response.json()["empresa_id"]))
-    assert empresa.cnpj == cnpj
+    conta = db_session.get(Conta, uuid.UUID(response.json()["conta_id"]))
+    assert conta.cnpj == cnpj
+    assert [empresa.cnpj for empresa in conta.empresas] == [cnpj]
 
 
 def test_cadastro_guarda_senha_so_como_hash(db_session, cadastro):
@@ -122,6 +123,22 @@ def test_cadastro_com_cnpj_duplicado_retorna_409(cadastro):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "CNPJ já cadastrado."
+
+
+def test_cadastro_com_cnpj_de_empresa_cliente_de_outra_conta_e_aceito(
+    db_session, cadastro, criar_empresa
+):
+    """Issue #133: o CNPJ único no sistema é o da conta. O cliente de um
+    escritório continua podendo assinar o Ledgr sozinho."""
+    escritorio = criar_empresa("Escritório")
+    cliente = criar_empresa("Cliente", conta_id=escritorio.conta_id)
+
+    response = _registrar(cadastro(cnpj=cliente.cnpj))
+
+    assert response.status_code == 201
+    conta = db_session.get(Conta, uuid.UUID(response.json()["conta_id"]))
+    assert conta.cnpj == cliente.cnpj
+    assert conta.id != escritorio.conta_id
 
 
 @pytest.mark.parametrize("campo", ["nome", "email", "senha", "razao_social", "cnpj"])
@@ -242,7 +259,8 @@ def test_login_com_email_inexistente_responde_igual_senha_errada(db_session):
 def test_login_de_usuario_so_com_google_retorna_401(db_session, criar_empresa):
     empresa = criar_empresa()
     usuario = Usuario(
-        empresa_id=empresa.id,
+        conta_id=empresa.conta_id,
+        papel="admin",
         nome="Só Google",
         email=f"{uuid.uuid4().hex[:12]}@teste.com",
         google_sub=uuid.uuid4().hex,

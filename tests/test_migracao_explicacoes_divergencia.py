@@ -8,7 +8,7 @@ tests/test_migracao_execucoes_conciliacao.py.
 import uuid
 
 import pytest
-from conftest import alembic_cli
+from conftest import REVISAO_ANTES_DAS_CONTAS, alembic_cli
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -52,8 +52,8 @@ def test_upgrade_cria_e_downgrade_remove_a_tabela(url_banco_descartavel):
 
 @pytest.fixture
 def banco_migrado(url_banco_descartavel):
-    """Banco no head com uma empresa."""
-    alembic_cli(url_banco_descartavel, "upgrade", "head")
+    """Banco na revisão anterior às contas (issue #133) com uma empresa."""
+    alembic_cli(url_banco_descartavel, "upgrade", REVISAO_ANTES_DAS_CONTAS)
     engine = create_engine(url_banco_descartavel)
     empresa_id = uuid.uuid4()
     with engine.begin() as conn:
