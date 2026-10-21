@@ -15,8 +15,16 @@ a50915c). A versão 2 (issue #75) acrescenta o claim `auth_time`, igual ao
 acrescentado como descrito na nota de integração, e não pelo código do front,
 que ainda não mudou. O teste do front confirma quando a mudança entrar lá.
 
+A versão 3 (issue #133, ADR-019) troca o claim `empresa_id` por `conta_id`,
+com o mesmo valor: gerada do mesmo jeito, por uma cópia de leitura de
+lib/token.ts com a troca (registrado em `gerado_com`). O mesmo procedimento,
+sem a troca, reproduz o token da v2. A v2 fica em
+`tests/fixtures/contrato_jwt_v2.json`, para o caso do claim legado: o backend
+continua aceitando o `empresa_id` como id da conta até o front migrar.
+
 Desde a #75 a dependency carrega o usuário do `sub`, então todo teste que
 passa pela dependency usa a conta com os ids do vetor (`conta_do_vetor`).
+Desde a #133 o id do vetor é o da conta, e a empresa da conta tem id próprio.
 
 O relógio é congelado com freezegun (que congela `datetime.now` e `time.time`,
 os dois que o PyJWT usa, e o `datetime.now` que confere o `auth_time`), porque o
@@ -40,14 +48,16 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from freezegun import freeze_time
 
-from app.core.auth import DURACAO_SESSAO_SEGUNDOS, obter_empresa_id_autenticada
+from app.core.auth import DURACAO_SESSAO_SEGUNDOS, EmpresaAtiva, obter_empresa_ativa
 from app.core.config import settings
-from app.models import Empresa, Usuario
+from app.models import Conta, Empresa, Usuario
 from main import app
 
-VETOR = json.loads(
-    (Path(__file__).parent / "fixtures" / "contrato_jwt.json").read_text(encoding="utf-8")
-)
+FIXTURES = Path(__file__).parent / "fixtures"
+VETOR = json.loads((FIXTURES / "contrato_jwt.json").read_text(encoding="utf-8"))
+# A versão 2, com o claim legado `empresa_id` (issue #133).
+VETOR_V2 = json.loads((FIXTURES / "contrato_jwt_v2.json").read_text(encoding="utf-8"))
+EMPRESA_DA_CONTA = uuid.UUID("33333333-3333-4333-8333-333333333333")
 DENTRO_DA_VALIDADE = "2026-10-07T13:00:00Z"
 DEPOIS_DO_EXP = "2026-10-15T12:00:00Z"
 
@@ -57,9 +67,9 @@ app_minimo = FastAPI()
 
 @app_minimo.get("/empresa-do-token")
 def _empresa_do_token(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
 ) -> dict[str, str]:
-    return {"empresa_id": str(empresa_id)}
+    return {"conta_id": str(ativa.usuario.conta_id), "empresa_id": str(ativa.empresa.id)}
 
 
 cliente_minimo = TestClient(app_minimo)
@@ -83,8 +93,9 @@ def _empresa_do_token(token: str):
 # O arquivo do vetor
 
 
-def test_vetor_tem_os_campos_esperados_e_segredo_proprio():
-    assert set(VETOR) == {
+@pytest.mark.parametrize("vetor", [VETOR, VETOR_V2], ids=["v3", "v2"])
+def test_vetor_tem_os_campos_esperados_e_segredo_proprio(vetor):
+    assert set(vetor) == {
         "versao",
         "descricao",
         "gerado_com",
@@ -95,10 +106,24 @@ def test_vetor_tem_os_campos_esperados_e_segredo_proprio():
         "header",
         "payload",
     }
-    assert VETOR["versao"] == 2
-    assert set(VETOR["claims_entrada"]) == {"usuarioId", "empresaId", "email", "authTime"}
-    assert VETOR["segredo"] != SECRET_TESTE
-    assert VETOR["token"].count(".") == 2
+    assert vetor["segredo"] != SECRET_TESTE
+    assert vetor["token"].count(".") == 2
+
+
+def test_v3_troca_o_claim_e_mantem_o_resto_da_v2():
+    assert (VETOR["versao"], VETOR_V2["versao"]) == (3, 2)
+    assert set(VETOR["claims_entrada"]) == {"usuarioId", "contaId", "email", "authTime"}
+    assert set(VETOR_V2["claims_entrada"]) == {"usuarioId", "empresaId", "email", "authTime"}
+    assert VETOR["claims_entrada"]["contaId"] == VETOR_V2["claims_entrada"]["empresaId"]
+    assert set(VETOR["payload"]) == {"conta_id", "email", "auth_time", "sub", "iat", "exp"}
+    assert set(VETOR_V2["payload"]) == {"empresa_id", "email", "auth_time", "sub", "iat", "exp"}
+    assert VETOR["payload"]["conta_id"] == VETOR_V2["payload"]["empresa_id"]
+    sem_tenant = {k: v for k, v in VETOR["payload"].items() if k != "conta_id"}
+    assert sem_tenant == {k: v for k, v in VETOR_V2["payload"].items() if k != "empresa_id"}
+    assert (VETOR["segredo"], VETOR["instante_utc"]) == (
+        VETOR_V2["segredo"],
+        VETOR_V2["instante_utc"],
+    )
 
 
 # Formato do token
@@ -114,7 +139,7 @@ def test_header_e_payload_batem_com_o_vetor():
     )
     assert payload == VETOR["payload"]
     assert payload["sub"] == VETOR["claims_entrada"]["usuarioId"]
-    assert payload["empresa_id"] == VETOR["claims_entrada"]["empresaId"]
+    assert payload["conta_id"] == VETOR["claims_entrada"]["contaId"]
     assert payload["email"] == VETOR["claims_entrada"]["email"]
     assert payload["auth_time"] == VETOR["claims_entrada"]["authTime"]
     # o vetor é de um login: a sessão começa quando o token é assinado
@@ -128,31 +153,36 @@ def test_header_e_payload_batem_com_o_vetor():
 def _apagar_conta_do_vetor(db_session) -> None:
     db_session.rollback()
     db_session.query(Usuario).filter_by(id=uuid.UUID(VETOR["payload"]["sub"])).delete()
-    db_session.query(Empresa).filter_by(id=uuid.UUID(VETOR["payload"]["empresa_id"])).delete()
+    db_session.query(Empresa).filter_by(id=EMPRESA_DA_CONTA).delete()
+    db_session.query(Conta).filter_by(id=uuid.UUID(VETOR["payload"]["conta_id"])).delete()
     db_session.commit()
 
 
 @pytest.fixture
 def conta_do_vetor(db_session, gerar_cnpj):
-    """Empresa e usuário com os ids FIXOS do vetor. Como os ids são fixos,
-    apaga uma sobra de execução interrompida antes de criar, e apaga de novo
-    no fim; não toca em nenhuma outra linha."""
+    """Conta, empresa e usuário com os ids FIXOS do vetor (a empresa com id
+    próprio, diferente do da conta). Como os ids são fixos, apaga uma sobra de
+    execução interrompida antes de criar, e apaga de novo no fim; não toca em
+    nenhuma outra linha."""
     _apagar_conta_do_vetor(db_session)
+    cnpj = gerar_cnpj()
+    conta = Conta(
+        id=uuid.UUID(VETOR["payload"]["conta_id"]), razao_social="Conta do contrato", cnpj=cnpj
+    )
     empresa = Empresa(
-        id=uuid.UUID(VETOR["payload"]["empresa_id"]),
-        razao_social="Empresa do contrato",
-        cnpj=gerar_cnpj(),
+        id=EMPRESA_DA_CONTA, conta_id=conta.id, razao_social="Conta do contrato", cnpj=cnpj
     )
     usuario = Usuario(
         id=uuid.UUID(VETOR["payload"]["sub"]),
-        empresa_id=empresa.id,
+        conta_id=conta.id,
         nome="Contrato JWT",
         email=VETOR["payload"]["email"],
         senha_hash="hash-qualquer",
+        papel="admin",
     )
-    db_session.add(empresa)
+    db_session.add(conta)
     db_session.commit()
-    db_session.add(usuario)
+    db_session.add_all([empresa, usuario])
     db_session.commit()
     try:
         yield usuario
@@ -163,12 +193,41 @@ def conta_do_vetor(db_session, gerar_cnpj):
 # A dependency das rotas aceita o token do front
 
 
+ESPERADO = {"conta_id": VETOR["payload"]["conta_id"], "empresa_id": str(EMPRESA_DA_CONTA)}
+
+
 @freeze_time(DENTRO_DA_VALIDADE)
 def test_dependency_aceita_o_token_do_front(conta_do_vetor, segredo_do_vetor):
     resposta = _empresa_do_token(VETOR["token"])
 
     assert resposta.status_code == 200
-    assert resposta.json() == {"empresa_id": VETOR["payload"]["empresa_id"]}
+    assert resposta.json() == ESPERADO
+
+
+@freeze_time(DENTRO_DA_VALIDADE)
+def test_dependency_aceita_o_token_da_v2_com_o_claim_legado(conta_do_vetor, segredo_do_vetor):
+    """O token do front de antes da #133: `empresa_id` é lido como o id da
+    conta, e a conta de uma empresa só dispensa `X-Ledgr-Empresa`."""
+    resposta = _empresa_do_token(VETOR_V2["token"])
+
+    assert resposta.status_code == 200
+    assert resposta.json() == ESPERADO
+
+
+@freeze_time(DENTRO_DA_VALIDADE)
+def test_conta_id_e_empresa_id_divergentes_da_401(conta_do_vetor, segredo_do_vetor):
+    claims = {**VETOR["payload"], "empresa_id": str(EMPRESA_DA_CONTA)}
+    token = jwt.encode(claims, VETOR["segredo"], algorithm="HS256")
+
+    assert _empresa_do_token(token).status_code == 401
+
+
+@freeze_time(DENTRO_DA_VALIDADE)
+def test_conta_id_e_empresa_id_iguais_passam(conta_do_vetor, segredo_do_vetor):
+    claims = {**VETOR["payload"], "empresa_id": VETOR["payload"]["conta_id"]}
+    token = jwt.encode(claims, VETOR["segredo"], algorithm="HS256")
+
+    assert _empresa_do_token(token).json() == ESPERADO
 
 
 @freeze_time(DEPOIS_DO_EXP)
@@ -195,8 +254,8 @@ def test_payload_adulterado_da_401(conta_do_vetor, segredo_do_vetor):
 
 
 @freeze_time(DENTRO_DA_VALIDADE)
-def test_token_sem_empresa_id_da_401(conta_do_vetor, segredo_do_vetor):
-    claims = {k: v for k, v in VETOR["payload"].items() if k != "empresa_id"}
+def test_token_sem_conta_id_nem_empresa_id_da_401(conta_do_vetor, segredo_do_vetor):
+    claims = {k: v for k, v in VETOR["payload"].items() if k != "conta_id"}
     token = jwt.encode(claims, VETOR["segredo"], algorithm="HS256")
 
     assert _empresa_do_token(token).status_code == 401
@@ -221,5 +280,6 @@ def test_get_me_aceita_o_token_do_front(conta_do_vetor, segredo_do_vetor):
     assert resposta.status_code == 200
     corpo = resposta.json()
     assert corpo["id"] == VETOR["payload"]["sub"]
-    assert corpo["empresa_id"] == VETOR["payload"]["empresa_id"]
+    assert corpo["conta_id"] == corpo["empresa_id"] == VETOR["payload"]["conta_id"]
     assert corpo["email"] == VETOR["payload"]["email"]
+    assert [empresa["id"] for empresa in corpo["empresas"]] == [str(EMPRESA_DA_CONTA)]
