@@ -204,10 +204,14 @@ def test_fluxo_conferir_justificar_e_desfazer(cenario):
 
     item = _linha(_itens(cenario, sistema), valor_banco="20.00")
     assert item["decisao"]["tipo"] == "justificada"
+    # Com a aprovação desligada (o padrão, issue #132), a justificativa já
+    # nasce aprovada, em nome de quem justificou.
+    assert item["decisao"]["situacao"] == "aprovada"
     assert [e["tipo"] for e in item["eventos"]] == [
         "conferida",
         "conferencia_desfeita",
         "justificada",
+        "justificativa_aprovada",
     ]
     momentos = [datetime.fromisoformat(e["em"]) for e in item["eventos"]]
     assert momentos == sorted(momentos)
@@ -216,7 +220,7 @@ def test_fluxo_conferir_justificar_e_desfazer(cenario):
     assert _decidir(cenario, chave, "justificativa_desfeita").json() is None
     item = _linha(_itens(cenario, sistema), valor_banco="20.00")
     assert item["decisao"] is None
-    assert len(item["eventos"]) == 4
+    assert len(item["eventos"]) == 5
 
 
 @pytest.mark.parametrize("texto", [None, "", "   "])

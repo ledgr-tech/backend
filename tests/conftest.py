@@ -132,6 +132,9 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # Bloqueio da conciliação pelo plano (issue #122): desligado, como em
     # produção até o gateway; quem testa o bloqueio liga no próprio teste.
     monkeypatch.setattr(settings, "plano_bloqueio_habilitado", False)
+    # Aprovação de justificativas (issue #132): desligada, como em produção
+    # até o front aprovar; quem testa a aprovação liga no próprio teste.
+    monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
 
 
 @pytest.fixture(autouse=True)
