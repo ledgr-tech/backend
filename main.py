@@ -8,6 +8,7 @@ from app.api.auth import router as auth_router
 from app.api.conciliacoes import router as conciliacoes_router
 from app.api.convites import router as convites_router
 from app.api.empresa import router as empresa_router
+from app.api.empresas import router as empresas_router
 from app.api.equipe import router as equipe_router
 from app.api.execucoes import router as execucoes_router
 from app.api.explicacoes import router as explicacoes_router
@@ -50,6 +51,7 @@ app.include_router(auth_router)
 app.include_router(senha_router)
 app.include_router(me_router)
 app.include_router(empresa_router)
+app.include_router(empresas_router)
 app.include_router(equipe_router)
 app.include_router(plano_router)
 app.include_router(convites_router)
