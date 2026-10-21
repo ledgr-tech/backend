@@ -1,6 +1,8 @@
 """Testes do convite de usuário (issue #69, ADR-015): `POST`, `GET` e `DELETE`
 /empresa/convites, do administrador, e `POST /convites/consultar` e
-`/convites/aceitar`, públicas.
+`/convites/aceitar`, públicas. A matriz de papéis do convite (issue #133:
+admin convida gestor ou analista, gestor só analista) está em
+tests/test_equipe_papeis.py.
 
 O provedor de e-mail é o falso do conftest (fixture `provedor`): nenhum teste
 chama o Resend. O `TestClient` roda as `BackgroundTasks` antes de devolver a
@@ -89,8 +91,9 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
 
     assert response.status_code == 201
     corpo = response.json()
-    assert set(corpo) == {"id", "email", "criado_em", "expira_em"}
+    assert set(corpo) == {"id", "email", "papel", "criado_em", "expira_em"}
     assert corpo["email"] == email
+    assert corpo["papel"] == "analista"  # o padrão (issue #133)
     expira_em = datetime.fromisoformat(corpo["expira_em"])
     assert expira_em - datetime.now(UTC) > timedelta(days=6, hours=23)
     assert expira_em - datetime.now(UTC) <= timedelta(days=7)
@@ -108,6 +111,7 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
     assert consulta.json() == {
         "email": email,
         "razao_social": admin.conta.razao_social,
+        "papel": "analista",
         "expira_em": corpo["expira_em"],
     }
 
@@ -311,12 +315,11 @@ def test_convidar_email_invalido_e_422(db_session, provedor, admin, cabecalho_de
         ("delete", "/empresa/convites/{convite_id}"),
     ],
 )
-@pytest.mark.parametrize("papel", ["gestor", "analista"])
-def test_quem_nao_e_admin_recebe_403(
-    db_session, provedor, admin, criar_usuario, cabecalho_de, metodo, caminho, papel
+def test_analista_recebe_403(
+    db_session, provedor, admin, criar_usuario, cabecalho_de, metodo, caminho
 ):
     convite_id = _convidar(cabecalho_de(admin), _email_novo()).json()["id"]
-    convidado = criar_usuario(conta_id=admin.conta_id, papel=papel)
+    convidado = criar_usuario(conta_id=admin.conta_id, papel="analista")
 
     response = client.request(
         metodo,
@@ -326,7 +329,7 @@ def test_quem_nao_e_admin_recebe_403(
     )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Só o admin da conta pode fazer isso."}
+    assert response.json() == {"detail": "Só o admin ou o gestor da conta podem fazer isso."}
     assert len(_convites_da_conta(db_session, admin.conta_id)) == 1
     assert _convites_da_conta(db_session, admin.conta_id)[0].cancelado_em is None
 
@@ -356,7 +359,7 @@ def test_lista_so_os_convites_pendentes_da_propria_empresa(
     assert response.status_code == 200
     (item,) = response.json()["itens"]
     assert item["email"] == email_a
-    assert set(item) == {"id", "email", "criado_em", "expira_em"}
+    assert set(item) == {"id", "email", "papel", "criado_em", "expira_em"}
 
 
 def test_cancelar_convite_de_outra_empresa_e_404_como_inexistente(

@@ -64,6 +64,11 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "plano": None,
         "teste_termina_em": None,
         "situacao": "sem_plano",
+        # Sem limite configurado (issue #133): só o uso.
+        "limites": {
+            "empresas": {"usadas": 1, "maximo": None},
+            "usuarios": {"usados": 1, "maximo": None},
+        },
     }
     assert len(corpo["cnpj"]) == 14
     assert not corpo["cnpj"].isalpha()  # sem máscara (sem pontuação)
