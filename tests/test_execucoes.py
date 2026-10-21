@@ -473,8 +473,16 @@ def test_check_total_diferente_da_soma_das_categorias_levanta_integrity_error(
 
 
 def test_justificadas_conta_so_divergentes_justificadas_e_zero_nas_nao_atuais(
-    db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancamentos, gerar_token
+    db_session,
+    criar_usuario,
+    criar_extrato_da_empresa,
+    inserir_lancamentos,
+    gerar_token,
+    monkeypatch,
 ):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", True)
     usuario = criar_usuario()
     headers = {"Authorization": f"Bearer {gerar_token(usuario.conta_id, usuario_id=usuario.id)}"}
     banco = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "banco")
@@ -515,18 +523,27 @@ def test_justificadas_conta_so_divergentes_justificadas_e_zero_nas_nao_atuais(
     decidir("20.00", "justificada", "motivo")
     decidir("30.00", "conferida")  # conferida não conta
 
+    # Desde a issue #132, a justificativa nasce aguardando aprovação.
     (item,) = itens_execucoes()
     contagens = item["contagens"]
-    assert contagens["justificadas"] == 1
+    assert (contagens["justificadas"], contagens["aguardando_aprovacao"]) == (0, 1)
+
+    decidir("20.00", "justificativa_aprovada")
+    (item,) = itens_execucoes()
+    contagens = item["contagens"]
+    assert (contagens["justificadas"], contagens["aguardando_aprovacao"]) == (1, 0)
     assert contagens["total"] == 3
     assert contagens["total"] == sum(
-        valor for chave, valor in contagens.items() if chave not in ("total", "justificadas")
+        valor
+        for chave, valor in contagens.items()
+        if chave not in ("total", "justificadas", "aguardando_aprovacao")
     )
 
     conciliar()  # a execução anterior deixa de ser atual
     atual, anterior = itens_execucoes()
     assert atual["atual"] is True and atual["contagens"]["justificadas"] == 1
     assert anterior["atual"] is False and anterior["contagens"]["justificadas"] == 0
+    assert anterior["contagens"]["aguardando_aprovacao"] == 0
 
     decidir("20.00", "justificativa_desfeita")
     assert itens_execucoes()[0]["contagens"]["justificadas"] == 0

@@ -14,6 +14,7 @@ from app.api.execucoes import router as execucoes_router
 from app.api.explicacoes import router as explicacoes_router
 from app.api.extratos import router as extratos_router
 from app.api.fechamentos import router as fechamentos_router
+from app.api.justificativas import router as justificativas_router
 from app.api.me import router as me_router
 from app.api.plano import router as plano_router
 from app.api.senha import router as senha_router
@@ -59,6 +60,7 @@ app.include_router(extratos_router)
 app.include_router(conciliacoes_router)
 app.include_router(execucoes_router)
 app.include_router(fechamentos_router)
+app.include_router(justificativas_router)
 app.include_router(explicacoes_router)
 
 

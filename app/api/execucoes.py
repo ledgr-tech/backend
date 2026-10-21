@@ -51,7 +51,11 @@ de cada par, então não há como saber o que estava justificado naquela época.
 Fica FORA de `total`, que continua a soma das sete categorias (não é coluna,
 o CHECK da tabela não muda). Custo: duas consultas a mais por página, não
 por item — as linhas divergentes dos pares atuais da página e os eventos dos
-extratos do banco envolvidos (`contar_justificadas`).
+extratos do banco envolvidos (`contar_justificativas`).
+
+Desde a issue #132, `justificadas` conta só as justificativas APROVADAS, e
+`contagens.aguardando_aprovacao` conta as que aguardam aprovação, com a mesma
+regra (0 nas execuções com `atual: false`). Também fica fora de `total`.
 
 Nunca loga descrição, valor nem nome de arquivo (mesma regra de
 app/services/matching.py).
@@ -71,7 +75,7 @@ from sqlalchemy.orm import Session, aliased
 from app.core.auth import obter_empresa_id_ativa
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
-from app.services.decisoes import contar_justificadas
+from app.services.decisoes import contar_justificativas
 from app.services.execucoes import calcular_percentual_acerto
 
 router = APIRouter(prefix="/execucoes", tags=["execucoes"])
@@ -98,6 +102,18 @@ class ContagensResponse(BaseModel):
     divergente_valor: int
     divergente_data: int
     justificadas: int
+    aguardando_aprovacao: int
+
+
+def _contagem_de_justificativas(justificativas: dict, linha) -> dict[str, int]:
+    """Aprovadas e aguardando aprovação do par, só na execução atual."""
+    contagem = justificativas.get((linha.extrato_banco_id, linha.extrato_sistema_id))
+    if linha.rn != 1 or contagem is None:
+        return {"justificadas": 0, "aguardando_aprovacao": 0}
+    return {
+        "justificadas": contagem.aprovadas,
+        "aguardando_aprovacao": contagem.aguardando_aprovacao,
+    }
 
 
 class ItemExecucaoResponse(BaseModel):
@@ -191,7 +207,7 @@ def listar_execucoes(
     )
     linhas = db.execute(consulta).all()
     total = db.scalar(select(func.count()).select_from(ExecucaoConciliacao).where(*filtros))
-    justificadas = contar_justificadas(
+    justificativas = contar_justificativas(
         db,
         empresa_id,
         {(linha.extrato_banco_id, linha.extrato_sistema_id) for linha in linhas if linha.rn == 1},
@@ -208,11 +224,7 @@ def listar_execucoes(
             tolerancia_dias=linha.tolerancia_dias,
             contagens=ContagensResponse(
                 **{categoria: getattr(linha, categoria) for categoria in CATEGORIAS_CONTAGEM},
-                justificadas=(
-                    justificadas.get((linha.extrato_banco_id, linha.extrato_sistema_id), 0)
-                    if linha.rn == 1
-                    else 0
-                ),
+                **_contagem_de_justificativas(justificativas, linha),
             ),
             percentual_acerto=calcular_percentual_acerto(
                 linha.match_exato, linha.match_tolerancia, linha.total

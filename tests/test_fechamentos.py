@@ -130,6 +130,7 @@ def test_fechar_mes_pronto(conta):
     assert resumo["contagens"]["total"] == 2
     assert resumo["contagens"]["match_exato"] == 1
     assert resumo["justificadas"] == 1
+    assert resumo["aguardando_aprovacao"] == 0
     assert resumo["pendentes"] == 0
     assert resumo["linhas_nao_lidas"] == 0
     assert resumo["valor_em_aberto"] == "0.00"
