@@ -226,5 +226,6 @@ def test_listagem_soma_os_saldos_numa_consulta_so(
 
     pequena, cheia = selects(5), selects(50)
 
-    # usuário do token, itens, total e a soma agrupada da página: sem N+1
-    assert pequena == cheia == 4
+    # usuário do token, empresa ativa (issue #133), itens, total e a soma
+    # agrupada da página: sem N+1
+    assert pequena == cheia == 5

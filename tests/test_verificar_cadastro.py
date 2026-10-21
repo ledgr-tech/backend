@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
 
 from app.core.database import engine
-from app.models import Empresa, Usuario
+from app.models import Conta, Empresa, Usuario
 from main import app
 
 client = TestClient(app)
@@ -37,7 +37,7 @@ def _email_livre() -> str:
 def _cnpj_livre(db_session) -> str:
     while True:
         cnpj = _gerar_cnpj()
-        if db_session.scalar(select(Empresa.id).where(Empresa.cnpj == cnpj)) is None:
+        if db_session.scalar(select(Conta.id).where(Conta.cnpj == cnpj)) is None:
             return cnpj
 
 
@@ -47,9 +47,9 @@ def _com_mascara(cnpj: str) -> str:
 
 @pytest.fixture
 def em_uso(db_session, criar_usuario):
-    """Um usuário cadastrado: (e-mail, CNPJ da empresa dele)."""
+    """Um usuário cadastrado: (e-mail, CNPJ da conta dele)."""
     usuario = criar_usuario()
-    return usuario.email, db_session.get(Empresa, usuario.empresa_id).cnpj
+    return usuario.email, db_session.get(Conta, usuario.conta_id).cnpj
 
 
 def test_email_e_cnpj_livres(db_session):
@@ -149,6 +149,7 @@ def test_nao_cria_nenhuma_linha(db_session, em_uso):
         return (
             db_session.scalar(select(func.count()).select_from(Usuario)),
             db_session.scalar(select(func.count()).select_from(Empresa)),
+            db_session.scalar(select(func.count()).select_from(Conta)),
         )
 
     antes = _contagem()
@@ -182,4 +183,4 @@ def test_as_duas_consultas_rodam_sempre(db_session, em_uso, email_em_uso, cnpj_e
         **NAO_VERIFICADO,
     }
     assert len([c for c in consultas if "FROM usuarios" in c]) == 1
-    assert len([c for c in consultas if "FROM empresas" in c]) == 1
+    assert len([c for c in consultas if "FROM contas" in c]) == 1

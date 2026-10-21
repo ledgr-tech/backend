@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from conftest import empresa_unica
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
@@ -475,9 +476,9 @@ def test_justificadas_conta_so_divergentes_justificadas_e_zero_nas_nao_atuais(
     db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancamentos, gerar_token
 ):
     usuario = criar_usuario()
-    headers = {"Authorization": f"Bearer {gerar_token(usuario.empresa_id, usuario_id=usuario.id)}"}
-    banco = criar_extrato_da_empresa(usuario.empresa_id, "banco")
-    sistema = criar_extrato_da_empresa(usuario.empresa_id, "sistema")
+    headers = {"Authorization": f"Bearer {gerar_token(usuario.conta_id, usuario_id=usuario.id)}"}
+    banco = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "banco")
+    sistema = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "sistema")
     inserir_lancamentos(banco, [("10.00", "a"), ("20.00", "b"), ("30.00", "c")], date(2026, 9, 5))
     inserir_lancamentos(sistema, [("10.00", "a")], date(2026, 9, 5))
 

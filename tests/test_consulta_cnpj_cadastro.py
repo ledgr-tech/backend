@@ -10,12 +10,12 @@ import uuid
 
 import httpx
 import pytest
-from conftest import _gerar_cnpj, _gerar_cnpj_alfanumerico
+from conftest import _gerar_cnpj, _gerar_cnpj_alfanumerico, apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 from test_consulta_cnpj import NAO_ENCONTRADO_BRASILAPI, corpo_brasilapi
 
 from app.core.database import engine
-from app.models import Configuracao, Empresa, Usuario
+from app.models import Empresa
 from app.services.consulta_cnpj import ConsultaBrasilAPI, obter_consulta_cnpj_dependencia
 from main import app
 
@@ -87,14 +87,7 @@ def cadastrar(db_session, google):
     yield _cadastrar
 
     db_session.rollback()
-    empresa_ids = [e.id for e in db_session.query(Empresa.id).filter(Empresa.cnpj.in_(cnpjs))]
-    db_session.query(Usuario).filter(Usuario.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
+    apagar_contas_por_cnpj(db_session, cnpjs)
     db_session.commit()
 
 

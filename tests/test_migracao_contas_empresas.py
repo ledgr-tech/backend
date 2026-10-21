@@ -123,9 +123,10 @@ def test_upgrade_cria_conta_com_o_mesmo_id_e_downgrade_desfaz(url_banco_descarta
     }
     assert not {"plano", "teste_termina_em", "assinatura_ativa"} & _colunas(url, "empresas")
 
-    usuarios = dict(
-        ((u.id, (u.conta_id, u.papel)) for u in _executar(url, "SELECT id, conta_id, papel FROM usuarios"))
-    )
+    usuarios = {
+        u.id: (u.conta_id, u.papel)
+        for u in _executar(url, "SELECT id, conta_id, papel FROM usuarios")
+    }
     assert usuarios == {
         ids["admin1"]: (ids["e1"], "admin"),
         ids["convidado"]: (ids["e1"], "gestor"),
@@ -146,10 +147,10 @@ def test_upgrade_cria_conta_com_o_mesmo_id_e_downgrade_desfaz(url_banco_descarta
     )[0]
     assert (empresa.plano, empresa.assinatura_ativa) == ("padrao", True)
     assert empresa.teste_termina_em is not None
-    usuarios = dict(
-        (u.id, (u.empresa_id, u.administrador))
+    usuarios = {
+        u.id: (u.empresa_id, u.administrador)
         for u in _executar(url, "SELECT id, empresa_id, administrador FROM usuarios")
-    )
+    }
     assert usuarios == {
         ids["admin1"]: (ids["e1"], True),
         ids["convidado"]: (ids["e1"], False),

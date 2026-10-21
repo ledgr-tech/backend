@@ -8,7 +8,7 @@ Mesmo esquema de banco descartável de tests/test_migracao_ocorrencia_lancamento
 import uuid
 
 import pytest
-from conftest import alembic_cli
+from conftest import REVISAO_ANTES_DAS_CONTAS, alembic_cli
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -132,7 +132,7 @@ def test_backfill_preenche_min_e_max_e_deixa_null_sem_lancamento(url_banco_desca
 
 def test_check_recusa_periodo_invertido_e_periodo_pela_metade(url_banco_descartavel):
     url = url_banco_descartavel
-    alembic_cli(url, "upgrade", "head")
+    alembic_cli(url, "upgrade", REVISAO_ANTES_DAS_CONTAS)
 
     engine = create_engine(url)
     try:

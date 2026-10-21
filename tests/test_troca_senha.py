@@ -28,7 +28,7 @@ LIMITE = int(LIMITE_TROCA_SENHA_POR_USUARIO.split("/")[0])
 @pytest.fixture
 def cabecalho_de(gerar_token):
     def _cabecalho(usuario, empresa_id=None) -> dict[str, str]:
-        token = gerar_token(empresa_id or usuario.empresa_id, usuario_id=usuario.id)
+        token = gerar_token(empresa_id or usuario.conta_id, usuario_id=usuario.id)
         return {"Authorization": f"Bearer {token}"}
 
     return _cabecalho

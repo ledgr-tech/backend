@@ -33,7 +33,7 @@ CONVITE_INVALIDO = {"detail": "Convite inválido ou expirado. Peça um novo conv
 @pytest.fixture
 def cabecalho_de(gerar_token):
     def _cabecalho(usuario) -> dict[str, str]:
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
         return {"Authorization": f"Bearer {token}"}
 
     return _cabecalho
@@ -72,9 +72,9 @@ def _convidar_e_pegar_token(cabecalho, provedor, email: str) -> str:
     return _token_do_link(provedor.enviadas[-1])
 
 
-def _convites_da_empresa(db_session, empresa_id) -> list[Convite]:
+def _convites_da_conta(db_session, conta_id) -> list[Convite]:
     db_session.expire_all()
-    return list(db_session.scalars(select(Convite).where(Convite.empresa_id == empresa_id)))
+    return list(db_session.scalars(select(Convite).where(Convite.conta_id == conta_id)))
 
 
 # --- fluxo completo ------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
     (mensagem,) = provedor.enviadas
     assert mensagem.para == email
     assert mensagem.chave_idempotencia == f"convite/{corpo['id']}"
-    assert admin.empresa.razao_social in mensagem.texto
+    assert admin.conta.razao_social in mensagem.texto
     assert "Ana Administradora" in mensagem.texto
     token = _token_do_link(mensagem)
     assert len(token) >= 43
@@ -107,15 +107,15 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
     assert consulta.status_code == 200
     assert consulta.json() == {
         "email": email,
-        "razao_social": admin.empresa.razao_social,
+        "razao_social": admin.conta.razao_social,
         "expira_em": corpo["expira_em"],
     }
 
     aceite = _aceitar(token, nome="  Joana Convidada  ")
     assert aceite.status_code == 201
     novo = aceite.json()
-    assert set(novo) == {"id", "empresa_id", "nome", "email"}
-    assert novo["empresa_id"] == str(admin.empresa_id)
+    assert set(novo) == {"id", "conta_id", "empresa_id", "nome", "email"}
+    assert novo["conta_id"] == novo["empresa_id"] == str(admin.conta_id)
     assert novo["nome"] == "Joana Convidada"
     assert novo["email"] == email
 
@@ -125,8 +125,9 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
     assert {k: v for k, v in login.json().items() if k != "auth_time"} == novo
 
     usuario = db_session.get(Usuario, uuid.UUID(novo["id"]))
-    assert usuario.administrador is False
-    (convite,) = _convites_da_empresa(db_session, admin.empresa_id)
+    # Até o convite ter papel (parte 2 da issue #133), o convidado é analista.
+    assert (usuario.papel, usuario.conta_id) == ("analista", admin.conta_id)
+    (convite,) = _convites_da_conta(db_session, admin.conta_id)
     assert convite.usado_em is not None
     assert convite.convidado_por_id == admin.id
     # O aceite não manda boas-vindas: só o e-mail do convite saiu.
@@ -136,7 +137,7 @@ def test_fluxo_completo_convidar_consultar_aceitar_e_entrar(
 def test_token_e_guardado_so_como_hash(db_session, provedor, admin, cabecalho_de):
     token = _convidar_e_pegar_token(cabecalho_de(admin), provedor, _email_novo())
 
-    (convite,) = _convites_da_empresa(db_session, admin.empresa_id)
+    (convite,) = _convites_da_conta(db_session, admin.conta_id)
     assert convite.token_hash == hashlib.sha256(token.encode()).hexdigest()
     assert token not in [str(valor) for valor in vars(convite).values()]
 
@@ -166,7 +167,7 @@ def test_convite_expirado_e_400(db_session, provedor, admin, cabecalho_de):
     token = _convidar_e_pegar_token(cabecalho_de(admin), provedor, _email_novo())
     db_session.execute(
         update(Convite)
-        .where(Convite.empresa_id == admin.empresa_id)
+        .where(Convite.conta_id == admin.conta_id)
         .values(expira_em=func.now() - timedelta(minutes=1))
     )
     db_session.commit()
@@ -247,7 +248,7 @@ def test_convidar_email_que_ja_tem_conta_e_409(
         assert response.status_code == 409
         assert response.json() == {"detail": "E-mail já cadastrado."}
 
-    assert _convites_da_empresa(db_session, admin.empresa_id) == []
+    assert _convites_da_conta(db_session, admin.conta_id) == []
     assert provedor.enviadas == []
 
 
@@ -264,7 +265,7 @@ def test_aceitar_com_email_que_ganhou_conta_no_meio_tempo_e_409(
 
     assert response.status_code == 409
     assert response.json() == {"detail": "E-mail já cadastrado."}
-    (convite,) = _convites_da_empresa(db_session, admin.empresa_id)
+    (convite,) = _convites_da_conta(db_session, admin.conta_id)
     assert convite.usado_em is None
 
 
@@ -310,11 +311,12 @@ def test_convidar_email_invalido_e_422(db_session, provedor, admin, cabecalho_de
         ("delete", "/empresa/convites/{convite_id}"),
     ],
 )
-def test_quem_nao_e_administrador_recebe_403(
-    db_session, provedor, admin, criar_usuario, cabecalho_de, metodo, caminho
+@pytest.mark.parametrize("papel", ["gestor", "analista"])
+def test_quem_nao_e_admin_recebe_403(
+    db_session, provedor, admin, criar_usuario, cabecalho_de, metodo, caminho, papel
 ):
     convite_id = _convidar(cabecalho_de(admin), _email_novo()).json()["id"]
-    convidado = criar_usuario(empresa_id=admin.empresa_id)
+    convidado = criar_usuario(conta_id=admin.conta_id, papel=papel)
 
     response = client.request(
         metodo,
@@ -324,9 +326,9 @@ def test_quem_nao_e_administrador_recebe_403(
     )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Só o administrador da empresa pode fazer isso."}
-    assert len(_convites_da_empresa(db_session, admin.empresa_id)) == 1
-    assert _convites_da_empresa(db_session, admin.empresa_id)[0].cancelado_em is None
+    assert response.json() == {"detail": "Só o admin da conta pode fazer isso."}
+    assert len(_convites_da_conta(db_session, admin.conta_id)) == 1
+    assert _convites_da_conta(db_session, admin.conta_id)[0].cancelado_em is None
 
 
 @pytest.mark.parametrize(
@@ -368,7 +370,7 @@ def test_cancelar_convite_de_outra_empresa_e_404_como_inexistente(
 
     assert de_outra.status_code == inexistente.status_code == 404
     assert de_outra.json() == inexistente.json() == {"detail": "Convite não encontrado."}
-    (convite,) = _convites_da_empresa(db_session, admin_b.empresa_id)
+    (convite,) = _convites_da_conta(db_session, admin_b.conta_id)
     assert convite.cancelado_em is None
 
 
@@ -384,7 +386,7 @@ def test_limite_de_convites_por_hora_por_empresa(db_session, provedor, criar_usu
 
     assert response.status_code == 429
     assert 1 <= int(response.headers["Retry-After"]) <= 3600
-    assert len(_convites_da_empresa(db_session, admin_a.empresa_id)) == LIMITE_CONVITES_POR_HORA
+    assert len(_convites_da_conta(db_session, admin_a.conta_id)) == LIMITE_CONVITES_POR_HORA
     assert len(provedor.enviadas) == LIMITE_CONVITES_POR_HORA
     # O limite é da empresa: a outra continua convidando.
     assert _convidar(cabecalho_de(admin_b), _email_novo()).status_code == 201
@@ -397,7 +399,7 @@ def test_convite_de_mais_de_uma_hora_atras_nao_conta_no_limite(
         _convidar(cabecalho_de(admin), _email_novo())
     db_session.execute(
         update(Convite)
-        .where(Convite.empresa_id == admin.empresa_id)
+        .where(Convite.conta_id == admin.conta_id)
         .values(criado_em=func.now() - timedelta(hours=1, minutes=1))
     )
     db_session.commit()
@@ -416,7 +418,7 @@ def test_email_desligado_e_503_sem_gravar_convite(db_session, admin, cabecalho_d
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Convite indisponível no momento."}
-    assert _convites_da_empresa(db_session, admin.empresa_id) == []
+    assert _convites_da_conta(db_session, admin.conta_id) == []
 
 
 @pytest.mark.parametrize("frontend_url", ["", "https://frontend-hfrnofw9w-ledgr7.vercel.app"])
@@ -428,7 +430,7 @@ def test_frontend_url_ausente_ou_recusada_e_503(
     response = _convidar(cabecalho_de(admin), _email_novo())
 
     assert response.status_code == 503
-    assert _convites_da_empresa(db_session, admin.empresa_id) == []
+    assert _convites_da_conta(db_session, admin.conta_id) == []
     assert provedor.enviadas == []
 
 

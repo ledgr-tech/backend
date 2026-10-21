@@ -13,6 +13,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from conftest import cabecalhos, empresa_unica
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 
@@ -80,7 +81,7 @@ def cenario(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancame
     sistema. O par padrão tem um match exato (10.00 a), uma linha só do banco
     (20.00 b) e uma só do sistema (99.00 so sistema), as duas divergentes."""
     usuario = criar_usuario()
-    empresa_id = usuario.empresa_id
+    empresa_id = empresa_unica(db_session, usuario.conta_id)
     banco = criar_extrato_da_empresa(empresa_id, "banco")
     inserir_lancamentos(banco, [("10.00", "a"), ("20.00", "b")])
 
@@ -89,13 +90,13 @@ def cenario(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancame
         inserir_lancamentos(sistema, list(itens))
         return sistema
 
-    token = gerar_token(empresa_id, usuario_id=usuario.id)
+    token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
     return SimpleNamespace(
         usuario=usuario,
         empresa_id=empresa_id,
         banco=banco,
         novo_sistema=novo_sistema,
-        headers={"Authorization": f"Bearer {token}"},
+        headers=cabecalhos(token, empresa_id),
     )
 
 
@@ -161,13 +162,13 @@ def test_chave_unica_com_duplicado_tarifa_e_linhas_identicas_do_sistema(
     db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancamentos, gerar_token
 ):
     usuario = criar_usuario()
-    banco = criar_extrato_da_empresa(usuario.empresa_id, "banco")
-    sistema = criar_extrato_da_empresa(usuario.empresa_id, "sistema")
+    banco = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "banco")
+    sistema = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "sistema")
     inserir_lancamentos(
         banco, [("150.00", "c"), ("150.00", "c"), ("150.00", "c"), ("-5.00", "Tarifa pacote")]
     )
     inserir_lancamentos(sistema, [("150.00", "c"), ("150.00", "c"), ("77.00", "x"), ("77.00", "x")])
-    token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+    token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
     c = SimpleNamespace(usuario=usuario, banco=banco, headers={"Authorization": f"Bearer {token}"})
     _conciliar(c, sistema)
 
@@ -347,11 +348,11 @@ def test_isolamento_entre_empresas_com_chaves_iguais(
     cenarios = []
     for _ in range(2):
         usuario = criar_usuario()
-        banco = criar_extrato_da_empresa(usuario.empresa_id, "banco")
-        sistema = criar_extrato_da_empresa(usuario.empresa_id, "sistema")
+        banco = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "banco")
+        sistema = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "sistema")
         inserir_lancamentos(banco, [("10.00", "a")])
         inserir_lancamentos(sistema, [("10.00", "a"), ("99.00", "so sistema")])
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
         c = SimpleNamespace(
             usuario=usuario, banco=banco, headers={"Authorization": f"Bearer {token}"}
         )
@@ -373,11 +374,11 @@ def test_eventos_da_pagina_saem_com_numero_fixo_de_consultas(
     db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancamentos, gerar_token
 ):
     usuario = criar_usuario()
-    banco = criar_extrato_da_empresa(usuario.empresa_id, "banco")
-    sistema = criar_extrato_da_empresa(usuario.empresa_id, "sistema")
+    banco = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "banco")
+    sistema = criar_extrato_da_empresa(empresa_unica(db_session, usuario.conta_id), "sistema")
     inserir_lancamentos(banco, [(f"{indice + 1}.00", f"linha {indice}") for indice in range(60)])
     inserir_lancamentos(sistema, [("0.50", "so sistema")])
-    token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+    token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
     c = SimpleNamespace(usuario=usuario, banco=banco, headers={"Authorization": f"Bearer {token}"})
     _conciliar(c, sistema)
     for item in _itens(c, sistema, limit=5):

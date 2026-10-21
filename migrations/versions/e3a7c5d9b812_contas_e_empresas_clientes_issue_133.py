@@ -94,9 +94,7 @@ def upgrade() -> None:
     _coluna_conta_id("usuarios", "empresa_id")
     op.create_index("ix_usuarios_conta_id", "usuarios", ["conta_id"], unique=False)
     op.add_column("usuarios", sa.Column("papel", sa.String(), nullable=True))
-    op.execute(
-        "UPDATE usuarios SET papel = CASE WHEN administrador THEN 'admin' ELSE 'gestor' END"
-    )
+    op.execute("UPDATE usuarios SET papel = CASE WHEN administrador THEN 'admin' ELSE 'gestor' END")
     op.alter_column("usuarios", "papel", nullable=False)
     op.create_check_constraint(
         "ck_usuarios_papel_valido", "usuarios", "papel IN ('admin', 'gestor', 'analista')"

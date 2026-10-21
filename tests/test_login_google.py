@@ -13,11 +13,12 @@ import time
 import uuid
 
 import pytest
+from conftest import apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.core.database import engine
-from app.models import Configuracao, Empresa, Usuario
+from app.models import Configuracao, Conta, Usuario
 from app.services.usuarios import remover_usuario
 from main import app
 
@@ -48,14 +49,7 @@ def cadastro_google(db_session, gerar_cnpj, google):
     yield _corpo
 
     db_session.rollback()
-    empresa_ids = [e.id for e in db_session.query(Empresa.id).filter(Empresa.cnpj.in_(cnpjs))]
-    db_session.query(Usuario).filter(Usuario.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
+    apagar_contas_por_cnpj(db_session, cnpjs)
     db_session.commit()
 
 
@@ -70,9 +64,9 @@ def _login_google(id_token: str):
 
 
 def _cabecalho(gerar_token, resposta: dict) -> dict[str, str]:
-    """O token que o NextAuth monta com a resposta: id, empresa_id e auth_time."""
+    """O token que o NextAuth monta com a resposta: id, conta_id e auth_time."""
     token = gerar_token(
-        resposta["empresa_id"], usuario_id=resposta["id"], auth_time=resposta["auth_time"]
+        resposta["conta_id"], usuario_id=resposta["id"], auth_time=resposta["auth_time"]
     )
     return {"Authorization": f"Bearer {token}"}
 
@@ -168,7 +162,8 @@ def test_login_google_devolve_o_usuario_com_auth_time(db_session, google, usuari
     corpo = response.json()
     assert corpo == {
         "id": str(usuario_google.id),
-        "empresa_id": str(usuario_google.empresa_id),
+        "conta_id": str(usuario_google.conta_id),
+        "empresa_id": str(usuario_google.conta_id),
         "nome": usuario_google.nome,
         "email": usuario_google.email,
         "auth_time": corpo["auth_time"],
@@ -222,7 +217,7 @@ def test_login_google_com_email_de_conta_com_senha_e_409_sem_vincular(
 
 def test_login_google_de_usuario_removido_nao_entra(db_session, google, criar_usuario):
     admin = criar_usuario()
-    convidado = criar_usuario(com_senha=False, empresa_id=admin.empresa_id)
+    convidado = criar_usuario(com_senha=False, conta_id=admin.conta_id)
     email, sub = convidado.email, convidado.google_sub
     remover_usuario(db_session, convidado)
     db_session.commit()
@@ -252,7 +247,8 @@ def test_cadastro_google_cria_empresa_e_administrador_sem_senha(
 
     assert response.status_code == 201
     resposta = response.json()
-    assert set(resposta) == {"id", "empresa_id", "nome", "email", "auth_time"}
+    assert set(resposta) == {"id", "conta_id", "empresa_id", "nome", "email", "auth_time"}
+    assert resposta["empresa_id"] == resposta["conta_id"]
     assert resposta["email"] == email
     assert resposta["nome"] == "Maria Google"
     assert math.floor(antes) <= resposta["auth_time"] <= time.time()
@@ -260,10 +256,11 @@ def test_cadastro_google_cria_empresa_e_administrador_sem_senha(
     usuario = db_session.get(Usuario, uuid.UUID(resposta["id"]))
     assert usuario.senha_hash is None
     assert usuario.google_sub == "10987654321"
-    assert usuario.administrador is True
-    empresa = db_session.get(Empresa, uuid.UUID(resposta["empresa_id"]))
-    assert empresa.cnpj == corpo["cnpj"]
-    assert empresa.razao_social == "Empresa do Google Ltda"
+    assert usuario.papel == "admin"
+    conta = db_session.get(Conta, uuid.UUID(resposta["conta_id"]))
+    assert (conta.cnpj, conta.razao_social) == (corpo["cnpj"], "Empresa do Google Ltda")
+    (empresa,) = conta.empresas
+    assert (empresa.cnpj, empresa.razao_social) == (corpo["cnpj"], "Empresa do Google Ltda")
     assert db_session.query(Configuracao).filter_by(empresa_id=empresa.id).count() == 1
 
     me = client.get("/me", headers=_cabecalho(gerar_token, resposta))
