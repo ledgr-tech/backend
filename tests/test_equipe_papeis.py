@@ -22,6 +22,7 @@ from sqlalchemy import func, select, text
 from app.core import auth
 from app.core.auth import LOGIN_RECENTE_SEGUNDOS
 from app.core.database import SessionLocal
+from app.core.rate_limit import LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO
 from app.models import Convite, Usuario
 from app.services.usuarios import remover_usuario
 from main import app
@@ -365,7 +366,7 @@ def test_conta_do_google_sem_login_recente_e_409(db_session, criar_usuario, cabe
     resposta = _transferir(cabecalho_de(admin, auth_time=antigo), destino.id, senha_atual=None)
 
     assert resposta.status_code == 409
-    assert resposta.json() == {"detail": "Entre de novo com o Google para confirmar a desativação."}
+    assert resposta.json() == {"detail": "Entre de novo com o Google para confirmar."}
     assert _recarregar(db_session, admin).papel == "admin"
 
 
@@ -459,6 +460,25 @@ def test_o_novo_admin_nao_pode_ser_removido_nem_rebaixado(db_session, equipe, ca
     assert rebaixar.json() == SO_PELA_TRANSFERENCIA
     assert remover_pelo_antigo.status_code == 403
     assert _recarregar(db_session, novo).papel == "admin"
+
+
+def test_transferencia_tem_rate_limit_por_usuario(db_session, equipe, criar_usuario, cabecalho_de):
+    """A rota confere a senha atual: como a troca de senha, limita por usuário,
+    e o limite de um admin não afeta o de outro."""
+    limite = int(LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO.split("/")[0])
+    headers = cabecalho_de(equipe["admin"])
+
+    codigos = [
+        _transferir(headers, equipe["gestor"].id, "senha-errada-1").status_code
+        for _ in range(limite + 1)
+    ]
+
+    assert codigos[:limite] == [400] * limite
+    assert codigos[limite] == 429
+    assert _recarregar(db_session, equipe["admin"]).papel == "admin"
+    outro_admin = criar_usuario()
+    destino = criar_usuario(conta_id=outro_admin.conta_id, papel="analista")
+    assert _transferir(cabecalho_de(outro_admin), destino.id).status_code == 200
 
 
 # --- remoção e DELETE /me ------------------------------------------------------------

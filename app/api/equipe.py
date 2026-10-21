@@ -44,7 +44,8 @@ só muda de papel pela transferência: mudar o próprio papel ou o do admin é
 `POST /empresa/admin/transferencia` passa o papel de admin para outro usuário
 ativo da conta, com a confirmação do `DELETE /me` (issue #68): senha atual na
 conta com senha (400 "Senha atual incorreta.", nunca 401), login recente na
-conta só do Google (409). As duas linhas são lidas com `FOR UPDATE`, em ordem
+conta só do Google (409 "Entre de novo com o Google para confirmar."). Como
+confere a senha, tem rate limit por usuário, como a troca de senha. As duas linhas são lidas com `FOR UPDATE`, em ordem
 de id, e numa transação só o admin vira gestor e o destino vira admin: o
 rebaixamento vai ao banco antes da promoção, por causa do índice único
 parcial de um admin por conta. Duas transferências simultâneas não passam as
@@ -65,13 +66,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import DateTime, cast, func, select, update
 from sqlalchemy.orm import Session
 
-from app.api.me import CONFIRMAR_COM_O_GOOGLE, SENHA_INCORRETA
+from app.api.me import SENHA_INCORRETA
 from app.core import senha
 from app.core.auth import (
     SessaoAutenticada,
@@ -84,6 +85,11 @@ from app.core.auth import (
 )
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
+from app.core.rate_limit import (
+    LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO,
+    chave_por_usuario,
+    limiter,
+)
 from app.models import Conta, Convite, Usuario
 from app.models.usuario import Papel, PapelSemAdmin
 from app.services.convites import VALIDADE_CONVITE_DIAS, condicoes_pendente, hash_token
@@ -98,6 +104,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/empresa", tags=["equipe"])
 
 LIMITE_CONVITES_POR_HORA = 10
+
+# A conta só do Google confirma a transferência entrando de novo.
+CONFIRMAR_TRANSFERENCIA_COM_O_GOOGLE = "Entre de novo com o Google para confirmar."
 
 obter_admin_ou_gestor = exigir_papel("admin", "gestor")
 
@@ -383,7 +392,9 @@ def trocar_papel(
 
 
 @router.post("/admin/transferencia", response_model=UsuarioListaResponse)
+@limiter.limit(LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO, key_func=chave_por_usuario)
 def transferir_admin(
+    request: Request,
     dados: TransferenciaAdminRequest,
     admin: Annotated[Usuario, Depends(obter_admin_autenticado)],
     sessao: Annotated[SessaoAutenticada, Depends(obter_sessao_autenticada)],
@@ -397,7 +408,7 @@ def transferir_admin(
             )
     elif not login_recente(sessao.auth_time):
         logger.info("transferencia_admin resultado=login_antigo")
-        raise _conflito(CONFIRMAR_COM_O_GOOGLE)
+        raise _conflito(CONFIRMAR_TRANSFERENCIA_COM_O_GOOGLE)
 
     if dados.usuario_id == admin.id:
         logger.info("transferencia_admin resultado=para_si_mesmo")

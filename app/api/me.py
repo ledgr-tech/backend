@@ -114,8 +114,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/me", tags=["conta"])
 
-# A confirmação da desativação, também usada pela transferência do admin
-# (app/api/equipe.py).
+# A confirmação da desativação. A senha incorreta é a mesma resposta na
+# transferência do admin (app/api/equipe.py).
 SENHA_INCORRETA = "Senha atual incorreta."
 CONFIRMAR_COM_O_GOOGLE = "Entre de novo com o Google para confirmar a desativação."
 
