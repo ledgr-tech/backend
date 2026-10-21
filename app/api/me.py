@@ -10,6 +10,11 @@ UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
 mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
 `POST /conciliacoes`.
 
+`limites` (issue #133) traz, para empresas e usuários, quanto a conta usa e o
+máximo do plano (`null` sem limite), com a mesma conta do 402 do
+`POST /empresas` e do `POST /empresa/convites`: usuários são os ativos mais os
+convites pendentes. O front mostra os avisos de limite com isso.
+
 Obsoletos, mantidos até o front migrar: `empresa_id`, igual a `conta_id` (o
 valor que o front grava no token, que o backend lê como id da conta), e
 `administrador`, igual a `papel == "admin"` (issue #69, ADR-015).
@@ -44,10 +49,10 @@ exclusão dos dados da empresa não tem rota: é processo interno, a pedido
   recente, com `auth_time` de no máximo `LOGIN_RECENTE_SEGUNDOS` atrás
   (app/core/auth.py, mesmo relógio da #75). Senão, 409: o front pede o
   Google de novo e repete.
-- Admin com outro usuário ativo na conta: 409. Sozinho, pode desativar; a
-  conta fica sem acesso, e os dados só saem pelo script. A conta tem sempre
-  um admin, e a transferência do papel (parte 2 da issue #133) é o caminho
-  para o admin sair com a equipe ficando.
+- Admin com outro usuário ativo na conta: 409, sugerindo a transferência do
+  papel (`POST /empresa/admin/transferencia`, issue #133), que é o caminho
+  para o admin sair com a equipe ficando. Sozinho, pode desativar; a conta
+  fica sem acesso, e os dados só saem pelo script.
 - Rate limit por usuário, como a troca de senha.
 
 A desativação é `remover_usuario` (app/services/usuarios.py): a linha fica
@@ -81,7 +86,7 @@ from app.core.auth import (
     obter_usuario_autenticado,
 )
 from app.core.database import get_db
-from app.core.plano import Situacao
+from app.core.plano import Situacao, limite_da_conta
 from app.core.rate_limit import (
     LIMITE_CONSULTA_ME_POR_USUARIO,
     LIMITE_DESATIVACAO_CONTA_POR_USUARIO,
@@ -95,6 +100,7 @@ from app.services.convites import condicoes_pendente
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
 from app.services.email.mensagens import mensagem_conta_desativada
+from app.services.plano import empresas_usadas, usuarios_usados
 from app.services.usuarios import remover_usuario
 
 __all__ = [
@@ -108,11 +114,31 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/me", tags=["conta"])
 
+# A confirmação da desativação, também usada pela transferência do admin
+# (app/api/equipe.py).
+SENHA_INCORRETA = "Senha atual incorreta."
+CONFIRMAR_COM_O_GOOGLE = "Entre de novo com o Google para confirmar a desativação."
+
 
 class EmpresaDaConta(BaseModel):
     id: uuid.UUID
     razao_social: str
     cnpj: str
+
+
+class LimiteEmpresas(BaseModel):
+    usadas: int
+    maximo: int | None
+
+
+class LimiteUsuarios(BaseModel):
+    usados: int
+    maximo: int | None
+
+
+class Limites(BaseModel):
+    empresas: LimiteEmpresas
+    usuarios: LimiteUsuarios
 
 
 class MeResponse(BaseModel):
@@ -136,6 +162,7 @@ class MeResponse(BaseModel):
     plano: str | None
     teste_termina_em: datetime | None
     situacao: Situacao
+    limites: Limites
 
 
 def _metodos_login(usuario: Usuario) -> list[str]:
@@ -176,6 +203,16 @@ def obter_dados_da_conta(
         ],
         metodos_login=_metodos_login(usuario),
         **resposta_do_plano(conta).model_dump(),
+        limites=Limites(
+            empresas=LimiteEmpresas(
+                usadas=empresas_usadas(db, conta.id),
+                maximo=limite_da_conta(conta, "empresas"),
+            ),
+            usuarios=LimiteUsuarios(
+                usados=usuarios_usados(db, conta.id),
+                maximo=limite_da_conta(conta, "usuarios"),
+            ),
+        ),
     )
 
 
@@ -245,13 +282,13 @@ def desativar_conta(
             logger.info("desativacao_conta resultado=senha_incorreta")
             raise HTTPException(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
-                detail="Senha atual incorreta.",
+                detail=SENHA_INCORRETA,
             )
     elif not login_recente(sessao.auth_time):
         logger.info("desativacao_conta resultado=login_antigo")
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
-            detail="Entre de novo com o Google para confirmar a desativação.",
+            detail=CONFIRMAR_COM_O_GOOGLE,
         )
 
     # Antes de contar os outros usuários: o UPDATE trava os convites
@@ -275,7 +312,7 @@ def desativar_conta(
         logger.info("desativacao_conta resultado=administrador_com_usuarios")
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
-            detail="Remova os outros usuários da conta antes de desativar a sua conta.",
+            detail="Transfira o papel de admin antes de desativar a sua conta.",
         )
 
     # Antes da remoção, que troca o e-mail, e do commit, que expira o objeto.
