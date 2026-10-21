@@ -7,10 +7,24 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
+# Todos os tipos de evento (issues #83 e #132). A regra de cada um mora em
+# app/services/decisoes.py.
+TIPOS_DE_EVENTO = (
+    "conferida",
+    "conferencia_desfeita",
+    "justificada",
+    "justificativa_desfeita",
+    "justificativa_aprovada",
+    "justificativa_rejeitada",
+)
+
 
 class DecisaoLinha(Base):
     """Evento de decisão sobre uma linha de conciliação (issue #83): conferir,
-    justificar e desfazer cada um.
+    justificar e desfazer cada um. Desde a issue #132, também aprovar e
+    rejeitar a justificativa (`justificativa_aprovada` e
+    `justificativa_rejeitada`), só por admin ou gestor. Toda justificativa
+    nasce aguardando aprovação.
 
     Só de inserção: nunca editada nem apagada. A decisão em vigor de uma linha
     é derivada da sequência de eventos (`app/services/decisoes.py`).
@@ -20,6 +34,9 @@ class DecisaoLinha(Base):
     `(empresa_id, extrato_banco_id, chave)`, onde `chave` é estável entre
     rodadas e entre versões do extrato do sistema (regra em
     `app/services/decisoes.py::chave_da_linha`).
+
+    `texto` é obrigatório na `justificada`, opcional na
+    `justificativa_rejeitada` (o motivo da rejeição) e proibido nos demais.
 
     `usuario_id` é quem decidiu; `autor_nome` é a cópia do nome no momento da
     decisão, e é ela que a API devolve (renomear o usuário depois não reescreve
@@ -35,14 +52,14 @@ class DecisaoLinha(Base):
     __tablename__ = "decisoes_linha"
     __table_args__ = (
         CheckConstraint(
-            "tipo IN ('conferida', 'conferencia_desfeita', 'justificada', "
-            "'justificativa_desfeita')",
+            "tipo IN (" + ", ".join(f"'{tipo}'" for tipo in TIPOS_DE_EVENTO) + ")",
             name="ck_decisoes_linha_tipo_valido",
         ),
         CheckConstraint(
             "(tipo = 'justificada' AND texto IS NOT NULL) "
-            "OR (tipo <> 'justificada' AND texto IS NULL)",
-            name="ck_decisoes_linha_texto_so_na_justificativa",
+            "OR tipo = 'justificativa_rejeitada' "
+            "OR (tipo NOT IN ('justificada', 'justificativa_rejeitada') AND texto IS NULL)",
+            name="ck_decisoes_linha_texto_valido",
         ),
         CheckConstraint("rodada >= 1", name="ck_decisoes_linha_rodada_positiva"),
         Index(
