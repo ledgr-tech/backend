@@ -1,0 +1,80 @@
+name: Backup
+
+# Imagem do serviço de backup (issue #103, ADR-018), num workflow separado do
+# ci.yml: os testes da API e os do backup não se afetam, e este só roda quando
+# muda algo do backup. Os testes de unidade do backup (tests/test_backup_r2_*.py
+# e tests/test_baixar_backup_r2.py) continuam na suíte do ci.yml, que roda tudo.
+#
+# Aqui a imagem é montada a partir do backup/Dockerfile e o pg_dump e o age de
+# verdade rodam contra um Postgres de teste, decifrando e lendo o resultado com
+# pg_restore. Os testes da suíte trocam esses binários por dublês.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backup/**"
+      - "scripts/backup_r2.py"
+      - ".github/workflows/backup.yml"
+  push:
+    branches: [main, develop]
+    paths:
+      - "backup/**"
+      - "scripts/backup_r2.py"
+      - ".github/workflows/backup.yml"
+
+# Só checkout e build: leitura do repositório basta (mesmo motivo do ci.yml,
+# issue #102).
+permissions:
+  contents: read
+
+jobs:
+  backup-imagem:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Mesma imagem dos jobs do ci.yml: major 18, do Docker Hub com login
+        # (issue #127). Sem login, tanto o Docker Hub quanto o espelho público
+        # da AWS limitam o download e derrubam o job com "toomanyrequests".
+        image: postgres:18-alpine
+        credentials:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt
+      # Schema real no banco, para o dump ter o que conferir (alembic_version).
+      - run: alembic upgrade head
+      # O FROM postgres:18 do backup/Dockerfile também vem do Docker Hub: com
+      # login, o build não cai no limite de download anônimo.
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: docker build -f backup/Dockerfile -t ledgr-backup .
+      - name: pg_dump da imagem é da major 18
+        run: docker run --rm ledgr-backup pg_dump --version | grep "(PostgreSQL) 18"
+      - name: dump criptografado, decifrado e lido pelo pg_restore
+        run: |
+          mkdir -p "$RUNNER_TEMP/backup"
+          docker run --rm --network host --user "$(id -u)" \
+            -v "$RUNNER_TEMP/backup":/out \
+            -v "$PWD/backup/teste_imagem.sh":/teste.sh:ro \
+            -e BANCO_TESTE=postgresql://ci:ci@localhost:5432/ci \
+            ledgr-backup sh /teste.sh
