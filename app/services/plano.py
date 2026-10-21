@@ -1,4 +1,5 @@
 """Bloqueio da conciliação pelo plano (issue #122, regra em app/core/plano.py).
+Desde a issue #133, olha a situação da conta da empresa ativa.
 
 Só vale com `PLANO_BLOQUEIO_HABILITADO`, falsa por padrão: a variável é ligada
 junto com o gateway de pagamento, porque antes dele quem termina o teste não
@@ -18,7 +19,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.plano import Situacao, situacao_da_empresa
+from app.core.plano import Situacao, situacao_da_conta
 from app.models import Empresa, ExecucaoConciliacao
 
 MOTIVO_DO_BLOQUEIO: dict[Situacao, str] = {
@@ -29,20 +30,18 @@ MOTIVO_DO_BLOQUEIO: dict[Situacao, str] = {
 }
 
 
-def motivo_do_bloqueio(
-    db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID
-) -> str | None:
+def motivo_do_bloqueio(db: Session, empresa: Empresa, extrato_banco_id: uuid.UUID) -> str | None:
     """O `detail` do 402 quando a conciliação deve ser barrada, ou `None`.
     Sem consulta nenhuma com o bloqueio desligado."""
     if not settings.plano_bloqueio_habilitado:
         return None
-    motivo = MOTIVO_DO_BLOQUEIO.get(situacao_da_empresa(db.get(Empresa, empresa_id)))
+    motivo = MOTIVO_DO_BLOQUEIO.get(situacao_da_conta(empresa.conta))
     if motivo is None:
         return None
     ja_conciliado = db.scalar(
         select(
             exists().where(
-                ExecucaoConciliacao.empresa_id == empresa_id,
+                ExecucaoConciliacao.empresa_id == empresa.id,
                 ExecucaoConciliacao.extrato_banco_id == extrato_banco_id,
             )
         )

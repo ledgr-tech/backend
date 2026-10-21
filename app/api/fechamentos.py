@@ -2,8 +2,9 @@
 competência, `GET /fechamentos` lista o histórico e
 `DELETE /fechamentos/{competencia}` reabre.
 
-Regra do mês e resumo em app/services/fechamentos.py. Sempre pela empresa do
-token; conta única, sem papéis nem 403. Fechar e reabrir pegam a trava
+Regra do mês e resumo em app/services/fechamentos.py. Sempre pela empresa
+ativa (cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a
+issue #133); ainda sem 403 por papel (vem com a #132). Fechar e reabrir pegam a trava
 EXCLUSIVA do mês (app/services/travas.py), então esperam qualquer conciliação
 ou decisão em andamento naquele mês e as seguintes esperam por eles.
 
@@ -38,9 +39,9 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
+from app.core.auth import EmpresaAtiva, obter_empresa_ativa, obter_empresa_id_ativa
 from app.core.database import get_db
-from app.models import Fechamento, Usuario
+from app.models import Fechamento
 from app.services import fechamentos
 from app.services.travas import travar_mes
 
@@ -149,10 +150,10 @@ def _o_que_falta(pendentes: int, linhas_nao_lidas: int) -> str:
 )
 def fechar_competencia(
     corpo: FechamentoRequest,
-    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FechamentoResponse:
-    empresa_id = usuario.empresa_id
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     _validar_competencia(corpo.competencia)
     ressalva = (corpo.ressalva or "").strip() or None
     if ressalva is not None and len(ressalva) > TAMANHO_MAXIMO_RESSALVA:
@@ -195,7 +196,7 @@ def fechar_competencia(
 
 @router.get("", response_model=FechamentoListaResponse)
 def listar_fechamentos(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     competencia: Annotated[str | None, Query()] = None,
 ) -> FechamentoListaResponse:
@@ -212,10 +213,10 @@ def listar_fechamentos(
 @router.delete("/{competencia}", response_model=FechamentoResponse)
 def reabrir_competencia(
     competencia: str,
-    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FechamentoResponse:
-    empresa_id = usuario.empresa_id
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     _validar_competencia(competencia)
 
     travar_mes(db, empresa_id, competencia)

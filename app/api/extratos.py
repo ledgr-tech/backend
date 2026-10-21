@@ -47,9 +47,11 @@ feita só quando algum item da página tem saldo e nenhuma linha não lida: o
 número de consultas continua sem depender do tamanho da página.
 
 Desde a issue #14, os endpoints exigem JWT (app/core/auth.py, ADR-003):
-o `empresa_id` do Extrato vem do token, nunca do form. `GET` de extrato de
-outra empresa devolve 404 (não 403) pra não confirmar a existência do ID
-(mitigação de BOLA/IDOR). O upload tem rate limit de 10/min por IP.
+o `empresa_id` do Extrato é o da empresa ativa (cabeçalho `X-Ledgr-Empresa`,
+conferido contra a conta do token desde a issue #133), nunca do form. `GET`
+de extrato de outra empresa, inclusive de outra empresa da mesma conta,
+devolve 404 (não 403) pra não confirmar a existência do ID (mitigação de
+BOLA/IDOR). O upload tem rate limit de 10/min por conta.
 """
 
 import os
@@ -75,9 +77,9 @@ from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_empresa_id_autenticada
+from app.core.auth import obter_empresa_id_ativa
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_UPLOAD, chave_por_empresa, limiter
+from app.core.rate_limit import LIMITE_UPLOAD, chave_por_conta, limiter
 from app.models import ExecucaoConciliacao, Extrato, LinhaInvalida
 from app.services import saldo
 from app.services.normalizacao import normalizar_extrato
@@ -116,10 +118,10 @@ class ExtratoDetalheResponse(BaseModel):
     response_model=ExtratoUploadResponse,
     status_code=http_status.HTTP_201_CREATED,
 )
-@limiter.limit(LIMITE_UPLOAD, key_func=chave_por_empresa)
+@limiter.limit(LIMITE_UPLOAD, key_func=chave_por_conta)
 async def upload_extrato(
     request: Request,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     arquivo: Annotated[UploadFile, File()],
     origem: Annotated[Literal["banco", "sistema"], Form()],
     db: Annotated[Session, Depends(get_db)],
@@ -195,7 +197,7 @@ class ExtratoListaResponse(BaseModel):
 
 @router.get("", response_model=ExtratoListaResponse)
 def listar_extratos(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -284,7 +286,7 @@ def listar_extratos(
 @router.get("/{extrato_id}", response_model=ExtratoDetalheResponse)
 async def obter_extrato(
     extrato_id: uuid.UUID,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ExtratoDetalheResponse:
     extrato = db.get(Extrato, extrato_id)

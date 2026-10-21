@@ -2,8 +2,9 @@
 conciliação por empresa — data, contagens e percentual de acerto de cada
 rodada de `POST /conciliacoes` (app/api/conciliacoes.py), não só a última.
 
-Exige JWT (app/core/auth.py, ADR-003): sempre filtra por `empresa_id` do
-token, nunca recebe esse id por parâmetro. Query params: `limit` (1 a 100,
+Exige JWT (app/core/auth.py, ADR-003): sempre filtra pela empresa ativa
+(cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a issue
+#133), nunca recebe esse id por parâmetro. Query params: `limit` (1 a 100,
 default 20), `offset` (>= 0) e `extrato_banco_id` (opcional, issue #82).
 Ordem: `criado_em` desc, `id` desc (mais recente primeiro, desempate
 estável pra paginar). Empresa sem nenhuma execução devolve 200 com lista
@@ -67,7 +68,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.core.auth import obter_empresa_id_autenticada
+from app.core.auth import obter_empresa_id_ativa
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
 from app.services.decisoes import contar_justificadas
@@ -130,7 +131,7 @@ def _extrato_nao_encontrado() -> HTTPException:
 
 @router.get("", response_model=ExecucaoListaResponse)
 def listar_execucoes(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,

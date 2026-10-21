@@ -1,7 +1,9 @@
 """`POST /explicacoes` (issue #28, ADR-011): explicação em linguagem
 natural de por que um lançamento aparece como divergência, com cache.
 
-Exige JWT (app/core/auth.py, ADR-003): `empresa_id` sempre vem do token.
+Exige JWT (app/core/auth.py, ADR-003): `empresa_id` é sempre o da empresa
+ativa (cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a
+issue #133).
 Corpo `{"conciliacao_id": "<uuid>"}` — UUID malformado é 422 do próprio
 Pydantic. Fluxo, nesta ordem:
 
@@ -71,7 +73,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_empresa_id_autenticada
+from app.core.auth import obter_empresa_id_ativa
 from app.core.config import settings
 from app.core.database import get_db
 from app.models import Conciliacao, ExplicacaoDivergencia
@@ -110,7 +112,7 @@ def _inicio_do_dia_utc() -> datetime:
 @router.post("", response_model=ExplicacaoResponse)
 def criar_explicacao(
     corpo: ExplicacaoRequest,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     provedor: Annotated[ProvedorDeIA | None, Depends(obter_provedor_dependencia)],
 ) -> ExplicacaoResponse:
