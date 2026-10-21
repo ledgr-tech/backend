@@ -5,7 +5,7 @@ Ver .env.example para a lista completa de variáveis esperadas.
 
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import PositiveInt, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -86,6 +86,18 @@ class Settings(BaseSettings):
     # quem termina o teste não tem como pagar.
     plano_bloqueio_habilitado: bool = False
 
+    # Limites por plano (issue #133, ADR-019): quantas empresas clientes e
+    # quantos usuários (ativos mais convites pendentes) a conta pode ter.
+    # Inteiros positivos e opcionais: sem valor, não há limite. Os valores
+    # ainda não foram decididos, e até o gateway ninguém os configura. A regra
+    # mora em app/core/plano.py.
+    limite_empresas_essencial: PositiveInt | None = None
+    limite_empresas_padrao: PositiveInt | None = None
+    limite_empresas_avancado: PositiveInt | None = None
+    limite_usuarios_essencial: PositiveInt | None = None
+    limite_usuarios_padrao: PositiveInt | None = None
+    limite_usuarios_avancado: PositiveInt | None = None
+
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
     # boot com o motivo, em vez de deixar a API no ar sem log.
@@ -100,6 +112,20 @@ class Settings(BaseSettings):
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:
         return (valor.strip().upper() or "INFO") if isinstance(valor, str) else valor
+
+    @field_validator(
+        "limite_empresas_essencial",
+        "limite_empresas_padrao",
+        "limite_empresas_avancado",
+        "limite_usuarios_essencial",
+        "limite_usuarios_padrao",
+        "limite_usuarios_avancado",
+        mode="before",
+    )
+    @classmethod
+    def _limite_vazio_e_sem_limite(cls, valor: object) -> object:
+        # `LIMITE_EMPRESAS_PADRAO=` no .env é o mesmo que não ter a variável.
+        return None if isinstance(valor, str) and not valor.strip() else valor
 
     @field_validator("llm_modo_descricao", mode="before")
     @classmethod

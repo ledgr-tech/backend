@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
+from app.models.usuario import PAPEIS_SEM_ADMIN
 
 
 class Convite(Base, TimestampMixin):
@@ -25,6 +26,10 @@ class Convite(Base, TimestampMixin):
     três datas são `timestamptz`, comparadas com o `now()` do Postgres. O
     índice (`conta_id`, `criado_em`) serve à contagem de envios por hora.
 
+    `papel` (issue #133, ADR-019) é o papel que o convidado recebe no aceite:
+    'gestor' ou 'analista', nunca 'admin' (o admin só muda por transferência).
+    Os convites anteriores à #133 receberam 'gestor' na migração.
+
     `convidado_por_id` vira NULL se o usuário for apagado (o mesmo padrão de
     `fechamentos.fechado_por_id`); remover pela rota não apaga a linha.
     """
@@ -35,6 +40,10 @@ class Convite(Base, TimestampMixin):
             "usado_em IS NULL OR cancelado_em IS NULL",
             name="ck_convites_usado_ou_cancelado",
         ),
+        CheckConstraint(
+            "papel IN (" + ", ".join(f"'{papel}'" for papel in PAPEIS_SEM_ADMIN) + ")",
+            name="ck_convites_papel_valido",
+        ),
         Index("ix_convites_conta_id_criado_em", "conta_id", "criado_em"),
     )
 
@@ -43,6 +52,7 @@ class Convite(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("contas.id"), nullable=False
     )
     email: Mapped[str] = mapped_column(String, nullable=False)
+    papel: Mapped[str] = mapped_column(String, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     convidado_por_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("usuarios.id", ondelete="SET NULL"), nullable=True

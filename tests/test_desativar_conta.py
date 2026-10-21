@@ -180,7 +180,7 @@ def test_administrador_com_outro_usuario_ativo_e_409(db_session, criar_usuario, 
 
     assert response.status_code == 409
     assert response.json() == {
-        "detail": "Remova os outros usuários da conta antes de desativar a sua conta."
+        "detail": "Transfira o papel de admin antes de desativar a sua conta."
     }
     assert _recarregar(db_session, admin).removido_em is None
     assert _recarregar(db_session, convidado).removido_em is None

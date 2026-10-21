@@ -87,6 +87,8 @@ LIMITE_REDEFINICAO_SENHA = "10/minute"
 LIMITE_TROCA_SENHA_POR_USUARIO = "5/minute"
 # Desativação da própria conta (issue #68): também confere a senha atual.
 LIMITE_DESATIVACAO_CONTA_POR_USUARIO = "5/minute"
+# Transferência do admin (issue #133): também confere a senha atual.
+LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO = "5/minute"
 # GET /me (issue #81): só leitura, sem risco de força bruta, mas o front
 # consulta a cada carregamento de tela — limite bem mais alto que o da troca.
 LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"

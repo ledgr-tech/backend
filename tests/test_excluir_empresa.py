@@ -168,6 +168,7 @@ def _povoar(
         convidado,
         Convite(
             conta_id=conta.id,
+            papel="analista",
             email=f"convite-{sufixo}@teste.com",
             token_hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
             convidado_por_id=admin.id,

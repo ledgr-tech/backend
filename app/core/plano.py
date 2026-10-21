@@ -17,16 +17,32 @@ nunca divergirem. É calculada, nunca gravada:
 
 O "agora" é o relógio da aplicação da #75 (`app.core.auth._agora`, em UTC),
 o mesmo das sessões; chamado pelo módulo, para os testes congelarem um só.
+
+Limites por plano (issue #133, ADR-019): `limite_da_conta` diz quantas
+empresas ou quantos usuários a conta pode ter, pelas variáveis
+`LIMITE_<RECURSO>_<PLANO>` (app/core/config.py). Vale o plano escolhido, com
+assinatura ativa ou não; sem plano, os limites do essencial. Sem valor
+configurado, `None`: não há limite. `chegou_ao_limite` é a regra do 402: a
+conta no limite não adiciona mais, e quem já passou dele (limite ligado ou
+reduzido depois) mantém tudo, só não cresce. Contar o que a conta usa precisa
+de banco e fica em app/services/plano.py.
 """
 
 from datetime import datetime, timedelta
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 PLANOS = ("essencial", "padrao", "avancado")
 Plano = Literal["essencial", "padrao", "avancado"]
 DURACAO_TESTE = timedelta(days=14)
 
 Situacao = Literal["sem_plano", "teste", "teste_encerrado", "ativo"]
+
+Recurso = Literal["empresas", "usuarios"]
+# Sem plano escolhido, a conta tem os limites do plano de entrada.
+PLANO_DOS_LIMITES_SEM_PLANO: Plano = "essencial"
 
 
 class _ComPlano(Protocol):
@@ -41,6 +57,21 @@ def agora() -> datetime:
     from app.core import auth
 
     return auth._agora()
+
+
+def limite_da_conta(
+    conta: _ComPlano, recurso: Recurso, configuracao: "Settings | None" = None
+) -> int | None:
+    """Quantas empresas ou quantos usuários a conta pode ter; `None` é sem limite."""
+    if configuracao is None:
+        from app.core.config import settings as configuracao
+    plano = conta.plano or PLANO_DOS_LIMITES_SEM_PLANO
+    return getattr(configuracao, f"limite_{recurso}_{plano}")
+
+
+def chegou_ao_limite(usados: int, maximo: int | None) -> bool:
+    """A conta não pode adicionar mais um: está no limite ou acima dele."""
+    return maximo is not None and usados >= maximo
 
 
 def situacao_da_conta(conta: _ComPlano, instante: datetime | None = None) -> Situacao:

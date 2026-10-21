@@ -5,12 +5,12 @@ as duas rotas pelo corpo, nunca pela URL. Rate limit por IP igual ao do
 `/register` (`LIMITE_CONVITE`).
 
 `POST /convites/consultar` devolve o e-mail convidado, a razão social da
-conta e a validade, para a página mostrar quem está sendo convidado e para onde. Não
+conta, o papel e a validade, para a página mostrar quem está sendo convidado e para onde. Não
 consome o convite.
 
 `POST /convites/aceitar` cria o usuário na conta do convite (issue #133), com
-o e-mail do convite e o papel 'analista', e marca o convite como usado. O
-papel escolhido no convite vem na parte 2 da #133. Responde como
+o e-mail e o papel do convite, e marca o convite como usado. O limite de
+usuários do plano não barra o aceite: o convite pendente já ocupava a vaga. Responde como
 o `/register` (`UsuarioResponse`), e o front faz o login em seguida. Não manda
 boas-vindas: quem convidou já avisou.
 
@@ -57,6 +57,7 @@ from app.core.database import get_db
 from app.core.google import identidade_ou_erro_http
 from app.core.rate_limit import LIMITE_CONVITE, limiter
 from app.models import Conta, Usuario
+from app.models.usuario import PapelSemAdmin
 from app.services.convites import convite_pendente_pelo_token
 
 logger = logging.getLogger(__name__)
@@ -64,9 +65,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/convites", tags=["convites"])
 
 Token = Annotated[str, Field(min_length=1, max_length=256)]
-
-# Até o convite ter papel (parte 2 da issue #133), todo convidado é analista.
-PAPEL_DO_CONVIDADO = "analista"
 
 
 class ConsultaConviteRequest(BaseModel):
@@ -76,6 +74,7 @@ class ConsultaConviteRequest(BaseModel):
 class ConsultaConviteResponse(BaseModel):
     email: str
     razao_social: str
+    papel: PapelSemAdmin
     expira_em: datetime
 
 
@@ -120,7 +119,10 @@ def consultar(
         raise _convite_invalido()
     razao_social = db.scalar(select(Conta.razao_social).where(Conta.id == convite.conta_id))
     return ConsultaConviteResponse(
-        email=convite.email, razao_social=razao_social, expira_em=convite.expira_em
+        email=convite.email,
+        razao_social=razao_social,
+        papel=convite.papel,
+        expira_em=convite.expira_em,
     )
 
 
@@ -149,7 +151,7 @@ def aceitar(
         nome=dados.nome,
         email=convite.email,
         senha_hash=senha.gerar_hash(dados.senha),
-        papel=PAPEL_DO_CONVIDADO,
+        papel=convite.papel,
     )
     db.add(usuario)
     convite.usado_em = func.now()
@@ -211,7 +213,7 @@ def aceitar_com_google(
         email=convite.email,
         senha_hash=None,
         google_sub=identidade.sub,
-        papel=PAPEL_DO_CONVIDADO,
+        papel=convite.papel,
     )
     db.add(usuario)
     convite.usado_em = func.now()

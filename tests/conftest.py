@@ -397,12 +397,51 @@ def gerar_cnpj():
     return _gerar_cnpj
 
 
+def _apagar_empresa(db_session, empresa_id: uuid.UUID) -> None:
+    """Apaga a empresa e tudo o que é dela, sem commit. Convites e usuários são
+    da conta desde a issue #133 e saem na limpeza de `criar_conta`."""
+    # Eventos de decisão (issue #83) têm FK pra extratos e usuarios.
+    db_session.query(DecisaoLinha).filter_by(empresa_id=empresa_id).delete()
+    db_session.query(Fechamento).filter_by(empresa_id=empresa_id).delete()
+    extrato_ids = [
+        row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()
+    ]
+    if extrato_ids:
+        # Antes de lançamentos/extratos, por causa das FKs de
+        # conciliacoes/execucoes_conciliacao (issue #27, ADR-010).
+        db_session.query(Conciliacao).filter(
+            Conciliacao.extrato_banco_id.in_(extrato_ids)
+            | Conciliacao.extrato_sistema_id.in_(extrato_ids)
+        ).delete(synchronize_session=False)
+        db_session.query(ExecucaoConciliacao).filter(
+            ExecucaoConciliacao.extrato_banco_id.in_(extrato_ids)
+            | ExecucaoConciliacao.extrato_sistema_id.in_(extrato_ids)
+        ).delete(synchronize_session=False)
+        db_session.query(Lancamento).filter(Lancamento.extrato_id.in_(extrato_ids)).delete(
+            synchronize_session=False
+        )
+        db_session.query(LinhaInvalida).filter(LinhaInvalida.extrato_id.in_(extrato_ids)).delete(
+            synchronize_session=False
+        )
+        db_session.query(Extrato).filter(Extrato.id.in_(extrato_ids)).delete(
+            synchronize_session=False
+        )
+    # Configuracao e ExplicacaoDivergencia são FK direta de Empresa (não
+    # passam por Extrato) — apagar antes da Empresa, senão a FK barra o
+    # delete (issue #22 foi o primeiro teste a gravar Configuracao aqui;
+    # issue #28/ADR-011 acrescenta o cache de explicações).
+    db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
+    db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
+    db_session.query(Empresa).filter_by(id=empresa_id).delete()
+
+
 @pytest.fixture
 def criar_conta(db_session):
     """Fábrica de Conta real no banco (issue #133), sem empresa. A limpeza no
     fim do teste apaga a conta, os convites e os usuários dela, inclusive os
     criados via HTTP (aceite de convite), e qualquer empresa que tenha sobrado
-    nela. Roda depois da limpeza de `criar_empresa`, que depende desta."""
+    nela, com os dados (as criadas pelo `POST /empresas`, por exemplo). Roda
+    depois da limpeza de `criar_empresa`, que depende desta."""
     contas_criadas: list[uuid.UUID] = []
 
     def _criar(razao_social: str = "Conta de teste", cnpj: str | None = None) -> Conta:
@@ -416,9 +455,16 @@ def criar_conta(db_session):
 
     db_session.rollback()
     for conta_id in contas_criadas:
+        # Empresas criadas pela API (POST /empresas), fora de `criar_empresa`.
+        for empresa_id in list(
+            db_session.scalars(select(Empresa.id).where(Empresa.conta_id == conta_id))
+        ):
+            _apagar_empresa(db_session, empresa_id)
+        db_session.query(DecisaoLinha).filter(
+            DecisaoLinha.usuario_id.in_(select(Usuario.id).where(Usuario.conta_id == conta_id))
+        ).delete(synchronize_session=False)
         db_session.query(Convite).filter_by(conta_id=conta_id).delete()
         db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
-        db_session.query(Empresa).filter_by(conta_id=conta_id).delete()
         db_session.query(Conta).filter_by(id=conta_id).delete()
     db_session.commit()
 
@@ -454,41 +500,7 @@ def criar_empresa(db_session, criar_conta):
     yield _criar
 
     for empresa_id in empresas_criadas:
-        # Eventos de decisão (issue #83) têm FK pra extratos e usuarios.
-        db_session.query(DecisaoLinha).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(Fechamento).filter_by(empresa_id=empresa_id).delete()
-        extrato_ids = [
-            row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()
-        ]
-        if extrato_ids:
-            # Antes de lançamentos/extratos, por causa das FKs de
-            # conciliacoes/execucoes_conciliacao (issue #27, ADR-010).
-            db_session.query(Conciliacao).filter(
-                Conciliacao.extrato_banco_id.in_(extrato_ids)
-                | Conciliacao.extrato_sistema_id.in_(extrato_ids)
-            ).delete(synchronize_session=False)
-            db_session.query(ExecucaoConciliacao).filter(
-                ExecucaoConciliacao.extrato_banco_id.in_(extrato_ids)
-                | ExecucaoConciliacao.extrato_sistema_id.in_(extrato_ids)
-            ).delete(synchronize_session=False)
-            db_session.query(Lancamento).filter(Lancamento.extrato_id.in_(extrato_ids)).delete(
-                synchronize_session=False
-            )
-            db_session.query(LinhaInvalida).filter(
-                LinhaInvalida.extrato_id.in_(extrato_ids)
-            ).delete(synchronize_session=False)
-            db_session.query(Extrato).filter(Extrato.id.in_(extrato_ids)).delete(
-                synchronize_session=False
-            )
-        # Configuracao e ExplicacaoDivergencia são FK direta de Empresa (não
-        # passam por Extrato) — apagar antes da Empresa, senão a FK barra o
-        # delete (issue #22 foi o primeiro teste a gravar Configuracao aqui;
-        # issue #28/ADR-011 acrescenta o cache de explicações).
-        db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
-        # Convites e usuários são da conta desde a issue #133 e saem na
-        # limpeza de `criar_conta`.
-        db_session.query(Empresa).filter_by(id=empresa_id).delete()
+        _apagar_empresa(db_session, empresa_id)
     db_session.commit()
 
 
