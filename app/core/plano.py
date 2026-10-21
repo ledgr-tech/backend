@@ -1,10 +1,11 @@
-"""Plano da empresa e período de teste (issue #122): a regra, sem banco.
+"""Plano da conta e período de teste (issue #122): a regra, sem banco. Desde a
+issue #133 (ADR-019), o plano é da conta, e não mais da empresa.
 
-`PLANOS` é a lista única dos planos escolhíveis; o CHECK de `empresas.plano`,
+`PLANOS` é a lista única dos planos escolhíveis; o CHECK de `contas.plano`,
 o corpo do `POST /empresa/plano` e o script de ativação saem dela. "Volume"
 não está aqui: é contato comercial. Nenhum preço mora no backend.
 
-`situacao_da_empresa` é a única conta da situação, usada pelo `GET /me`, pelo
+`situacao_da_conta` é a única conta da situação, usada pelo `GET /me`, pelo
 `POST /empresa/plano` e pelo bloqueio do `POST /conciliacoes`, para os três
 nunca divergirem. É calculada, nunca gravada:
 
@@ -35,18 +36,18 @@ class _ComPlano(Protocol):
 
 
 def agora() -> datetime:
-    # Import aqui: app.core.auth importa os models, e o model de empresa
+    # Import aqui: app.core.auth importa os models, e o model de conta
     # importa `PLANOS` deste módulo.
     from app.core import auth
 
     return auth._agora()
 
 
-def situacao_da_empresa(empresa: _ComPlano, instante: datetime | None = None) -> Situacao:
-    if empresa.assinatura_ativa:
+def situacao_da_conta(conta: _ComPlano, instante: datetime | None = None) -> Situacao:
+    if conta.assinatura_ativa:
         return "ativo"
-    if empresa.plano is None or empresa.teste_termina_em is None:
+    if conta.plano is None or conta.teste_termina_em is None:
         return "sem_plano"
-    if (instante or agora()) < empresa.teste_termina_em:
+    if (instante or agora()) < conta.teste_termina_em:
         return "teste"
     return "teste_encerrado"
