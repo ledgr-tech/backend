@@ -34,7 +34,16 @@ lenta ou recusando o formato) não bloqueia, e a empresa nasce não
 verificada. Com "ativa", `cnpj_verificado_em` recebe o instante do cadastro;
 nada mais da consulta é gravado. O `/register/verificar` devolve a situação
 (`cnpj_situacao`) e a razão social da Receita para a tela oferecer, e só
-consulta quando o CNPJ ainda não tem empresa no Ledgr.
+consulta quando o CNPJ ainda não tem conta no Ledgr.
+
+Contas e empresas clientes (issue #133, ADR-019): o cadastro cria a conta e a
+primeira empresa cliente dela, com o mesmo CNPJ e a mesma razão social (a
+consulta na Receita roda uma vez e vale para as duas), a configuração dessa
+empresa e o usuário com papel 'admin'. "CNPJ já cadastrado" olha o CNPJ das
+contas, inclusive no `/register/verificar`: o CNPJ da conta é único no
+sistema, e o mesmo CNPJ como empresa cliente de outra conta não impede o
+cadastro. As respostas trazem `conta_id`, o valor que o front grava no token,
+e `empresa_id` com o mesmo valor, obsoleto, até o front migrar.
 """
 
 import logging
@@ -63,7 +72,7 @@ from app.core.rate_limit import (
     LIMITE_VERIFICACAO_CADASTRO,
     limiter,
 )
-from app.models import Configuracao, Empresa, Usuario
+from app.models import Configuracao, Conta, Empresa, Usuario
 from app.services.consulta_cnpj import (
     ConsultaCNPJ,
     ResultadoConsultaCNPJ,
@@ -146,9 +155,23 @@ class LoginRequest(BaseModel):
 
 class UsuarioResponse(BaseModel):
     id: uuid.UUID
-    empresa_id: uuid.UUID
+    conta_id: uuid.UUID
+    empresa_id: uuid.UUID = Field(
+        description="Obsoleto: igual a `conta_id` (issue #133). Use `conta_id`.",
+        json_schema_extra={"deprecated": True},
+    )
     nome: str
     email: str
+
+
+def resposta_de_usuario(usuario: Usuario) -> UsuarioResponse:
+    return UsuarioResponse(
+        id=usuario.id,
+        conta_id=usuario.conta_id,
+        empresa_id=usuario.conta_id,
+        nome=usuario.nome,
+        email=usuario.email,
+    )
 
 
 class LoginResponse(UsuarioResponse):
@@ -160,13 +183,7 @@ class LoginResponse(UsuarioResponse):
 
 def resposta_de_login(usuario: Usuario) -> LoginResponse:
     """`LoginResponse` com o `auth_time` de agora (`instante_do_login`)."""
-    return LoginResponse(
-        id=usuario.id,
-        empresa_id=usuario.empresa_id,
-        nome=usuario.nome,
-        email=usuario.email,
-        auth_time=instante_do_login(),
-    )
+    return LoginResponse(**resposta_de_usuario(usuario).model_dump(), auth_time=instante_do_login())
 
 
 # Um ID token do Google tem 1 a 2 KB.
@@ -252,6 +269,32 @@ def cnpj_verificado_em(resultado: ResultadoConsultaCNPJ) -> datetime | None:
     return datetime.now(UTC) if resultado.situacao == "ativa" else None
 
 
+def cnpj_de_conta(db: Session, cnpj: str) -> uuid.UUID | None:
+    """A conta com este CNPJ, se houver (issue #133: o CNPJ único no sistema é
+    o da conta)."""
+    return db.scalar(select(Conta.id).where(Conta.cnpj == cnpj))
+
+
+def nova_conta(
+    razao_social: str, cnpj: str, receita: ResultadoConsultaCNPJ
+) -> tuple[Conta, Empresa, Configuracao]:
+    """A conta, a primeira empresa cliente dela, com o mesmo CNPJ e a mesma
+    razão social, e a configuração dessa empresa (issue #133). A consulta na
+    Receita vale para as duas."""
+    verificado_em = cnpj_verificado_em(receita)
+    conta = Conta(
+        id=uuid.uuid4(), razao_social=razao_social, cnpj=cnpj, cnpj_verificado_em=verificado_em
+    )
+    empresa = Empresa(
+        id=uuid.uuid4(),
+        conta_id=conta.id,
+        razao_social=razao_social,
+        cnpj=cnpj,
+        cnpj_verificado_em=verificado_em,
+    )
+    return conta, empresa, Configuracao(empresa_id=empresa.id)
+
+
 @router.post(
     "/register",
     response_model=UsuarioResponse,
@@ -269,25 +312,20 @@ def cadastrar(
     email = normalizar_email(dados.email)
     if db.scalar(select(Usuario.id).where(Usuario.email == email)):
         raise _conflito("E-mail já cadastrado.")
-    if db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj)):
+    if cnpj_de_conta(db, dados.cnpj):
         raise _conflito("CNPJ já cadastrado.")
     receita = situacao_na_receita(db, consulta, dados.cnpj)
     barrar_cnpj_recusado(receita, dados.cnpj)
 
-    empresa = Empresa(
-        id=uuid.uuid4(),
-        razao_social=dados.razao_social,
-        cnpj=dados.cnpj,
-        cnpj_verificado_em=cnpj_verificado_em(receita),
-    )
+    conta, empresa, configuracao = nova_conta(dados.razao_social, dados.cnpj, receita)
     usuario = Usuario(
-        empresa_id=empresa.id,
+        conta_id=conta.id,
         nome=dados.nome,
         email=email,
         senha_hash=senha.gerar_hash(dados.senha),
-        administrador=True,  # quem cadastra a empresa a administra (issue #69)
+        papel="admin",  # quem cadastra a conta a administra (issues #69 e #133)
     )
-    db.add_all([empresa, Configuracao(empresa_id=empresa.id), usuario])
+    db.add_all([conta, empresa, configuracao, usuario])
     try:
         db.commit()
     except IntegrityError as exc:
@@ -296,9 +334,7 @@ def cadastrar(
         raise _conflito("E-mail ou CNPJ já cadastrado.") from exc
 
     agendar_boas_vindas(tarefas, provedor, usuario, dados.razao_social)
-    return UsuarioResponse(
-        id=usuario.id, empresa_id=empresa.id, nome=usuario.nome, email=usuario.email
-    )
+    return resposta_de_usuario(usuario)
 
 
 def agendar_boas_vindas(
@@ -356,7 +392,7 @@ def verificar_cadastro(
     nem o CNPJ.
 
     Situação na Receita (issue #119): só consulta quando o CNPJ ainda não tem
-    empresa no Ledgr (o tempo da consulta revela isso, mas `cnpj_disponivel`
+    conta no Ledgr (o tempo da consulta revela isso, mas `cnpj_disponivel`
     já diz). Sem consulta, ou com ela indisponível, `cnpj_situacao` é
     "nao_verificado". A razão social da Receita só vem com "ativa" ou
     "inativa". O resultado fica 24 horas no cache, e o `/register` em seguida
@@ -365,7 +401,7 @@ def verificar_cadastro(
     email_em_uso = db.scalar(
         select(Usuario.id).where(Usuario.email == normalizar_email(dados.email))
     )
-    cnpj_em_uso = db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj))
+    cnpj_em_uso = cnpj_de_conta(db, dados.cnpj)
     receita = situacao_na_receita(db, consulta, dados.cnpj) if cnpj_em_uso is None else INDISPONIVEL
     return VerificacaoCadastroResponse(
         email_disponivel=email_em_uso is None,
@@ -413,13 +449,7 @@ def login(
 
     auth_time = instante_do_login()  # depois de a senha ser conferida
     bloqueio_login.limpar(email)
-    return LoginResponse(
-        id=usuario.id,
-        empresa_id=usuario.empresa_id,
-        nome=usuario.nome,
-        email=usuario.email,
-        auth_time=auth_time,
-    )
+    return LoginResponse(**resposta_de_usuario(usuario).model_dump(), auth_time=auth_time)
 
 
 def usuario_pelo_google_sub(db: Session, sub: str) -> Usuario | None:
@@ -472,8 +502,8 @@ def cadastrar_google(
     consulta: ConsultaCnpjDependencia,
 ) -> LoginResponse:
     """Cadastro pelo Google (issue #73): como o `/register`, com o e-mail e o
-    `google_sub` do token e sem senha. Quem cadastra é o administrador da
-    empresa, e as boas-vindas saem do mesmo jeito. Responde com
+    `google_sub` do token e sem senha. Quem cadastra é o admin da conta, e
+    as boas-vindas saem do mesmo jeito. Responde com
     `LoginResponse`, porque já é o login."""
     # Antes do banco: a busca das chaves não pode segurar uma transação.
     identidade = identidade_ou_erro_http(dados.id_token, logger, "cadastro_google")
@@ -485,7 +515,7 @@ def cadastrar_google(
     if db.scalar(select(Usuario.id).where(Usuario.email == identidade.email)):
         logger.info("cadastro_google resultado=email_em_uso")
         raise _conflito("E-mail já cadastrado.")
-    if db.scalar(select(Empresa.id).where(Empresa.cnpj == dados.cnpj)):
+    if cnpj_de_conta(db, dados.cnpj):
         logger.info("cadastro_google resultado=cnpj_em_uso")
         raise _conflito("CNPJ já cadastrado.")
     receita = situacao_na_receita(db, consulta, dados.cnpj)
@@ -493,21 +523,16 @@ def cadastrar_google(
         logger.info("cadastro_google resultado=cnpj_%s", receita.situacao)
     barrar_cnpj_recusado(receita, dados.cnpj)
 
-    empresa = Empresa(
-        id=uuid.uuid4(),
-        razao_social=dados.razao_social,
-        cnpj=dados.cnpj,
-        cnpj_verificado_em=cnpj_verificado_em(receita),
-    )
+    conta, empresa, configuracao = nova_conta(dados.razao_social, dados.cnpj, receita)
     usuario = Usuario(
-        empresa_id=empresa.id,
+        conta_id=conta.id,
         nome=nome,
         email=identidade.email,
         senha_hash=None,
         google_sub=identidade.sub,
-        administrador=True,  # quem cadastra a empresa a administra (issue #69)
+        papel="admin",  # quem cadastra a conta a administra (issues #69 e #133)
     )
-    db.add_all([empresa, Configuracao(empresa_id=empresa.id), usuario])
+    db.add_all([conta, empresa, configuracao, usuario])
     try:
         db.commit()
     except IntegrityError as exc:

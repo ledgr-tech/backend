@@ -4,12 +4,13 @@ A página `/aceitar-convite` do front lê o token do fragmento do link e chama
 as duas rotas pelo corpo, nunca pela URL. Rate limit por IP igual ao do
 `/register` (`LIMITE_CONVITE`).
 
-`POST /convites/consultar` devolve o e-mail convidado, a razão social e a
-validade, para a página mostrar quem está sendo convidado e para onde. Não
+`POST /convites/consultar` devolve o e-mail convidado, a razão social da
+conta e a validade, para a página mostrar quem está sendo convidado e para onde. Não
 consome o convite.
 
-`POST /convites/aceitar` cria o usuário (não administrador) na empresa do
-convite, com o e-mail do convite, e marca o convite como usado. Responde como
+`POST /convites/aceitar` cria o usuário na conta do convite (issue #133), com
+o e-mail do convite e o papel 'analista', e marca o convite como usado. O
+papel escolhido no convite vem na parte 2 da #133. Responde como
 o `/register` (`UsuarioResponse`), e o front faz o login em seguida. Não manda
 boas-vindas: quem convidou já avisou.
 
@@ -48,13 +49,14 @@ from app.api.auth import (
     UsuarioResponse,
     nome_da_conta,
     resposta_de_login,
+    resposta_de_usuario,
     usuario_pelo_google_sub,
 )
 from app.core import senha
 from app.core.database import get_db
 from app.core.google import identidade_ou_erro_http
 from app.core.rate_limit import LIMITE_CONVITE, limiter
-from app.models import Empresa, Usuario
+from app.models import Conta, Usuario
 from app.services.convites import convite_pendente_pelo_token
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/convites", tags=["convites"])
 
 Token = Annotated[str, Field(min_length=1, max_length=256)]
+
+# Até o convite ter papel (parte 2 da issue #133), todo convidado é analista.
+PAPEL_DO_CONVIDADO = "analista"
 
 
 class ConsultaConviteRequest(BaseModel):
@@ -113,7 +118,7 @@ def consultar(
     if convite is None:
         logger.info("convite_consulta resultado=token_invalido")
         raise _convite_invalido()
-    razao_social = db.scalar(select(Empresa.razao_social).where(Empresa.id == convite.empresa_id))
+    razao_social = db.scalar(select(Conta.razao_social).where(Conta.id == convite.conta_id))
     return ConsultaConviteResponse(
         email=convite.email, razao_social=razao_social, expira_em=convite.expira_em
     )
@@ -140,17 +145,15 @@ def aceitar(
 
     usuario = Usuario(
         id=uuid.uuid4(),
-        empresa_id=convite.empresa_id,
+        conta_id=convite.conta_id,
         nome=dados.nome,
         email=convite.email,
         senha_hash=senha.gerar_hash(dados.senha),
-        administrador=False,
+        papel=PAPEL_DO_CONVIDADO,
     )
     db.add(usuario)
     convite.usado_em = func.now()
-    resposta = UsuarioResponse(
-        id=usuario.id, empresa_id=usuario.empresa_id, nome=usuario.nome, email=usuario.email
-    )
+    resposta = resposta_de_usuario(usuario)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -203,12 +206,12 @@ def aceitar_com_google(
 
     usuario = Usuario(
         id=uuid.uuid4(),
-        empresa_id=convite.empresa_id,
+        conta_id=convite.conta_id,
         nome=nome,
         email=convite.email,
         senha_hash=None,
         google_sub=identidade.sub,
-        administrador=False,
+        papel=PAPEL_DO_CONVIDADO,
     )
     db.add(usuario)
     convite.usado_em = func.now()
