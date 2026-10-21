@@ -13,6 +13,9 @@ Regra do mês, a mesma do front (`fechamento.ts` e `execucoesVigentes`):
   linhas não lidas (`linhas_invalidas`) dos extratos do banco e do sistema
   dos pares, contando cada extrato uma vez. O mês está pronto quando não
   há nenhuma das duas.
+- Desde a issue #132, justificativa em vigor ainda não aprovada conta à parte
+  (`aguardando_aprovacao`): não é pendência (que é "sem justificativa"), mas
+  impede o fechamento, mesmo com ressalva. `justificadas` são só as aprovadas.
 
 Tudo com número fixo de consultas, qualquer que seja o número de extratos.
 Nunca loga descrição de lançamento nem ressalva.
@@ -166,7 +169,7 @@ def resumo_do_mes(db: Session, empresa_id: uuid.UUID, pares: list[ParDoMes]) -> 
         for categoria in CATEGORIAS:
             contagens[categoria] += getattr(par.execucao, categoria)
 
-    justificadas = pendentes = linhas_nao_lidas = 0
+    justificadas = aguardando_aprovacao = pendentes = linhas_nao_lidas = 0
     valor_em_aberto = Decimal("0.00")
     if pares:
         lanc_banco = aliased(Lancamento)
@@ -215,8 +218,10 @@ def resumo_do_mes(db: Session, empresa_id: uuid.UUID, pares: list[ParDoMes]) -> 
             vigente = decisoes.decisao_vigente(
                 eventos_por_linha.get((linha.extrato_banco_id, chave), [])
             )
-            if vigente is not None and vigente.tipo == "justificada":
+            if decisoes.justificativa_aprovada(vigente):
                 justificadas += 1
+            elif decisoes.aguardando_aprovacao(vigente):
+                aguardando_aprovacao += 1
             else:
                 pendentes += 1
                 valor = (
@@ -256,6 +261,7 @@ def resumo_do_mes(db: Session, empresa_id: uuid.UUID, pares: list[ParDoMes]) -> 
         ],
         "contagens": contagens,
         "justificadas": justificadas,
+        "aguardando_aprovacao": aguardando_aprovacao,
         "pendentes": pendentes,
         "linhas_nao_lidas": linhas_nao_lidas,
         "valor_em_aberto": str(valor_em_aberto.quantize(Decimal("0.01"))),
