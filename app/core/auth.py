@@ -305,15 +305,20 @@ def obter_empresa_id_ativa(
 _NOME_DO_PAPEL = {"admin": "o admin", "gestor": "o gestor", "analista": "o analista"}
 
 
+def mensagem_de_papel(papeis: tuple[Papel, ...]) -> str:
+    """O `detail` do 403 de quem não tem um dos `papeis`."""
+    quem = " ou ".join(_NOME_DO_PAPEL[papel] for papel in papeis)
+    verbo = "pode" if len(papeis) == 1 else "podem"
+    return f"Só {quem} da conta {verbo} fazer isso."
+
+
 def exigir_papel(*papeis: Papel):
     """Dependency que só deixa passar os `papeis` dados; os outros recebem 403
     com quem pode (issue #133, ADR-019). Vale para a conta toda, sem olhar a
     empresa ativa: a v1 não tem permissão por empresa."""
     if not papeis:
         raise ValueError("exigir_papel precisa de pelo menos um papel")
-    quem = " ou ".join(_NOME_DO_PAPEL[papel] for papel in papeis)
-    verbo = "pode" if len(papeis) == 1 else "podem"
-    detalhe = f"Só {quem} da conta {verbo} fazer isso."
+    detalhe = mensagem_de_papel(papeis)
 
     def _usuario_com_papel(
         usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],

@@ -63,9 +63,28 @@ para a mesma linha em qualquer rodada; sem `extrato_sistema_id` na query e
 com várias rodadas, a mesma chave aparece uma vez por par, com a mesma
 decisão (o front sempre filtra por par). A exportação CSV não traz decisões.
 
+Aprovação (issue #132, ADR-019): toda justificativa nasce aguardando
+aprovação. `decisao` traz `situacao` ("pendente" ou "aprovada" na
+justificada, `null` na conferida) e, quando aprovada, `aprovada_por` e
+`aprovada_em`. Os eventos de aprovação e de rejeição aparecem em `eventos`,
+com o motivo da rejeição em `texto`. Na raiz, `aguardando_aprovacao` conta as
+linhas divergentes da rodada atual com justificativa aguardando aprovação.
+
 `POST /conciliacoes/{extrato_id}/decisoes` grava um evento (conferir,
-justificar ou desfazer) na rodada mais recente do extrato do banco e devolve
-a decisão em vigor depois dele. Autentica o usuário (`sub` do token), que vira
+justificar, desfazer, aprovar ou rejeitar a justificativa) na rodada mais
+recente do extrato do banco e devolve a decisão em vigor depois dele (`null`
+depois de desfazer ou rejeitar). Aprovar e rejeitar são só do admin e do
+gestor (403 para o analista, antes de qualquer outra validação) e exigem uma
+justificativa aguardando aprovação na linha (422). A rejeição aceita um
+motivo opcional em `texto`, com o tamanho máximo da justificativa; a
+aprovação não tem texto. Quem justificou pode aprovar a própria.
+
+Enquanto `APROVACAO_JUSTIFICATIVAS_HABILITADA` estiver desligada (o padrão, até
+o front aprovar), a justificativa é gravada já aprovada: na mesma transação
+entra a `justificativa_aprovada` em nome de quem justificou, um microssegundo
+depois dela. Nada fica aguardando, e o fechamento funciona como antes. As
+rotas de aprovar e rejeitar, e o 403 do analista nelas, valem nos dois
+estados. Autentica o usuário (`sub` do token), que vira
 o autor. Pega a trava do extrato do banco (a mesma de `conciliar_extratos`,
 app/services/travas.py) ANTES de calcular a rodada mais recente, para não
 decidir sobre uma linha enquanto uma rodada nova a substitui, mesmo com outro
@@ -78,7 +97,7 @@ descrição de lançamento.
 
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -88,7 +107,13 @@ from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.core.auth import EmpresaAtiva, obter_empresa_ativa, obter_empresa_id_ativa
+from app.core.auth import (
+    EmpresaAtiva,
+    mensagem_de_papel,
+    obter_empresa_ativa,
+    obter_empresa_id_ativa,
+)
+from app.core.config import settings
 from app.core.database import get_db
 from app.models import Conciliacao, DecisaoLinha, Extrato, Lancamento
 from app.services import decisoes, saldo
@@ -219,12 +244,26 @@ class DecisaoResponse(BaseModel):
     autor: str
     em: datetime
     rodada: int
+    # Só em `decisao` (issue #132); nos itens de `eventos`, sempre `null`.
+    situacao: decisoes.SituacaoJustificativa | None = None
+    aprovada_por: str | None = None
+    aprovada_em: datetime | None = None
 
 
-def _decisao_response(evento: DecisaoLinha | None) -> DecisaoResponse | None:
-    if evento is None:
-        return None
+def _evento_response(evento: DecisaoLinha) -> DecisaoResponse:
     return DecisaoResponse(**vars(decisoes.como_evento(evento)))
+
+
+def _decisao_response(vigente: decisoes.DecisaoEmVigor | None) -> DecisaoResponse | None:
+    if vigente is None:
+        return None
+    aprovacao = vigente.aprovacao
+    return DecisaoResponse(
+        **vars(decisoes.como_evento(vigente.evento)),
+        situacao=vigente.situacao,
+        aprovada_por=aprovacao.autor_nome if aprovacao is not None else None,
+        aprovada_em=aprovacao.em if aprovacao is not None else None,
+    )
 
 
 class ItemConciliacaoResponse(BaseModel):
@@ -248,6 +287,7 @@ class ConciliacaoListaResponse(BaseModel):
     total: int
     limit: int
     offset: int
+    aguardando_aprovacao: int
     itens: list[ItemConciliacaoResponse]
 
 
@@ -378,7 +418,7 @@ def listar_conciliacoes(
                 lancamento_sistema=_lancamento_ou_none(linha, "sistema"),
                 chave=chave,
                 decisao=_decisao_response(decisoes.decisao_vigente(eventos)),
-                eventos=[_decisao_response(evento) for evento in eventos],
+                eventos=[_evento_response(evento) for evento in eventos],
             )
         )
     return ConciliacaoListaResponse(
@@ -387,8 +427,22 @@ def listar_conciliacoes(
         total=total,
         limit=limit,
         offset=offset,
+        aguardando_aprovacao=_aguardando_na_rodada_atual(db, empresa_id, extrato_id),
         itens=itens,
     )
+
+
+def _aguardando_na_rodada_atual(
+    db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID
+) -> int:
+    """Linhas divergentes da rodada mais recente com justificativa aguardando
+    aprovação; 0 sem conciliação. Três consultas, qualquer que seja a página."""
+    rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_banco_id)
+    if rodada is None:
+        return 0
+    par = (extrato_banco_id, rodada.extrato_sistema_id)
+    contagem = decisoes.contar_justificativas(db, empresa_id, {par}).get(par)
+    return contagem.aguardando_aprovacao if contagem is not None else 0
 
 
 @router.get("/{extrato_id}/exportar")
@@ -436,7 +490,18 @@ def exportar_conciliacoes(
 
 TAMANHO_MAXIMO_JUSTIFICATIVA = 1000
 
-TipoDecisao = Literal["conferida", "conferencia_desfeita", "justificada", "justificativa_desfeita"]
+TipoDecisao = Literal[
+    "conferida",
+    "conferencia_desfeita",
+    "justificada",
+    "justificativa_desfeita",
+    "justificativa_aprovada",
+    "justificativa_rejeitada",
+]
+
+SEM_JUSTIFICATIVA_AGUARDANDO = "Não há justificativa aguardando aprovação nesta linha."
+# Quem aprova e rejeita justificativas (issue #132, ADR-019).
+PAPEIS_QUE_APROVAM = ("admin", "gestor")
 
 
 class DecisaoRequest(BaseModel):
@@ -471,6 +536,29 @@ def _linha_da_chave(
     return next((linha for linha in db.execute(consulta) if _chave(linha) == chave), None)
 
 
+def _aprovar_junto(db: Session, justificativa: DecisaoLinha) -> None:
+    """Aprovação de quem justificou, na mesma transação, com a flag de
+    aprovação desligada. O `em` dela é o da justificativa mais um
+    microssegundo: a ordem dos eventos decide a decisão em vigor, e dois
+    INSERTs seguidos podem cair no mesmo instante do `clock_timestamp()`."""
+    db.flush()
+    db.refresh(justificativa, ["em"])
+    db.add(
+        DecisaoLinha(
+            empresa_id=justificativa.empresa_id,
+            extrato_banco_id=justificativa.extrato_banco_id,
+            chave=justificativa.chave,
+            tipo="justificativa_aprovada",
+            texto=None,
+            usuario_id=justificativa.usuario_id,
+            autor_nome=justificativa.autor_nome,
+            rodada=justificativa.rodada,
+            extrato_sistema_id=justificativa.extrato_sistema_id,
+            em=justificativa.em + timedelta(microseconds=1),
+        )
+    )
+
+
 @router.post("/{extrato_id}/decisoes", response_model=DecisaoResponse | None)
 def registrar_decisao(
     extrato_id: uuid.UUID,
@@ -479,6 +567,11 @@ def registrar_decisao(
     db: Annotated[Session, Depends(get_db)],
 ) -> DecisaoResponse | None:
     usuario, empresa_id = ativa.usuario, ativa.empresa.id
+    if corpo.tipo in decisoes.TIPOS_APROVACAO and usuario.papel not in PAPEIS_QUE_APROVAM:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=mensagem_de_papel(PAPEIS_QUE_APROVAM),
+        )
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
 
     # As travas (mês e extrato do banco) vêm ANTES da rodada: uma rodada nova
@@ -518,6 +611,20 @@ def registrar_decisao(
             if corpo.tipo == "conferencia_desfeita":
                 raise _regra_violada("Não há conferência para desfazer nesta linha.")
             raise _regra_violada("Não há justificativa para desfazer nesta linha.")
+    elif corpo.tipo in decisoes.TIPOS_APROVACAO:
+        eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
+        if not decisoes.aguardando_aprovacao(
+            decisoes.decisao_vigente(eventos.get(corpo.chave, []))
+        ):
+            raise _regra_violada(SEM_JUSTIFICATIVA_AGUARDANDO)
+        motivo = (corpo.texto or "").strip() or None
+        if corpo.tipo == "justificativa_aprovada" and motivo is not None:
+            raise _regra_violada("A aprovação não tem texto.")
+        if motivo is not None and len(motivo) > TAMANHO_MAXIMO_JUSTIFICATIVA:
+            raise _regra_violada(
+                f"O motivo pode ter até {TAMANHO_MAXIMO_JUSTIFICATIVA} caracteres."
+            )
+        texto = motivo
 
     evento = DecisaoLinha(
         empresa_id=empresa_id,
@@ -531,9 +638,11 @@ def registrar_decisao(
         extrato_sistema_id=rodada.extrato_sistema_id,
     )
     db.add(evento)
+    if corpo.tipo == "justificada" and not settings.aprovacao_justificativas_habilitada:
+        _aprovar_junto(db, evento)
     db.commit()
 
-    if corpo.tipo in decisoes.TIPOS_DESFAZER:
+    if corpo.tipo in decisoes.TIPOS_DESFAZER or corpo.tipo == "justificativa_rejeitada":
         return None
-    db.refresh(evento)
-    return _decisao_response(evento)
+    eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
+    return _decisao_response(decisoes.decisao_vigente(eventos.get(corpo.chave, [])))

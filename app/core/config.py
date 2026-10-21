@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # quem termina o teste não tem como pagar.
     plano_bloqueio_habilitado: bool = False
 
+    # Aprovação de justificativas (issue #132): ligada, toda justificativa nasce
+    # aguardando aprovação de admin ou gestor, e o mês não fecha com pendente.
+    # Falsa por padrão até o front aprovar: desligada, o backend grava a
+    # aprovação junto com a justificativa, em nome de quem justificou, e nada
+    # fica aguardando (app/api/conciliacoes.py). Ligar não muda o que já foi
+    # gravado: o que foi aprovado com ela desligada continua aprovado.
+    aprovacao_justificativas_habilitada: bool = False
+
     # Limites por plano (issue #133, ADR-019): quantas empresas clientes e
     # quantos usuários (ativos mais convites pendentes) a conta pode ter.
     # Inteiros positivos e opcionais: sem valor, não há limite. Os valores
