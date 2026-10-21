@@ -7,8 +7,8 @@ texto passa a se chamar `ck_decisoes_linha_texto_valido`.
 
 As justificativas em vigor no deploy ficam aprovadas: para cada linha cujo
 último evento é uma `justificada`, entra uma `justificativa_aprovada` com o
-`usuario_id` de quem justificou, `autor_nome` "Aprovada na atualização de
-21/10" e a rodada e o extrato do sistema copiados da justificativa. Os
+`usuario_id` de quem justificou, `autor_nome` "Ledgr (atualização de
+21/10)" e a rodada e o extrato do sistema copiados da justificativa. Os
 resumos congelados dos fechamentos antigos não mudam.
 
 O downgrade apaga essas aprovações da migração e recusa se sobrar qualquer
@@ -32,7 +32,7 @@ down_revision: str | None = "f4b8d6e1a923"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-AUTOR_DA_MIGRACAO = "Aprovada na atualização de 21/10"
+AUTOR_DA_MIGRACAO = "Ledgr (atualização de 21/10)"
 TIPOS_ANTIGOS = "'conferida', 'conferencia_desfeita', 'justificada', 'justificativa_desfeita'"
 TIPOS_NOVOS = "'justificativa_aprovada', 'justificativa_rejeitada'"
 CHECK_TEXTO_ANTIGO = (

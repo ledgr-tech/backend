@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 REVISAO_ANTERIOR = "f4b8d6e1a923"
 REVISAO = "a6c2e8f4b157"
-AUTOR = "Aprovada na atualização de 21/10"
+AUTOR = "Ledgr (atualização de 21/10)"
 
 
 @pytest.fixture

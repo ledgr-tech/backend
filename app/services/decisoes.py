@@ -42,7 +42,7 @@ TIPOS_DECISAO = ("conferida", "justificada")
 TIPOS_DESFAZER = {"conferencia_desfeita": "conferida", "justificativa_desfeita": "justificada"}
 # Aprovar e rejeitar a justificativa em vigor (issue #132): só admin e gestor.
 TIPOS_APROVACAO = ("justificativa_aprovada", "justificativa_rejeitada")
-AUTOR_APROVACAO_DA_MIGRACAO = "Aprovada na atualização de 21/10"
+AUTOR_APROVACAO_DA_MIGRACAO = "Ledgr (atualização de 21/10)"
 
 SituacaoJustificativa = Literal["pendente", "aprovada"]
 
