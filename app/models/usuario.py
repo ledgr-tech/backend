@@ -12,6 +12,9 @@ from app.models.base import Base, TimestampMixin
 # `usuarios.papel`, o `Papel` e a dependency `exigir_papel` saem dela.
 PAPEIS = ("admin", "gestor", "analista")
 Papel = Literal["admin", "gestor", "analista"]
+# Os papéis de um convite e de uma troca de papel: admin só por transferência.
+PAPEIS_SEM_ADMIN = ("gestor", "analista")
+PapelSemAdmin = Literal["gestor", "analista"]
 
 # Domínio do e-mail que o usuário removido recebe no lugar do dele (issue #69).
 # `.invalid` é reservado (RFC 2606): nunca vira endereço de entrega.
