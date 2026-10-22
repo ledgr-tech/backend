@@ -129,6 +129,8 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     `app.dependency_overrides`), que não passa por esta configuração."""
     monkeypatch.setattr(settings, "email_habilitado", False)
     monkeypatch.setattr(settings, "llm_habilitado", False)
+    # Geração automática ao conciliar (issue #140): desligada, como em produção.
+    monkeypatch.setattr(settings, "explicacao_automatica_habilitada", False)
     # Bloqueio da conciliação pelo plano (issue #122): desligado, como em
     # produção até o gateway; quem testa o bloqueio liga no próprio teste.
     monkeypatch.setattr(settings, "plano_bloqueio_habilitado", False)

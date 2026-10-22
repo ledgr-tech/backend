@@ -5,7 +5,7 @@ Ver .env.example para a lista completa de variáveis esperadas.
 
 from typing import Literal
 
-from pydantic import PositiveInt, field_validator
+from pydantic import AliasChoices, Field, PositiveInt, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,8 +31,28 @@ class Settings(BaseSettings):
     # entrada e 300 de saída no Luna (US$ 0,10 e US$ 0,50 por milhão), uns
     # US$ 0,00025. 1.500 por dia durante 30 dias dá uns US$ 11, abaixo do teto
     # de US$ 15/mês do projeto na OpenAI: o limite do backend bate antes.
-    llm_limite_diario_empresa: int = 300
+    #
+    # Desde a issue #140, o limite diário é por CONTA (todas as empresas
+    # clientes dela somadas): LLM_LIMITE_DIARIO_CONTA. LLM_LIMITE_DIARIO_EMPRESA
+    # continua aceito como nome antigo da mesma variável, para a configuração
+    # antiga no Railway seguir valendo; com as duas, vale a nova. O clique e a
+    # geração automática gastam os mesmos limites.
+    llm_limite_diario_conta: int = Field(
+        default=300,
+        validation_alias=AliasChoices("llm_limite_diario_conta", "llm_limite_diario_empresa"),
+    )
     llm_limite_diario_global: int = 1500
+    # Geração automática ao conciliar (issue #140, adendo do ADR-011): só gera
+    # com LLM_HABILITADO também ligado. Desligada em produção até os textos
+    # novos de Privacidade e Termos (front #190 e #197), que hoje prometem que
+    # nada vai para a OpenAI sem a pessoa clicar.
+    explicacao_automatica_habilitada: bool = False
+    # Quantas explicações novas uma conciliação gera, as de maior valor
+    # primeiro (cache hit não conta), e quantas chamadas ao provedor rodam ao
+    # mesmo tempo. Com concorrência, o limite diário pode passar por no máximo
+    # `llm_concorrencia_automatica` explicações.
+    llm_teto_por_conciliacao: PositiveInt = 100
+    llm_concorrencia_automatica: PositiveInt = 4
     # O que a descrição do lançamento leva ao provedor (issue #87, ADR-011):
     # "termos" (padrão) deixa só termos bancários e marcadores, o resto vira
     # [TEXTO]; "mascarada" manda a descrição com a máscara de CPF, CNPJ etc.,

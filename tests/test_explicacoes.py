@@ -15,13 +15,13 @@ from sqlalchemy import text
 from test_conciliacoes import _lancamento_em
 from test_ia_contexto import _conciliacao
 
-from app.api import explicacoes as explicacoes_module
 from app.api.explicacoes import obter_provedor_dependencia
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.database import engine as app_engine
 from app.models import Conciliacao, ExplicacaoDivergencia
 from app.services.ia import cache as cache_module
+from app.services.ia import geracao as geracao_module
 from app.services.ia import prompt as prompt_module
 from app.services.ia.base import ProvedorIAIndisponivel, RespostaIA
 from app.services.ia.prompt import motivo_deterministico
@@ -366,12 +366,13 @@ def test_mudar_versao_prompt_invalida_cache(cenario, provedor_falso, monkeypatch
     _empresa, linha, headers = cenario
 
     primeira = _explicar(headers, linha.id)
-    # cache.py e explicacoes.py importaram VERSAO_PROMPT por nome ("from ...
-    # import VERSAO_PROMPT"), então cada um tem sua própria referência —
-    # monkeypatch precisa alcançar as duas, não só app.services.ia.prompt.
+    # cache.py e geracao.py (a regra do POST desde a issue #140) importaram
+    # VERSAO_PROMPT por nome ("from ... import VERSAO_PROMPT"), então cada um
+    # tem sua própria referência — monkeypatch precisa alcançar as duas, não
+    # só app.services.ia.prompt.
     outra_versao = f"{prompt_module.VERSAO_PROMPT}-outra"
     monkeypatch.setattr(cache_module, "VERSAO_PROMPT", outra_versao)
-    monkeypatch.setattr(explicacoes_module, "VERSAO_PROMPT", outra_versao)
+    monkeypatch.setattr(geracao_module, "VERSAO_PROMPT", outra_versao)
     segunda = _explicar(headers, linha.id)
 
     assert primeira.json()["em_cache"] is False
@@ -414,7 +415,7 @@ def _logs_do_endpoint(caplog, excecao, headers, conciliacao_id):
             resposta = _explicar(headers, conciliacao_id)
         finally:
             app.dependency_overrides.pop(obter_provedor_dependencia, None)
-    registros = [r for r in caplog.records if r.name == "app.api.explicacoes"]
+    registros = [r for r in caplog.records if r.name == "app.services.ia.geracao"]
     return resposta, registros
 
 
@@ -533,7 +534,7 @@ def test_excecao_inesperada_do_provedor_gera_fallback_erro_provedor(db_session, 
 def test_limite_diario_por_empresa(
     db_session, criar_empresa, criar_extrato_da_empresa, auth_headers, monkeypatch
 ):
-    monkeypatch.setattr(settings, "llm_limite_diario_empresa", 2)
+    monkeypatch.setattr(settings, "llm_limite_diario_conta", 2)
     monkeypatch.setattr(settings, "llm_limite_diario_global", 1000)
     empresa = criar_empresa()
     banco = criar_extrato_da_empresa(empresa.id, "banco")
@@ -576,7 +577,7 @@ def test_limite_diario_por_empresa(
 def test_limite_diario_global(
     db_session, criar_empresa, criar_extrato_da_empresa, auth_headers, monkeypatch
 ):
-    monkeypatch.setattr(settings, "llm_limite_diario_empresa", 1000)
+    monkeypatch.setattr(settings, "llm_limite_diario_conta", 1000)
     monkeypatch.setattr(settings, "llm_limite_diario_global", 2)
     fake = ProvedorFalso()
     app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
@@ -610,7 +611,7 @@ def test_explicacoes_de_ontem_nao_contam_no_limite(
     db_session, cenario, provedor_falso, monkeypatch
 ):
     empresa, linha, headers = cenario
-    monkeypatch.setattr(settings, "llm_limite_diario_empresa", 1)
+    monkeypatch.setattr(settings, "llm_limite_diario_conta", 1)
     ontem = datetime_ontem_utc()
     db_session.add(
         ExplicacaoDivergencia(
