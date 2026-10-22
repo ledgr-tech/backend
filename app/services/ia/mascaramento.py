@@ -88,14 +88,21 @@ def mascarar_descricao(texto: str) -> str:
     """Mascara e-mail, CNPJ, CPF, telefone e sequências longas de dígitos
     (nesta ordem, ver docstring do módulo) e trunca o resultado em 120
     caracteres. Determinística e idempotente; texto vazio devolve vazio."""
+    return mascarar_texto(texto)[:_TAMANHO_MAXIMO]
+
+
+def mascarar_texto(texto: str) -> str:
+    """A mesma máscara de `mascarar_descricao`, sem truncar: a pergunta e o
+    histórico do assistente da Central de ajuda (issue #137), que podem ter
+    até 1.000 caracteres. É o modo "mascarada": o filtro de termos apagaria
+    a pergunta."""
     mascarado = _PADRAO_EMAIL.sub("[EMAIL]", texto)
     mascarado = _PADRAO_CNPJ_PONTUADO.sub("[CNPJ]", mascarado)
     mascarado = _PADRAO_CNPJ_CRU.sub("[CNPJ]", mascarado)
     mascarado = _PADRAO_CPF_PONTUADO.sub("[CPF]", mascarado)
     mascarado = _PADRAO_CPF_CRU.sub("[CPF]", mascarado)
     mascarado = _PADRAO_TELEFONE.sub("[TELEFONE]", mascarado)
-    mascarado = _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, mascarado)
-    return mascarado[:_TAMANHO_MAXIMO]
+    return _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, mascarado)
 
 
 # Termos bancários e de operação que podem chegar ao provedor no modo

@@ -67,6 +67,7 @@ from app.models import (
     Fechamento,
     Lancamento,
     LinhaInvalida,
+    UsoAssistente,
     Usuario,
 )
 from app.services.consulta_cnpj.cache import cache_por_cnpj as cache_consulta_cnpj
@@ -131,6 +132,10 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     monkeypatch.setattr(settings, "llm_habilitado", False)
     # Geração automática ao conciliar (issue #140): desligada, como em produção.
     monkeypatch.setattr(settings, "explicacao_automatica_habilitada", False)
+    # Assistente (issue #137): desligado e sem URL de conteúdo, como em
+    # produção; quem testa liga e troca a fonte do conteúdo por uma falsa.
+    monkeypatch.setattr(settings, "assistente_habilitado", False)
+    monkeypatch.setattr(settings, "ajuda_conteudo_url", "")
     # Bloqueio da conciliação pelo plano (issue #122): desligado, como em
     # produção até o gateway; quem testa o bloqueio liga no próprio teste.
     monkeypatch.setattr(settings, "plano_bloqueio_habilitado", False)
@@ -470,6 +475,7 @@ def criar_conta(db_session):
         ).delete(synchronize_session=False)
         db_session.query(Convite).filter_by(conta_id=conta_id).delete()
         db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
+        db_session.query(UsoAssistente).filter_by(conta_id=conta_id).delete()
         db_session.query(Conta).filter_by(id=conta_id).delete()
     db_session.commit()
 
