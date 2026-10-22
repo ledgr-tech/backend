@@ -21,6 +21,7 @@ from app.api.justificativas import router as justificativas_router
 from app.api.me import router as me_router
 from app.api.plano import router as plano_router
 from app.api.senha import router as senha_router
+from app.api.troca_email import router as troca_email_router
 from app.api.v1 import router as v1_router
 from app.core.config import settings
 from app.core.frontend_url import avisar_frontend_url_no_startup
@@ -60,6 +61,7 @@ app.add_exception_handler(RateLimitExceeded, limite_excedido)
 app.include_router(auth_router)
 app.include_router(senha_router)
 app.include_router(me_router)
+app.include_router(troca_email_router)
 app.include_router(empresa_router)
 app.include_router(empresas_router)
 app.include_router(equipe_router)
