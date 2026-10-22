@@ -485,11 +485,11 @@ def registrar_uso_da_conexao(conexao_id: uuid.UUID) -> None:
         logger.info("conexao_mcp ultimo_uso_falhou classe=%s", type(exc).__name__)
 
 
-def obter_conexao_mcp(
-    tarefas: BackgroundTasks,
-    credenciais: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-    db: Annotated[Session, Depends(get_db)],
-) -> ConexaoAutenticada:
+def autenticar_token_mcp(db: Session, token: str | None) -> tuple[ConexaoAutenticada, bool]:
+    """A regra do token de acesso da conexão MCP, usada pela dependency e pelo
+    /mcp (app/api/mcp.py). Devolve a conexão e se o último uso precisa ser
+    gravado. Levanta 404 com a flag desligada, 503 sem as URLs e 401 (com o
+    `WWW-Authenticate` da descoberta) para qualquer token que não vale."""
     if not settings.mcp_habilitado:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Not Found")
     recurso = settings.mcp_url_publica.strip().rstrip("/")
@@ -498,9 +498,9 @@ def obter_conexao_mcp(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Conexão com assistentes de IA indisponível no momento.",
         )
-    if credenciais is None or not credenciais.credentials.startswith(PREFIXO_TOKEN_MCP):
+    if not token or not token.startswith(PREFIXO_TOKEN_MCP):
         raise _token_mcp_invalido()
-    hash_do_token = hashlib.sha256(credenciais.credentials.encode()).hexdigest()
+    hash_do_token = hashlib.sha256(token.encode()).hexdigest()
     linha = db.execute(
         select(TokenOAuth, ConexaoMcp)
         .join(ConexaoMcp, ConexaoMcp.id == TokenOAuth.conexao_id)
@@ -513,14 +513,26 @@ def obter_conexao_mcp(
     ).first()
     if linha is None or linha[0].resource != recurso:
         raise _token_mcp_invalido()
-    token, conexao = linha
+    token_oauth, conexao = linha
     ultimo = conexao.ultimo_uso_em
-    if ultimo is None or _agora() - ultimo >= INTERVALO_ULTIMO_USO:
-        tarefas.add_task(registrar_uso_da_conexao, conexao.id)
-    return ConexaoAutenticada(
+    autenticada = ConexaoAutenticada(
         conexao_id=conexao.id,
         conta_id=conexao.conta_id,
         empresa_id=conexao.empresa_id,
         client_id=conexao.client_id,
-        escopo=token.scope,
+        escopo=token_oauth.scope,
     )
+    return autenticada, ultimo is None or _agora() - ultimo >= INTERVALO_ULTIMO_USO
+
+
+def obter_conexao_mcp(
+    tarefas: BackgroundTasks,
+    credenciais: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ConexaoAutenticada:
+    conexao, registrar_uso = autenticar_token_mcp(
+        db, credenciais.credentials if credenciais is not None else None
+    )
+    if registrar_uso:
+        tarefas.add_task(registrar_uso_da_conexao, conexao.conexao_id)
+    return conexao
