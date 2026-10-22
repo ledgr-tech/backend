@@ -3,6 +3,7 @@
 Sempre que um model novo for criado, importar aqui também.
 """
 
+from app.models.assistente import PerguntaSemResposta, UsoAssistente
 from app.models.base import Base
 from app.models.conciliacao import Conciliacao
 from app.models.configuracao import Configuracao
@@ -34,7 +35,9 @@ __all__ = [
     "Fechamento",
     "Lancamento",
     "LinhaInvalida",
+    "PerguntaSemResposta",
     "RegistroExclusao",
     "TokenEmail",
+    "UsoAssistente",
     "Usuario",
 ]

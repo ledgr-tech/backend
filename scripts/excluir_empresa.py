@@ -73,6 +73,7 @@ from app.models import (
     LinhaInvalida,
     RegistroExclusao,
     TokenEmail,
+    UsoAssistente,
     Usuario,
 )
 
@@ -113,6 +114,7 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
     (Configuracao, _da_conta(Configuracao.empresa_id)),
     (Usuario, lambda c: Usuario.conta_id == c),
     (Empresa, lambda c: Empresa.conta_id == c),
+    (UsoAssistente, lambda c: UsoAssistente.conta_id == c),
     (Conta, lambda c: Conta.id == c),
 )
 

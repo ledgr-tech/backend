@@ -35,6 +35,7 @@ from app.models import (
     LinhaInvalida,
     RegistroExclusao,
     TokenEmail,
+    UsoAssistente,
     Usuario,
 )
 from scripts import excluir_empresa as script
@@ -180,6 +181,7 @@ def _povoar(
             token_hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
             expira_em=func.now() + timedelta(minutes=30),
         ),
+        UsoAssistente(conta_id=conta.id),
     ]
     db_session.add_all(linhas[2:])
     for empresa in empresas:

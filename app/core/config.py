@@ -53,6 +53,22 @@ class Settings(BaseSettings):
     # `llm_concorrencia_automatica` explicações.
     llm_teto_por_conciliacao: PositiveInt = 100
     llm_concorrencia_automatica: PositiveInt = 4
+
+    # Assistente da Central de ajuda (issue #137, ADR-020): só responde com
+    # esta flag e com LLM_HABILITADO ligadas. O conteúdo é o JSON que o front
+    # publica no build (`ajuda_conteudo_url`; em produção,
+    # https://ledgrfinance.com.br/ajuda/conteudo.json), guardado em memória
+    # por 10 minutos. A Central inteira vai no contexto enquanto o texto
+    # serializado couber em `assistente_maximo_conteudo_caracteres`. Os limites
+    # diários são separados dos das explicações. Custo: uns US$ 0,001 por
+    # pergunta (a Central inteira na entrada), uns US$ 7 por mês no pior caso
+    # do limite global.
+    assistente_habilitado: bool = False
+    ajuda_conteudo_url: str = ""
+    assistente_maximo_conteudo_caracteres: PositiveInt = 60000
+    assistente_limite_diario_conta: PositiveInt = 100
+    assistente_limite_diario_global: PositiveInt = 300
+    assistente_max_tokens_saida: PositiveInt = 500
     # O que a descrição do lançamento leva ao provedor (issue #87, ADR-011):
     # "termos" (padrão) deixa só termos bancários e marcadores, o resto vira
     # [TEXTO]; "mascarada" manda a descrição com a máscara de CPF, CNPJ etc.,
