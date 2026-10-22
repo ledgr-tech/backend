@@ -152,6 +152,20 @@ class Settings(BaseSettings):
     # as rotas e parâmetros da API e não serve a ninguém fora do time.
     api_docs_habilitado: bool = True
 
+    # Conexão MCP (issue #136, ADR-022): o Ledgr como servidor de autorização
+    # OAuth do ChatGPT e do Claude do cliente. Desligada, /.well-known/oauth-*,
+    # /oauth/*, /conexoes-mcp/* e /mcp respondem 404. Ligada sem
+    # `mcp_url_publica` ou `oauth_issuer`, respondem 503 (o boot não cai).
+    # `mcp_url_publica` é a URL canônica do servidor MCP, sem barra no fim (o
+    # `resource` dos tokens: trocá-la derruba as conexões); `oauth_issuer`, a
+    # base do servidor de autorização. `oauth_redirects_permitidos` são os
+    # redirect_uris que o registro aceita, separados por vírgula; vazio vale
+    # `REDIRECTS_PERMITIDOS_PADRAO` (app/services/oauth/redirects.py).
+    mcp_habilitado: bool = False
+    mcp_url_publica: str = ""
+    oauth_issuer: str = ""
+    oauth_redirects_permitidos: str = ""
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:

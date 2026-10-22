@@ -81,6 +81,13 @@ def api_publica_liberada(conta: _ComPlano) -> bool:
     return True
 
 
+def mcp_liberado(conta: _ComPlano) -> bool:
+    """A conta pode conectar o ChatGPT ou o Claude pelo MCP (issue #136,
+    ADR-022)? No MVP, todos os planos: devolve sempre `True`, como
+    `api_publica_liberada`. É o ponto único da regra."""
+    return True
+
+
 def situacao_da_conta(conta: _ComPlano, instante: datetime | None = None) -> Situacao:
     if conta.assinatura_ativa:
         return "ativo"
