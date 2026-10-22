@@ -60,7 +60,9 @@ from app.core.config import settings
 from app.models import (
     Base,
     ChaveApi,
+    CodigoOAuth,
     Conciliacao,
+    ConexaoMcp,
     Configuracao,
     Conta,
     Convite,
@@ -72,8 +74,10 @@ from app.models import (
     Fechamento,
     Lancamento,
     LinhaInvalida,
+    PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
+    TokenOAuth,
     UsoAssistente,
     Usuario,
 )
@@ -91,6 +95,10 @@ def _usuarios_da_conta(conta_id: uuid.UUID):
     return select(Usuario.id).where(Usuario.conta_id == conta_id)
 
 
+def _conexoes_da_conta(conta_id: uuid.UUID):
+    return select(ConexaoMcp.id).where(ConexaoMcp.conta_id == conta_id)
+
+
 def _da_conta(coluna_empresa_id):
     """Condição das tabelas por `empresa_id`: as linhas de todas as empresas da conta."""
     return lambda c: coluna_empresa_id.in_(_empresas_da_conta(c))
@@ -98,7 +106,9 @@ def _da_conta(coluna_empresa_id):
 
 # Ordem das FKs, conferida nos models: quem aponta para uma tabela sai antes
 # dela. As tabelas por `empresa_id` saem pelas empresas da conta;
-# `linhas_invalidas` e `tokens_email` saem pelo extrato e pelo usuário.
+# `linhas_invalidas` e `tokens_email` saem pelo extrato e pelo usuário;
+# `tokens_oauth` e `codigos_oauth`, pela conexão MCP (issue #136). Os
+# `clientes_oauth` ficam: não são de nenhuma conta.
 # tests/test_excluir_empresa.py confere a ordem e que nenhuma tabela ligada à
 # conta ou às empresas dela ficou de fora.
 ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...] = (
@@ -112,6 +122,10 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
     (Extrato, _da_conta(Extrato.empresa_id)),
     (Convite, lambda c: Convite.conta_id == c),
     (ChaveApi, lambda c: ChaveApi.conta_id == c),
+    (TokenOAuth, lambda c: TokenOAuth.conexao_id.in_(_conexoes_da_conta(c))),
+    (CodigoOAuth, lambda c: CodigoOAuth.conexao_id.in_(_conexoes_da_conta(c))),
+    (ConexaoMcp, lambda c: ConexaoMcp.conta_id == c),
+    (PedidoAutorizacaoOAuth, lambda c: PedidoAutorizacaoOAuth.conta_id == c),
     (TokenEmail, lambda c: TokenEmail.usuario_id.in_(_usuarios_da_conta(c))),
     (Configuracao, _da_conta(Configuracao.empresa_id)),
     (Usuario, lambda c: Usuario.conta_id == c),

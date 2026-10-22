@@ -56,7 +56,9 @@ from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
 from app.models import (
     ChaveApi,
+    CodigoOAuth,
     Conciliacao,
+    ConexaoMcp,
     Configuracao,
     Conta,
     Convite,
@@ -68,6 +70,8 @@ from app.models import (
     Fechamento,
     Lancamento,
     LinhaInvalida,
+    PedidoAutorizacaoOAuth,
+    TokenOAuth,
     UsoAssistente,
     Usuario,
 )
@@ -143,6 +147,12 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # Aprovação de justificativas (issue #132): desligada, como em produção
     # até o front aprovar; quem testa a aprovação liga no próprio teste.
     monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
+    # Conexão MCP (issue #136): desligada e sem URLs, como em produção; quem
+    # testa liga e configura no próprio teste.
+    monkeypatch.setattr(settings, "mcp_habilitado", False)
+    monkeypatch.setattr(settings, "mcp_url_publica", "")
+    monkeypatch.setattr(settings, "oauth_issuer", "")
+    monkeypatch.setattr(settings, "oauth_redirects_permitidos", "")
 
 
 @pytest.fixture(autouse=True)
@@ -182,6 +192,25 @@ def _bloqueio_de_login_zerado():
     bloqueio_login.limpar_tudo()
     yield
     bloqueio_login.limpar_tudo()
+
+
+@pytest.fixture(autouse=True)
+def _clientes_oauth_do_teste_apagados():
+    """Os clientes OAuth (issue #136) não são de nenhuma conta, então a limpeza
+    de `criar_conta` não os pega. Autouse, esta limpeza roda depois das outras
+    e apaga os criados durante o teste que ficaram sem conexão."""
+    inicio = datetime.now(UTC) - timedelta(seconds=1)
+    yield
+    from app.core.database import engine
+
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "DELETE FROM clientes_oauth c WHERE c.criado_em >= :inicio AND NOT EXISTS "
+                "(SELECT 1 FROM conexoes_mcp m WHERE m.client_id = c.client_id)"
+            ),
+            {"inicio": inicio},
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -408,6 +437,18 @@ def gerar_cnpj():
     return _gerar_cnpj
 
 
+def _apagar_conexoes_mcp(db_session, *condicoes) -> None:
+    """Conexões MCP (issue #136) e o que aponta para elas, sem commit."""
+    ids = select(ConexaoMcp.id).where(*condicoes)
+    db_session.query(TokenOAuth).filter(TokenOAuth.conexao_id.in_(ids)).delete(
+        synchronize_session=False
+    )
+    db_session.query(CodigoOAuth).filter(CodigoOAuth.conexao_id.in_(ids)).delete(
+        synchronize_session=False
+    )
+    db_session.query(ConexaoMcp).filter(*condicoes).delete(synchronize_session=False)
+
+
 def _apagar_empresa(db_session, empresa_id: uuid.UUID) -> None:
     """Apaga a empresa e tudo o que é dela, sem commit. Convites e usuários são
     da conta desde a issue #133 e saem na limpeza de `criar_conta`."""
@@ -444,6 +485,7 @@ def _apagar_empresa(db_session, empresa_id: uuid.UUID) -> None:
     db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
     db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
     db_session.query(ChaveApi).filter_by(empresa_id=empresa_id).delete()
+    _apagar_conexoes_mcp(db_session, ConexaoMcp.empresa_id == empresa_id)
     db_session.query(Empresa).filter_by(id=empresa_id).delete()
 
 
@@ -477,6 +519,8 @@ def criar_conta(db_session):
         ).delete(synchronize_session=False)
         db_session.query(Convite).filter_by(conta_id=conta_id).delete()
         db_session.query(ChaveApi).filter_by(conta_id=conta_id).delete()
+        _apagar_conexoes_mcp(db_session, ConexaoMcp.conta_id == conta_id)
+        db_session.query(PedidoAutorizacaoOAuth).filter_by(conta_id=conta_id).delete()
         db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
         db_session.query(UsoAssistente).filter_by(conta_id=conta_id).delete()
         db_session.query(Conta).filter_by(id=conta_id).delete()
