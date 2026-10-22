@@ -21,6 +21,12 @@ qualquer formato inesperado no corpo com status 200 — JSON que não é
 objeto, "choices"/"message"/"usage" com o tipo errado, "content" que não é
 string, contagem de tokens que não é inteiro — vira `resposta_invalida`,
 nunca `AttributeError`/`TypeError`/`KeyError` escapando pra quem chamou.
+
+Assistente da Central de ajuda (issue #137, ADR-020): `responder_ajuda` usa a
+mesma chamada (`_chamar`: modelo, timeout, erros e logs iguais), com as
+mensagens de app/services/ia/prompt_ajuda.py e saída estruturada
+(`response_format` com `json_schema`). Conteúdo fora do JSON combinado vira
+`resposta_invalida`. A pergunta, o histórico e a resposta nunca são logados.
 """
 
 import logging
@@ -29,9 +35,16 @@ from typing import Any
 
 import httpx
 
-from app.services.ia.base import ContextoDivergencia, ProvedorIAIndisponivel, RespostaIA
+from app.services.ia.base import (
+    ContextoDivergencia,
+    PerguntaAjuda,
+    ProvedorIAIndisponivel,
+    RespostaAjuda,
+    RespostaIA,
+)
 from app.services.ia.mascaramento import MODO_TERMOS, ModoDescricao
 from app.services.ia.prompt import montar_mensagens
+from app.services.ia.prompt_ajuda import SCHEMA_RESPOSTA, ler_resposta, montar_mensagens_ajuda
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +138,7 @@ class ProvedorOpenAI:
         max_tokens_saida: int,
         cliente_http: httpx.Client | None = None,
         modo_descricao: ModoDescricao = MODO_TERMOS,
+        max_tokens_ajuda: int = 500,
     ) -> None:
         self._api_key = api_key
         self._modelo = modelo
@@ -133,18 +147,62 @@ class ProvedorOpenAI:
         self._max_tokens_saida = max_tokens_saida
         self._cliente_http = cliente_http
         self._modo_descricao = modo_descricao
+        self._max_tokens_ajuda = max_tokens_ajuda
 
     def explicar_divergencia(
         self, contexto: ContextoDivergencia, *, identificador_anonimo: str | None = None
     ) -> RespostaIA:
+        return self._chamar(
+            {"messages": montar_mensagens(contexto, modo=self._modo_descricao)},
+            max_tokens=self._max_tokens_saida,
+            identificador_anonimo=identificador_anonimo,
+        )
+
+    def responder_ajuda(
+        self, pergunta: PerguntaAjuda, *, identificador_anonimo: str | None = None
+    ) -> RespostaAjuda:
+        bruta = self._chamar(
+            {
+                "messages": montar_mensagens_ajuda(pergunta),
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "resposta_da_central_de_ajuda",
+                        "strict": True,
+                        "schema": SCHEMA_RESPOSTA,
+                    },
+                },
+            },
+            max_tokens=self._max_tokens_ajuda,
+            identificador_anonimo=identificador_anonimo,
+        )
+        lida = ler_resposta(bruta.texto)
+        if lida is None:
+            raise ProvedorIAIndisponivel("resposta_invalida")
+        resposta, respondida, citacoes = lida
+        return RespostaAjuda(
+            resposta=resposta,
+            respondida=respondida,
+            citacoes=citacoes,
+            tokens_entrada=bruta.tokens_entrada,
+            tokens_saida=bruta.tokens_saida,
+            modelo=bruta.modelo,
+        )
+
+    def _chamar(
+        self, campos: dict, *, max_tokens: int, identificador_anonimo: str | None
+    ) -> RespostaIA:
+        """Uma chamada a Chat Completions com `campos` (mensagens e, se for o
+        caso, o formato de saída): mesma configuração, erros e logs para as
+        duas tarefas."""
         if not self._api_key:
             raise ProvedorIAIndisponivel("nao_configurado")
 
         corpo: dict = {
             "model": self._modelo,
-            "messages": montar_mensagens(contexto, modo=self._modo_descricao),
+            **campos,
             "reasoning_effort": "none",
-            "max_completion_tokens": self._max_tokens_saida,
+            "max_completion_tokens": max_tokens,
             "store": False,
         }
         if identificador_anonimo is not None:
