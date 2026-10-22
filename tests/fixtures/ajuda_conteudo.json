@@ -1,0 +1,66 @@
+{
+  "versao": "2026-10-22-teste",
+  "paginas": [
+    {
+      "id": "extratos",
+      "titulo": "Extratos",
+      "onde": "Menu lateral, Extratos.",
+      "serve": "Enviar os extratos do banco e do sistema e ver o que foi lido.",
+      "funcoes": [
+        {
+          "id": "enviar-extrato",
+          "titulo": "Enviar um extrato",
+          "faz": "Envia um arquivo OFX ou CSV do banco ou do sistema.",
+          "passos": [
+            "Clique em Enviar extrato.",
+            "Escolha se o arquivo é do banco ou do sistema.",
+            "Selecione o arquivo OFX ou CSV e confirme."
+          ]
+        },
+        {
+          "id": "linhas-nao-lidas",
+          "titulo": "Ver as linhas não lidas",
+          "faz": "Mostra as linhas do arquivo que não puderam ser lidas e o motivo.",
+          "nota": "Corrija o arquivo e envie de novo."
+        }
+      ]
+    },
+    {
+      "id": "conciliacao",
+      "titulo": "Conciliação",
+      "onde": "Menu lateral, Conciliação.",
+      "serve": "Comparar o extrato do banco com o do sistema e tratar as divergências.",
+      "funcoes": [
+        {
+          "id": "conciliar",
+          "titulo": "Conciliar dois extratos",
+          "faz": "Compara o extrato do banco com o do sistema.",
+          "passos": [
+            "Escolha o extrato do banco.",
+            "Escolha o extrato do sistema.",
+            "Clique em Conciliar."
+          ]
+        },
+        {
+          "id": "justificar",
+          "titulo": "Justificar uma divergência",
+          "faz": "Registra o motivo de uma divergência que não vai ser corrigida."
+        }
+      ]
+    },
+    {
+      "id": "fechamento",
+      "titulo": "Fechamento do mês",
+      "onde": "Menu lateral, Fechamento.",
+      "serve": "Fechar a competência depois de conciliar e justificar.",
+      "funcoes": [
+        {
+          "id": "fechar-mes",
+          "titulo": "Fechar o mês",
+          "faz": "Congela o resumo da competência.",
+          "nota": "Só o admin e o gestor fecham o mês."
+        }
+      ]
+    }
+  ]
+}
