@@ -1,4 +1,6 @@
 """API_DOCS_HABILITADO (issue #102): em produção, /docs e /openapi.json somem.
+A documentação da API pública (/v1/openapi.json e /llms.txt, issue #135)
+continua pública com a variável desligada.
 
 O `main` monta a app no import, então cada valor da variável roda num
 subprocesso próprio, como o uvicorn faria no boot.
@@ -12,7 +14,8 @@ import sys
 import pytest
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROTAS = ("/docs", "/redoc", "/openapi.json", "/health")
+ROTAS = ("/docs", "/redoc", "/openapi.json", "/health", "/v1/openapi.json", "/llms.txt")
+PUBLICAS = {"/health": 200, "/v1/openapi.json": 200, "/llms.txt": 200}
 
 
 def _status_das_rotas(api_docs_habilitado: str | None) -> dict[str, int]:
@@ -42,11 +45,11 @@ def _status_das_rotas(api_docs_habilitado: str | None) -> dict[str, int]:
 def test_com_false_docs_e_openapi_respondem_404_e_health_200():
     status = _status_das_rotas("false")
 
-    assert status == {"/docs": 404, "/redoc": 404, "/openapi.json": 404, "/health": 200}
+    assert status == {"/docs": 404, "/redoc": 404, "/openapi.json": 404, **PUBLICAS}
 
 
 @pytest.mark.parametrize("valor", [None, "true"])
 def test_ligado_por_padrao(valor):
     status = _status_das_rotas(valor)
 
-    assert status == {"/docs": 200, "/redoc": 200, "/openapi.json": 200, "/health": 200}
+    assert status == {"/docs": 200, "/redoc": 200, "/openapi.json": 200, **PUBLICAS}

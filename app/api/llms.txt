@@ -1,0 +1,50 @@
+# Ledgr: API pública
+
+> O Ledgr é um sistema brasileiro de conciliação bancária para empresas e escritórios contábeis: compara o extrato do banco com o extrato do sistema (ERP) da empresa, aponta as divergências, registra as justificativas e fecha o mês. Esta API é só de leitura e serve para ferramentas de terceiros e assistentes de IA consultarem a situação das conciliações.
+
+## Autenticação
+
+- Cada requisição leva uma chave de API no cabeçalho `Authorization: Bearer ledgr_...`.
+- A chave é criada no app do Ledgr por um admin ou gestor da conta, em Chaves de API, e aparece uma vez só, na criação. Guarde-a como um segredo.
+- A chave vale para todas as empresas da conta ou para uma empresa só, conforme foi criada.
+- Chave inválida ou revogada: `401` com `{"detail": "Chave de API inválida."}`.
+- A API é de servidor para servidor: não aceita chamadas do navegador (sem CORS). Nunca coloque a chave em código que roda no navegador.
+
+## Limites
+
+- 60 requisições por minuto por chave. Acima disso, `429` com o cabeçalho `Retry-After` em segundos.
+
+## Convenções
+
+- Base: `https://<endereço da API do Ledgr>/v1`.
+- Datas em ISO 8601 (`2026-09-30`, `2026-10-01T12:00:00Z`).
+- Valores em string decimal com duas casas (`"-15.90"`); negativo é saída.
+- `competencia` é o mês no formato `AAAA-MM` (`2026-09`); fora dele, `422`.
+- Empresa fora do escopo da chave, ou inexistente: `404` com `{"detail": "Empresa não encontrada."}`.
+- A API nunca devolve descrição de lançamento, texto de justificativa, texto de ressalva nem nome de pessoa.
+
+## Rotas
+
+- `GET /v1/empresas`: as empresas que a chave enxerga (`id`, `razao_social`, `cnpj`).
+- `GET /v1/empresas/{empresa_id}/resumo?competencia=AAAA-MM`: a situação do mês: `fechado`, `fechado_em`, `com_ressalva`, `pronto_para_fechar` e `contagens` (total por categoria, `justificadas`, `aguardando_aprovacao`, `pendentes`, `linhas_nao_lidas`).
+- `GET /v1/empresas/{empresa_id}/conciliacoes?competencia=AAAA-MM`: os pares vigentes do mês (a conciliação mais recente de cada extrato do banco), com `extrato_banco_id`, `extrato_sistema_id`, `rodada`, `executada_em`, `periodo_inicio`, `periodo_fim` e `contagens`.
+- `GET /v1/empresas/{empresa_id}/divergencias?competencia=AAAA-MM&categoria=&situacao=&limit=&offset=`: as linhas divergentes do mês, com `extrato_banco_id`, `chave`, `categoria`, `data`, `valor`, `lado` (`banco`, `sistema` ou `ambos`) e `situacao`. `limit` até 200 (padrão 50); a resposta traz `total`.
+- `GET /v1/empresas/{empresa_id}/fechamentos?competencia=`: os fechamentos (`competencia`, `fechado_em`, `com_ressalva`, `reaberto_em`) com as contagens congeladas.
+
+## Categorias e situações
+
+- Categorias de divergência: `divergente_valor` (mesma data, valor diferente), `divergente_data` (mesmo valor, outra data), `sem_correspondencia` (nada parecido do outro lado), `duplicado` (excedente de um grupo que já formou par) e `tarifa_bancaria` (tarifa reconhecida no banco).
+- Situações de uma divergência: `sem_justificativa`, `aguardando_aprovacao` (justificada, falta um admin ou gestor aprovar), `justificada` (aprovada) e `conferida`.
+- O mês fica `pronto_para_fechar` quando está aberto, tem conciliação e não tem divergência sem justificativa, justificativa aguardando aprovação nem linha não lida.
+
+## Exemplos
+
+```
+curl -H "Authorization: Bearer ledgr_SUA_CHAVE" https://<endereço>/v1/empresas
+curl -H "Authorization: Bearer ledgr_SUA_CHAVE" "https://<endereço>/v1/empresas/<empresa_id>/resumo?competencia=2026-09"
+curl -H "Authorization: Bearer ledgr_SUA_CHAVE" "https://<endereço>/v1/empresas/<empresa_id>/divergencias?competencia=2026-09&situacao=sem_justificativa&limit=20"
+```
+
+## Mais
+
+- Especificação OpenAPI completa: `GET /v1/openapi.json`.
