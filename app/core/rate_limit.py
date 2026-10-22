@@ -105,6 +105,13 @@ LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO = "5/minute"
 LIMITE_ASSISTENTE_POR_USUARIO = "10/minute"
 # API pública (issue #135): por chave, pelo sha256 do token, sem consultar o banco.
 LIMITE_API_POR_CHAVE = "60/minute"
+# Conexão MCP (issue #136): o registro de cliente e o authorize são públicos,
+# por IP. O token não tem limite próprio: o ChatGPT e o Claude chegam de
+# poucos IPs, e os segredos são aleatórios de 256 bits.
+LIMITE_REGISTRO_OAUTH = "10/minute"
+LIMITE_AUTORIZACAO_OAUTH = "30/minute"
+# Aprovar e recusar a conexão, pela tela do front.
+LIMITE_CONSENTIMENTO_MCP_POR_USUARIO = "10/minute"
 # GET /me (issue #81): só leitura, sem risco de força bruta, mas o front
 # consulta a cada carregamento de tela — limite bem mais alto que o da troca.
 LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"

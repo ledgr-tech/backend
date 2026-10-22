@@ -18,6 +18,13 @@ from app.models.extrato import Extrato
 from app.models.fechamento import Fechamento
 from app.models.lancamento import Lancamento
 from app.models.linha_invalida import LinhaInvalida
+from app.models.oauth import (
+    ClienteOAuth,
+    CodigoOAuth,
+    ConexaoMcp,
+    PedidoAutorizacaoOAuth,
+    TokenOAuth,
+)
 from app.models.registro_exclusao import RegistroExclusao
 from app.models.token_email import TokenEmail
 from app.models.usuario import Usuario
@@ -25,7 +32,10 @@ from app.models.usuario import Usuario
 __all__ = [
     "Base",
     "ChaveApi",
+    "ClienteOAuth",
+    "CodigoOAuth",
     "Conciliacao",
+    "ConexaoMcp",
     "Configuracao",
     "Conta",
     "Convite",
@@ -37,9 +47,11 @@ __all__ = [
     "Fechamento",
     "Lancamento",
     "LinhaInvalida",
+    "PedidoAutorizacaoOAuth",
     "PerguntaSemResposta",
     "RegistroExclusao",
     "TokenEmail",
+    "TokenOAuth",
     "UsoAssistente",
     "Usuario",
 ]

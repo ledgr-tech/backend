@@ -31,4 +31,6 @@ python-dateutil
 # [crypto] traz o cryptography, para conferir o ID token do Google (RS256, issue #73)
 pyjwt[crypto]
 slowapi
+# Servidor de autorização OAuth da conexão MCP (issue #136, ADR-022)
+authlib
 rapidfuzz

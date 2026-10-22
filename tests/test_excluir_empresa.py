@@ -22,7 +22,10 @@ from app.core.config import settings
 from app.models import (
     Base,
     ChaveApi,
+    ClienteOAuth,
+    CodigoOAuth,
     Conciliacao,
+    ConexaoMcp,
     Configuracao,
     Conta,
     Convite,
@@ -34,8 +37,10 @@ from app.models import (
     Fechamento,
     Lancamento,
     LinhaInvalida,
+    PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
+    TokenOAuth,
     UsoAssistente,
     Usuario,
 )
@@ -141,6 +146,63 @@ def _povoar_empresa(db_session, empresa: Empresa, admin: Usuario, convidado: Usu
     return [banco, sistema, lancamento_banco, lancamento_sistema, *linhas]
 
 
+def _povoar_conexao_mcp(db_session, conta: Conta, empresa: Empresa, admin: Usuario) -> list:
+    """Pedido, conexão, código e token OAuth da conta (issue #136). O cliente
+    OAuth não é da conta: fica, e a limpeza do conftest o apaga."""
+
+    def _hash() -> str:
+        return hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+
+    cliente = ClienteOAuth(
+        client_id=uuid.uuid4().hex, client_name="Claude", redirect_uris=["https://claude.ai/cb"]
+    )
+    db_session.add(cliente)
+    db_session.flush()
+    comum = {
+        "client_id": cliente.client_id,
+        "scope": "ledgr.leitura",
+        "resource": "https://api.teste/mcp",
+    }
+    pedido = PedidoAutorizacaoOAuth(
+        hash=_hash(),
+        redirect_uri="https://claude.ai/cb",
+        code_challenge="x" * 43,
+        expira_em=func.now(),
+        conta_id=conta.id,
+        **comum,
+    )
+    conexao = ConexaoMcp(
+        conta_id=conta.id,
+        empresa_id=empresa.id,
+        client_id=cliente.client_id,
+        nome_cliente="Claude",
+        escopo="ledgr.leitura",
+        criada_por_id=admin.id,
+    )
+    db_session.add_all([pedido, conexao])
+    db_session.flush()
+    codigo = CodigoOAuth(
+        hash=_hash(),
+        conexao_id=conexao.id,
+        redirect_uri="https://claude.ai/cb",
+        code_challenge="x" * 43,
+        expira_em=func.now(),
+        **comum,
+    )
+    db_session.add(codigo)
+    db_session.flush()
+    token = TokenOAuth(
+        conexao_id=conexao.id,
+        codigo_id=codigo.id,
+        hash_acesso=_hash(),
+        acesso_expira_em=func.now(),
+        **comum,
+    )
+    db_session.add(token)
+    db_session.flush()
+    return [pedido, conexao, codigo, token]
+
+
 def _povoar(
     db_session, conta: Conta, empresas: list[Empresa]
 ) -> list[tuple[type[Base], uuid.UUID]]:
@@ -193,6 +255,7 @@ def _povoar(
         ),
     ]
     db_session.add_all(linhas[2:])
+    linhas += _povoar_conexao_mcp(db_session, conta, empresas[0], admin)
     for empresa in empresas:
         linhas += _povoar_empresa(db_session, empresa, admin, convidado)
     db_session.commit()
@@ -287,13 +350,14 @@ def test_script_apaga_toda_tabela_ligada_a_conta():
 
 
 def test_ordem_das_etapas_respeita_as_fks():
-    """Quem aponta para uma tabela sai antes dela."""
+    """Quem aponta para uma tabela que também sai, sai antes dela. As que ficam
+    (`clientes_oauth`, que não é de nenhuma conta) não entram na ordem."""
     ordem = {tabela: posicao for posicao, tabela in enumerate(script.tabelas_apagadas())}
 
     for tabela, posicao in ordem.items():
         for fk in Base.metadata.tables[tabela].foreign_keys:
             referenciada = fk.column.table.name
-            if referenciada != tabela:
+            if referenciada != tabela and referenciada in ordem:
                 assert posicao < ordem[referenciada], f"{tabela} sai depois de {referenciada}"
 
 

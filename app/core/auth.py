@@ -62,6 +62,15 @@ falha nas `/v1`; a chave não é um JWT, e falha nas rotas do app como token
 malformado. O `ultimo_uso_em` é gravado numa `BackgroundTask`, no máximo uma
 vez por minuto por chave, depois da resposta.
 
+Token da conexão MCP (issue #136, ADR-022): `obter_conexao_mcp` é a terceira
+porta, só para o servidor MCP (/mcp, parte 2). O token de acesso é opaco
+(`ledgr_mcp_...`), emitido pelo servidor de autorização do próprio Ledgr
+(app/api/oauth.py), e é achado pelo sha256. Precisa estar no prazo, com a
+conexão não revogada e com o `resource` igual a `MCP_URL_PUBLICA`. A falha é
+401 com o `WWW-Authenticate` que manda o cliente à descoberta OAuth. O JWT do
+app e a chave de API nunca valem ali, e este token nunca vale nas outras
+rotas (não é JWT, e o hash não está em `chaves_api`).
+
 Empresa ativa (issue #133, ADR-019): vem no cabeçalho `X-Ledgr-Empresa`, com o
 uuid da empresa, e é conferida contra a conta do usuário em toda requisição,
 para duas abas com clientes diferentes nunca gravarem no cliente errado.
@@ -90,7 +99,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal, get_db
-from app.models import ChaveApi, Empresa, Usuario
+from app.models import ChaveApi, ConexaoMcp, Empresa, TokenOAuth, Usuario
 from app.models.usuario import Papel
 
 logger = logging.getLogger(__name__)
@@ -423,3 +432,95 @@ def obter_chave_api(
     if ultimo is None or _agora() - ultimo >= INTERVALO_ULTIMO_USO:
         tarefas.add_task(registrar_uso_da_chave, chave.id)
     return autenticada
+
+
+# --- token da conexão MCP (issue #136, ADR-022) ------------------------------------
+
+PREFIXO_TOKEN_MCP = "ledgr_mcp_"
+ESCOPO_MCP = "ledgr.leitura"
+
+
+@dataclass(frozen=True)
+class ConexaoAutenticada:
+    conexao_id: uuid.UUID
+    conta_id: uuid.UUID
+    # A conexão vale para uma empresa só, escolhida no consentimento.
+    empresa_id: uuid.UUID
+    client_id: str
+    escopo: str
+
+
+def _token_mcp_invalido() -> HTTPException:
+    base = settings.oauth_issuer.strip().rstrip("/")
+    return HTTPException(
+        status_code=http_status.HTTP_401_UNAUTHORIZED,
+        detail="Token de acesso inválido.",
+        headers={
+            "WWW-Authenticate": (
+                f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource", '
+                f'scope="{ESCOPO_MCP}"'
+            )
+        },
+    )
+
+
+def registrar_uso_da_conexao(conexao_id: uuid.UUID) -> None:
+    """Como `registrar_uso_da_chave`: no máximo uma vez por minuto, numa
+    sessão própria, depois da resposta, e sem nunca levantar."""
+    try:
+        with SessionLocal() as db:
+            db.execute(
+                update(ConexaoMcp)
+                .where(
+                    ConexaoMcp.id == conexao_id,
+                    or_(
+                        ConexaoMcp.ultimo_uso_em.is_(None),
+                        ConexaoMcp.ultimo_uso_em < _agora() - INTERVALO_ULTIMO_USO,
+                    ),
+                )
+                .values(ultimo_uso_em=_agora())
+            )
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 - o último uso nunca derruba nada
+        logger.info("conexao_mcp ultimo_uso_falhou classe=%s", type(exc).__name__)
+
+
+def obter_conexao_mcp(
+    tarefas: BackgroundTasks,
+    credenciais: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ConexaoAutenticada:
+    if not settings.mcp_habilitado:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Not Found")
+    recurso = settings.mcp_url_publica.strip().rstrip("/")
+    if not recurso or not settings.oauth_issuer.strip():
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Conexão com assistentes de IA indisponível no momento.",
+        )
+    if credenciais is None or not credenciais.credentials.startswith(PREFIXO_TOKEN_MCP):
+        raise _token_mcp_invalido()
+    hash_do_token = hashlib.sha256(credenciais.credentials.encode()).hexdigest()
+    linha = db.execute(
+        select(TokenOAuth, ConexaoMcp)
+        .join(ConexaoMcp, ConexaoMcp.id == TokenOAuth.conexao_id)
+        .where(
+            TokenOAuth.hash_acesso == hash_do_token,
+            TokenOAuth.revogado_em.is_(None),
+            TokenOAuth.acesso_expira_em > _agora(),
+            ConexaoMcp.revogada_em.is_(None),
+        )
+    ).first()
+    if linha is None or linha[0].resource != recurso:
+        raise _token_mcp_invalido()
+    token, conexao = linha
+    ultimo = conexao.ultimo_uso_em
+    if ultimo is None or _agora() - ultimo >= INTERVALO_ULTIMO_USO:
+        tarefas.add_task(registrar_uso_da_conexao, conexao.id)
+    return ConexaoAutenticada(
+        conexao_id=conexao.id,
+        conta_id=conexao.conta_id,
+        empresa_id=conexao.empresa_id,
+        client_id=conexao.client_id,
+        escopo=token.scope,
+    )

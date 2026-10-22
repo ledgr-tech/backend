@@ -7,6 +7,7 @@ from app.api.assistente import router as assistente_router
 from app.api.auth import router as auth_router
 from app.api.chaves_api import router as chaves_api_router
 from app.api.conciliacoes import router as conciliacoes_router
+from app.api.conexoes_mcp import router as conexoes_mcp_router
 from app.api.convites import router as convites_router
 from app.api.documentacao_publica import registrar_acesso
 from app.api.documentacao_publica import router as documentacao_publica_router
@@ -19,6 +20,7 @@ from app.api.extratos import router as extratos_router
 from app.api.fechamentos import router as fechamentos_router
 from app.api.justificativas import router as justificativas_router
 from app.api.me import router as me_router
+from app.api.oauth import router as oauth_router
 from app.api.plano import router as plano_router
 from app.api.senha import router as senha_router
 from app.api.troca_email import router as troca_email_router
@@ -77,6 +79,8 @@ app.include_router(explicacoes_router)
 app.include_router(chaves_api_router)
 app.include_router(v1_router, include_in_schema=False)
 app.include_router(documentacao_publica_router)
+app.include_router(oauth_router)
+app.include_router(conexoes_mcp_router)
 
 
 @app.get("/health")

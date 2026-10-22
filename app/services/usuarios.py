@@ -10,7 +10,9 @@ usuário removido:
   é endereço de entrega, e o e-mail original fica livre para outro cadastro
   ou para um convite novo (que cria outro usuário: não há reativação);
 - tem os links pendentes de `tokens_email` invalidados;
-- tem as sessões encerradas (issue #75).
+- tem as sessões encerradas (issue #75);
+- perde as conexões MCP que criou (issue #136): o ChatGPT ou o Claude que ela
+  conectou para de ler na hora.
 
 Toda rota autenticada recusa o removido com 401, já no token que ele tinha
 (app/core/auth.py), e o `/login` responde como senha errada.
@@ -24,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import encerrar_sessoes
 from app.models import TokenEmail, Usuario
 from app.models.usuario import DOMINIO_EMAIL_REMOVIDO
+from app.services.conexoes_mcp import revogar_conexoes_do_criador
 
 
 def email_de_removido(usuario: Usuario) -> str:
@@ -44,3 +47,4 @@ def remover_usuario(db: Session, usuario: Usuario) -> None:
         .where(TokenEmail.usuario_id == usuario.id, TokenEmail.usado_em.is_(None))
         .values(usado_em=func.now())
     )
+    revogar_conexoes_do_criador(db, usuario.id)

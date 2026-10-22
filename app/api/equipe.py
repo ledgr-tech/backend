@@ -92,6 +92,7 @@ from app.core.rate_limit import (
 )
 from app.models import Conta, Convite, Usuario
 from app.models.usuario import Papel, PapelSemAdmin
+from app.services.conexoes_mcp import revogar_se_nao_autoriza_mais
 from app.services.convites import VALIDADE_CONVITE_DIAS, condicoes_pendente, hash_token
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
@@ -385,6 +386,8 @@ def trocar_papel(
         return _usuario_response(alvo)
 
     alvo.papel = dados.papel
+    # Rebaixado a analista: as conexões MCP que criou morrem (issue #136).
+    revogar_se_nao_autoriza_mais(db, alvo.id, dados.papel, admin.id)
     db.commit()
     db.refresh(alvo)
     logger.info("troca_papel resultado=trocado")
@@ -443,6 +446,9 @@ def transferir_admin(
     atual.papel = "gestor"
     db.flush()  # antes da promoção: o índice único parcial aceita um admin só
     destino.papel = "admin"
+    # O admin vira gestor e continua autorizando: nada é revogado. A chamada
+    # fica para a regra valer se a transferência um dia rebaixar mais.
+    revogar_se_nao_autoriza_mais(db, atual.id, atual.papel, admin.id)
     db.commit()
     logger.info("transferencia_admin resultado=transferido")
     return _usuarios_da_conta(db, admin.conta_id)
