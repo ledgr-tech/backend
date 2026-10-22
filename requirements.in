@@ -33,4 +33,7 @@ pyjwt[crypto]
 slowapi
 # Servidor de autorização OAuth da conexão MCP (issue #136, ADR-022)
 authlib
+# Servidor MCP remoto (issue #136 parte 2, ADR-022): SDK oficial, FastMCP com
+# Streamable HTTP. Versão fixada: o SDK acompanha a especificação do MCP.
+mcp==2.3.0
 rapidfuzz
