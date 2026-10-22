@@ -74,6 +74,13 @@ def chegou_ao_limite(usados: int, maximo: int | None) -> bool:
     return maximo is not None and usados >= maximo
 
 
+def api_publica_liberada(conta: _ComPlano) -> bool:
+    """A conta pode criar e usar chaves da API pública (issue #135, ADR-021)?
+    No MVP, todos os planos, inclusive no teste: devolve sempre `True`. É o
+    ponto único da regra para quando a API entrar nos preços."""
+    return True
+
+
 def situacao_da_conta(conta: _ComPlano, instante: datetime | None = None) -> Situacao:
     if conta.assinatura_ativa:
         return "ativo"
