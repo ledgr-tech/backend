@@ -19,6 +19,7 @@ from app.api.explicacoes import router as explicacoes_router
 from app.api.extratos import router as extratos_router
 from app.api.fechamentos import router as fechamentos_router
 from app.api.justificativas import router as justificativas_router
+from app.api.mcp import PortaDoMcp, caminho_do_mcp, ciclo_de_vida_do_mcp
 from app.api.me import router as me_router
 from app.api.oauth import router as oauth_router
 from app.api.plano import router as plano_router
@@ -43,7 +44,10 @@ async def lifespan(app: FastAPI):
     # junto do resto do boot (issue #79). Não bloqueia o boot: o resto da API
     # não depende de e-mail.
     avisar_frontend_url_no_startup()
-    yield
+    # Servidor MCP (issue #136): o gerenciador do Streamable HTTP vive junto
+    # com o app. Com MCP_HABILITADO desligado, o /mcp responde 404 mesmo assim.
+    async with ciclo_de_vida_do_mcp():
+        yield
 
 
 # Com API_DOCS_HABILITADO=false (produção), /docs, /redoc e /openapi.json
@@ -81,6 +85,8 @@ app.include_router(v1_router, include_in_schema=False)
 app.include_router(documentacao_publica_router)
 app.include_router(oauth_router)
 app.include_router(conexoes_mcp_router)
+# Rota exata, sem Mount: um Mount redirecionaria /mcp para /mcp/.
+app.router.add_route(caminho_do_mcp(), PortaDoMcp(), include_in_schema=False)
 
 
 @app.get("/health")

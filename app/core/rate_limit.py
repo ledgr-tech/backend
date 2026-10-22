@@ -110,6 +110,8 @@ LIMITE_API_POR_CHAVE = "60/minute"
 # poucos IPs, e os segredos são aleatórios de 256 bits.
 LIMITE_REGISTRO_OAUTH = "10/minute"
 LIMITE_AUTORIZACAO_OAUTH = "30/minute"
+# Servidor MCP (issue #136 parte 2): por conexão, pelo sha256 do token.
+LIMITE_MCP_POR_CONEXAO = "60/minute"
 # Aprovar e recusar a conexão, pela tela do front.
 LIMITE_CONSENTIMENTO_MCP_POR_USUARIO = "10/minute"
 # GET /me (issue #81): só leitura, sem risco de força bruta, mas o front
