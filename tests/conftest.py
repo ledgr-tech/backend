@@ -55,6 +55,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
 from app.models import (
+    ChaveApi,
     Conciliacao,
     Configuracao,
     Conta,
@@ -442,6 +443,7 @@ def _apagar_empresa(db_session, empresa_id: uuid.UUID) -> None:
     # issue #28/ADR-011 acrescenta o cache de explicações).
     db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
     db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa_id).delete()
+    db_session.query(ChaveApi).filter_by(empresa_id=empresa_id).delete()
     db_session.query(Empresa).filter_by(id=empresa_id).delete()
 
 
@@ -474,6 +476,7 @@ def criar_conta(db_session):
             DecisaoLinha.usuario_id.in_(select(Usuario.id).where(Usuario.conta_id == conta_id))
         ).delete(synchronize_session=False)
         db_session.query(Convite).filter_by(conta_id=conta_id).delete()
+        db_session.query(ChaveApi).filter_by(conta_id=conta_id).delete()
         db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
         db_session.query(UsoAssistente).filter_by(conta_id=conta_id).delete()
         db_session.query(Conta).filter_by(id=conta_id).delete()

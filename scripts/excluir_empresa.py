@@ -59,6 +59,7 @@ from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.config import settings
 from app.models import (
     Base,
+    ChaveApi,
     Conciliacao,
     Configuracao,
     Conta,
@@ -110,6 +111,7 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
     (Lancamento, _da_conta(Lancamento.empresa_id)),
     (Extrato, _da_conta(Extrato.empresa_id)),
     (Convite, lambda c: Convite.conta_id == c),
+    (ChaveApi, lambda c: ChaveApi.conta_id == c),
     (TokenEmail, lambda c: TokenEmail.usuario_id.in_(_usuarios_da_conta(c))),
     (Configuracao, _da_conta(Configuracao.empresa_id)),
     (Usuario, lambda c: Usuario.conta_id == c),

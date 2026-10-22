@@ -21,6 +21,7 @@ from app.core import senha
 from app.core.config import settings
 from app.models import (
     Base,
+    ChaveApi,
     Conciliacao,
     Configuracao,
     Conta,
@@ -182,6 +183,14 @@ def _povoar(
             expira_em=func.now() + timedelta(minutes=30),
         ),
         UsoAssistente(conta_id=conta.id),
+        ChaveApi(
+            conta_id=conta.id,
+            empresa_id=empresas[0].id,
+            nome="Integração",
+            prefixo="abcdefgh",
+            hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+            criada_por_id=admin.id,
+        ),
     ]
     db_session.add_all(linhas[2:])
     for empresa in empresas:
