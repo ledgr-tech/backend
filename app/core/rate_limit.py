@@ -92,6 +92,11 @@ LIMITE_REDEFINICAO_SENHA = "10/minute"
 # Troca de senha logado (issue #66): confere a senha atual, então serviria
 # pra testar senhas com um token roubado. Por usuário, não por IP.
 LIMITE_TROCA_SENHA_POR_USUARIO = "5/minute"
+# Troca de e-mail (issue #149): o pedido por usuário, como as outras de /me;
+# a confirmação é pública (o link pode abrir noutro navegador), por IP, como
+# a redefinição de senha.
+LIMITE_TROCA_EMAIL_POR_USUARIO = "5/minute"
+LIMITE_CONFIRMACAO_TROCA_EMAIL = "10/minute"
 # Desativação da própria conta (issue #68): também confere a senha atual.
 LIMITE_DESATIVACAO_CONTA_POR_USUARIO = "5/minute"
 # Transferência do admin (issue #133): também confere a senha atual.

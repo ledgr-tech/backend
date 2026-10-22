@@ -1,4 +1,4 @@
-"""Textos dos e-mails transacionais (issues #66, #68, #69 e #78, ADR-012).
+"""Textos dos e-mails transacionais (issues #66, #68, #69, #78 e #149, ADR-012).
 
 Cada mensagem sai em texto puro e em HTML simples, sem imagem nem
 rastreamento. Tudo o que vem do usuário (nome, razão social) é escapado no
@@ -211,6 +211,129 @@ def mensagem_conta_desativada(
     return MensagemEmail(
         para=para,
         assunto="Sua conta da Ledgr foi desativada",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def mascarar_email(email: str) -> str:
+    """`nome@dominio.com` vira `n***@dominio.com`: o aviso ao e-mail atual diz
+    para onde a troca vai sem entregar o endereço inteiro (issue #149)."""
+    local, _, dominio = email.partition("@")
+    return f"{local[:1]}***@{dominio}"
+
+
+def mensagem_confirmacao_troca_email(
+    *,
+    para: str,
+    nome: str,
+    link: str,
+    validade_minutos: int,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Link de confirmação da troca de e-mail, para o e-mail NOVO (issue #149):
+    a troca só vale quando alguém que lê esse endereço abre o link."""
+    texto = (
+        f"Olá, {nome}.\n\n"
+        "Recebemos um pedido para usar este e-mail na sua conta da Ledgr. Para "
+        "confirmar a troca, abra o link abaixo:\n\n"
+        f"{link}\n\n"
+        f"O link vale por {validade_minutos} minutos e só pode ser usado uma vez. "
+        "Depois da confirmação, você entra na Ledgr com este e-mail.\n\n"
+        "Se não foi você, ignore este e-mail: nada muda na conta.\n\n"
+        "Equipe Ledgr"
+    )
+    link_html = escape(link, quote=True)
+    html = (
+        f"<p>Olá, {escape(nome)}.</p>"
+        "<p>Recebemos um pedido para usar este e-mail na sua conta da Ledgr. Para "
+        "confirmar a troca, use o botão abaixo:</p>"
+        f'<p><a href="{link_html}">Confirmar o e-mail novo</a></p>'
+        f"<p>Se o botão não funcionar, copie e cole este endereço no navegador:<br>"
+        f"{link_html}</p>"
+        f"<p>O link vale por {validade_minutos} minutos e só pode ser usado uma vez. "
+        "Depois da confirmação, você entra na Ledgr com este e-mail.</p>"
+        "<p>Se não foi você, ignore este e-mail: nada muda na conta.</p>"
+        "<p>Equipe Ledgr</p>"
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="Confirme o seu e-mail novo na Ledgr",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def mensagem_troca_email_pedida(
+    *,
+    para: str,
+    nome: str,
+    email_novo: str,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Aviso ao e-mail ATUAL quando a troca é pedida (issue #149). O e-mail
+    novo vai mascarado. Quem não pediu precisa agir antes da confirmação."""
+    mascarado = mascarar_email(email_novo)
+    texto = (
+        f"Olá, {nome}.\n\n"
+        f"Pediram a troca do e-mail da sua conta na Ledgr para {mascarado}. A troca "
+        "só vale depois que alguém confirmar pelo link enviado ao e-mail novo.\n\n"
+        "Se foi você, não precisa fazer nada aqui.\n\n"
+        "Se não foi você, alguém sabe a sua senha: troque a senha agora e fale com o "
+        "nosso suporte.\n\n"
+        "Equipe Ledgr"
+    )
+    html = (
+        f"<p>Olá, {escape(nome)}.</p>"
+        f"<p>Pediram a troca do e-mail da sua conta na Ledgr para "
+        f"<strong>{escape(mascarado)}</strong>. A troca só vale depois que alguém "
+        "confirmar pelo link enviado ao e-mail novo.</p>"
+        "<p>Se foi você, não precisa fazer nada aqui.</p>"
+        "<p>Se não foi você, alguém sabe a sua senha: troque a senha agora e fale com o "
+        "nosso suporte.</p>"
+        "<p>Equipe Ledgr</p>"
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="Pedido de troca do e-mail da sua conta Ledgr",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def mensagem_troca_email_concluida(
+    *,
+    para: str,
+    nome: str,
+    email_novo: str,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Aviso ao e-mail ANTIGO depois da confirmação (issue #149): a conta não
+    entra mais com ele. Quem não reconhece a troca só tem o suporte."""
+    mascarado = mascarar_email(email_novo)
+    texto = (
+        f"Olá, {nome}.\n\n"
+        f"O e-mail da sua conta na Ledgr foi trocado para {mascarado}. A partir de "
+        "agora, o login é com o e-mail novo, e as sessões abertas foram encerradas.\n\n"
+        "Se foi você, não precisa fazer nada.\n\n"
+        "Se não foi você, fale com o nosso suporte agora.\n\n"
+        "Equipe Ledgr"
+    )
+    html = (
+        f"<p>Olá, {escape(nome)}.</p>"
+        f"<p>O e-mail da sua conta na Ledgr foi trocado para "
+        f"<strong>{escape(mascarado)}</strong>. A partir de agora, o login é com o "
+        "e-mail novo, e as sessões abertas foram encerradas.</p>"
+        "<p>Se foi você, não precisa fazer nada.</p>"
+        "<p>Se não foi você, fale com o nosso suporte agora.</p>"
+        "<p>Equipe Ledgr</p>"
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="O e-mail da sua conta Ledgr foi trocado",
         texto=texto,
         html=html,
         chave_idempotencia=chave_idempotencia,
