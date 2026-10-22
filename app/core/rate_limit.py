@@ -21,14 +21,21 @@ nesta ordem:
 
 import hmac
 import ipaddress
+import logging
+import math
+import time
 
 import jwt
 from fastapi import Request
-from slowapi import Limiter
+from fastapi.responses import JSONResponse, Response
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app.core.auth import ALGORITMO_JWT, conta_id_do_claim
+from app.core.auth import ALGORITMO_JWT, PREFIXO_CHAVE_API, conta_id_do_claim, hash_da_chave_api
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 CABECALHO_IP_CLIENTE = "X-Ledgr-IP-Cliente"
 CABECALHO_SEGREDO_PROXY = "X-Ledgr-Segredo-Proxy"
@@ -91,6 +98,8 @@ LIMITE_DESATIVACAO_CONTA_POR_USUARIO = "5/minute"
 LIMITE_TRANSFERENCIA_ADMIN_POR_USUARIO = "5/minute"
 # Assistente da Central de ajuda (issue #137): cada pergunta chama o provedor.
 LIMITE_ASSISTENTE_POR_USUARIO = "10/minute"
+# API pública (issue #135): por chave, pelo sha256 do token, sem consultar o banco.
+LIMITE_API_POR_CHAVE = "60/minute"
 # GET /me (issue #81): só leitura, sem risco de força bruta, mas o front
 # consulta a cada carregamento de tela — limite bem mais alto que o da troca.
 LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
@@ -131,3 +140,35 @@ def chave_por_conta(request: Request) -> str:
     claims = _claims_do_token(request)
     conta_id = conta_id_do_claim(claims) if claims else None
     return f"conta:{conta_id}" if conta_id else ip_do_cliente(request)
+
+
+def chave_por_chave_api(request: Request) -> str:
+    """O sha256 do token da API pública (issue #135), sem consultar o banco;
+    sem chave no formato, o IP do cliente. O slowapi só confere o limite
+    depois das dependencies, então uma chave inválida já recebeu 401."""
+    esquema, _, token = request.headers.get("authorization", "").partition(" ")
+    if esquema.lower() != "bearer" or not token.startswith(PREFIXO_CHAVE_API):
+        return ip_do_cliente(request)
+    return f"chave_api:{hash_da_chave_api(token)}"
+
+
+def limite_excedido(request: Request, exc: RateLimitExceeded) -> Response:
+    """O 429 do slowapi com `Retry-After` em segundos, calculado pela janela do
+    limite que estourou. Nas rotas `/v1` (issue #135), o corpo segue o formato
+    da API (`detail` em texto)."""
+    resposta = _rate_limit_exceeded_handler(request, exc)
+    segundos = 60
+    limite = getattr(request.state, "view_rate_limit", None)
+    if limite is not None:
+        try:
+            reinicio, _ = limiter.limiter.get_window_stats(limite[0], *limite[1])
+            segundos = max(1, math.ceil(reinicio - time.time()))
+        except Exception as erro:  # noqa: BLE001 - sem a janela, vale o minuto inteiro
+            logger.info("rate_limit janela_indisponivel classe=%s", type(erro).__name__)
+    if request.url.path.startswith("/v1/"):
+        resposta = JSONResponse(
+            {"detail": "Limite de requisições excedido. Tente novamente em instantes."},
+            status_code=429,
+        )
+    resposta.headers["Retry-After"] = str(segundos)
+    return resposta
