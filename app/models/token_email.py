@@ -13,7 +13,7 @@ FINALIDADE_TROCA_EMAIL = "troca_email"
 
 class TokenEmail(Base, TimestampMixin):
     """Token de uso único enviado por e-mail (issue #66, ADR-012): link de
-    recuperação de senha e, depois, de aprovação da troca de e-mail.
+    recuperação de senha e de confirmação da troca de e-mail.
 
     O token em si nunca é gravado, só `token_hash`, o sha256 hex. Como o
     token é aleatório e longo (`secrets.token_urlsafe(32)`), sha256 basta e
@@ -27,6 +27,10 @@ class TokenEmail(Base, TimestampMixin):
     serve à contagem de envios por hora (rate limit por destino) e à busca
     dos pedidos pendentes do usuário.
 
+    `email_novo` (issue #149) é o endereço para onde a troca de e-mail leva a
+    conta, e para onde o link de confirmação foi: obrigatório na finalidade
+    `troca_email` e nulo nas outras (CHECK abaixo).
+
     FK com `ON DELETE CASCADE`: um token não tem valor sem o usuário, e
     apagar a conta (LGPD) leva os tokens junto.
     """
@@ -36,6 +40,10 @@ class TokenEmail(Base, TimestampMixin):
         CheckConstraint(
             f"finalidade IN ('{FINALIDADE_RECUPERACAO_SENHA}', '{FINALIDADE_TROCA_EMAIL}')",
             name="ck_tokens_email_finalidade",
+        ),
+        CheckConstraint(
+            f"(finalidade = '{FINALIDADE_TROCA_EMAIL}') = (email_novo IS NOT NULL)",
+            name="ck_tokens_email_email_novo",
         ),
         Index(
             "ix_tokens_email_usuario_id_finalidade_criado_em",
@@ -53,3 +61,4 @@ class TokenEmail(Base, TimestampMixin):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expira_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     usado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_novo: Mapped[str | None] = mapped_column(String, nullable=True)
