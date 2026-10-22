@@ -5,6 +5,7 @@ Sempre que um model novo for criado, importar aqui também.
 
 from app.models.assistente import PerguntaSemResposta, UsoAssistente
 from app.models.base import Base
+from app.models.chave_api import ChaveApi
 from app.models.conciliacao import Conciliacao
 from app.models.configuracao import Configuracao
 from app.models.conta import Conta
@@ -23,6 +24,7 @@ from app.models.usuario import Usuario
 
 __all__ = [
     "Base",
+    "ChaveApi",
     "Conciliacao",
     "Configuracao",
     "Conta",

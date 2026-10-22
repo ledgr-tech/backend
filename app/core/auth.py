@@ -53,6 +53,15 @@ resolve uma vez por requisição:
 - `exigir_papel(*papeis)` deixa passar só os papéis dados e devolve 403 aos
   outros (issue #133, ADR-019); `obter_admin_autenticado` é o caso do admin.
 
+Chave da API pública (issue #135, ADR-021): `obter_chave_api` é a outra porta
+de entrada, ao lado do NextAuth, só para as rotas `/v1`. O token
+(`Authorization: Bearer ledgr_...`) tem de começar com `PREFIXO_CHAVE_API`; a
+chave é achada pelo sha256 dele e não pode estar revogada. Qualquer falha é o
+mesmo 401 "Chave de API inválida.". O JWT do app não começa com o prefixo, e
+falha nas `/v1`; a chave não é um JWT, e falha nas rotas do app como token
+malformado. O `ultimo_uso_em` é gravado numa `BackgroundTask`, no máximo uma
+vez por minuto por chave, depois da resposta.
+
 Empresa ativa (issue #133, ADR-019): vem no cabeçalho `X-Ledgr-Empresa`, com o
 uuid da empresa, e é conferida contra a conta do usuário em toda requisição,
 para duas abas com clientes diferentes nunca gravarem no cliente errado.
@@ -64,23 +73,27 @@ para duas abas com clientes diferentes nunca gravarem no cliente errado.
   mensagem nos dois casos.
 """
 
+import hashlib
+import logging
 import math
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, Header, HTTPException, Request
 from fastapi import status as http_status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import get_db
-from app.models import Empresa, Usuario
+from app.core.database import SessionLocal, get_db
+from app.models import ChaveApi, Empresa, Usuario
 from app.models.usuario import Papel
+
+logger = logging.getLogger(__name__)
 
 ALGORITMO_JWT = "HS256"
 
@@ -332,3 +345,81 @@ def exigir_papel(*papeis: Papel):
 
 # Convites, remoção de usuário e plano (issue #69, ADR-015; papel desde a #133).
 obter_admin_autenticado = exigir_papel("admin")
+
+
+# --- chave da API pública (issue #135, ADR-021) ------------------------------------
+
+PREFIXO_CHAVE_API = "ledgr_"
+# O `ultimo_uso_em` é gravado no máximo uma vez por este intervalo, por chave.
+INTERVALO_ULTIMO_USO = timedelta(minutes=1)
+
+
+def hash_da_chave_api(token: str) -> str:
+    """O sha256 hex do token inteiro: o que fica no banco e a chave do rate
+    limit, que não consulta o banco."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ChaveAutenticada:
+    chave_id: uuid.UUID
+    prefixo: str
+    conta_id: uuid.UUID
+    # Nulo: todas as empresas da conta; preenchido: só esta.
+    empresa_id: uuid.UUID | None
+
+
+def _chave_invalida() -> HTTPException:
+    return HTTPException(
+        status_code=http_status.HTTP_401_UNAUTHORIZED,
+        detail="Chave de API inválida.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def registrar_uso_da_chave(chave_id: uuid.UUID) -> None:
+    """Grava o último uso numa sessão própria, se o anterior tem mais de um
+    minuto. Nunca levanta: o uso é só informativo."""
+    try:
+        with SessionLocal() as db:
+            db.execute(
+                update(ChaveApi)
+                .where(
+                    ChaveApi.id == chave_id,
+                    or_(
+                        ChaveApi.ultimo_uso_em.is_(None),
+                        ChaveApi.ultimo_uso_em < _agora() - INTERVALO_ULTIMO_USO,
+                    ),
+                )
+                .values(ultimo_uso_em=_agora())
+            )
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 - o último uso nunca derruba nada
+        logger.info("chave_api ultimo_uso_falhou classe=%s", type(exc).__name__)
+
+
+def obter_chave_api(
+    request: Request,
+    tarefas: BackgroundTasks,
+    credenciais: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChaveAutenticada:
+    if credenciais is None or not credenciais.credentials.startswith(PREFIXO_CHAVE_API):
+        raise _chave_invalida()
+    chave = db.scalar(
+        select(ChaveApi).where(ChaveApi.hash == hash_da_chave_api(credenciais.credentials))
+    )
+    if chave is None or chave.revogada_em is not None:
+        raise _chave_invalida()
+    autenticada = ChaveAutenticada(
+        chave_id=chave.id,
+        prefixo=chave.prefixo,
+        conta_id=chave.conta_id,
+        empresa_id=chave.empresa_id,
+    )
+    # Para o log de acesso das /v1 (app/api/documentacao_publica.py).
+    request.state.chave_api = autenticada
+    ultimo = chave.ultimo_uso_em
+    if ultimo is None or _agora() - ultimo >= INTERVALO_ULTIMO_USO:
+        tarefas.add_task(registrar_uso_da_chave, chave.id)
+    return autenticada
