@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.api.assistente import router as assistente_router
 from app.api.auth import router as auth_router
 from app.api.conciliacoes import router as conciliacoes_router
 from app.api.convites import router as convites_router
@@ -61,6 +62,7 @@ app.include_router(conciliacoes_router)
 app.include_router(execucoes_router)
 app.include_router(fechamentos_router)
 app.include_router(justificativas_router)
+app.include_router(assistente_router)
 app.include_router(explicacoes_router)
 
 
