@@ -69,6 +69,8 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
             "empresas": {"usadas": 1, "maximo": None},
             "usuarios": {"usados": 1, "maximo": None},
         },
+        # Usuário novo, nada dispensado (issue #147).
+        "preferencias": {"tutoriais_dispensados": [], "roteiro_dispensado": False},
     }
     assert len(corpo["cnpj"]) == 14
     assert not corpo["cnpj"].isalpha()  # sem máscara (sem pontuação)

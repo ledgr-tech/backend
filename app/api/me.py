@@ -10,6 +10,20 @@ UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
 mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
 `POST /conciliacoes`.
 
+`preferencias` (issue #147) traz o que a pessoa dispensou no primeiro uso:
+`tutoriais_dispensados` (telas de `TELAS_DO_TUTORIAL`) e
+`roteiro_dispensado`. São do usuário, não da empresa nem da conta, e vêm de
+colunas da própria linha dele, sem consulta a mais. Usuário novo vem com a
+lista vazia e `false`.
+
+`PATCH /me/preferencias` muda essas preferências, para todos os papéis e
+sem olhar a empresa ativa. Os dois campos são opcionais: o que vier
+substitui o valor guardado, o que não vier fica como está, e o corpo vazio
+devolve o estado atual sem mudar nada. Tela fora da lista, `null` ou lista
+com mais itens do que o total de telas dá 422 no formato do FastAPI; os
+repetidos saem, na ordem da primeira ocorrência. A resposta é o estado
+guardado depois da mudança. Rate limit por usuário, como as outras rotas.
+
 `limites` (issue #133) traz, para empresas e usuários, quanto a conta usa e o
 máximo do plano (`null` sem limite), com a mesma conta do 402 do
 `POST /empresas` e do `POST /empresa/convites`: usuários são os ativos mais os
@@ -70,7 +84,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -90,12 +104,13 @@ from app.core.plano import Situacao, limite_da_conta
 from app.core.rate_limit import (
     LIMITE_CONSULTA_ME_POR_USUARIO,
     LIMITE_DESATIVACAO_CONTA_POR_USUARIO,
+    LIMITE_PREFERENCIAS_POR_USUARIO,
     LIMITE_TROCA_SENHA_POR_USUARIO,
     chave_por_usuario,
     limiter,
 )
 from app.models import Convite, Empresa, Usuario
-from app.models.usuario import Papel
+from app.models.usuario import TELAS_DO_TUTORIAL, Papel, TelaDoTutorial
 from app.services.convites import condicoes_pendente
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
@@ -106,6 +121,7 @@ from app.services.usuarios import remover_usuario
 __all__ = [
     "LIMITE_CONSULTA_ME_POR_USUARIO",
     "LIMITE_DESATIVACAO_CONTA_POR_USUARIO",
+    "LIMITE_PREFERENCIAS_POR_USUARIO",
     "LIMITE_TROCA_SENHA_POR_USUARIO",
     "router",
 ]
@@ -141,6 +157,18 @@ class Limites(BaseModel):
     usuarios: LimiteUsuarios
 
 
+class Preferencias(BaseModel):
+    tutoriais_dispensados: list[TelaDoTutorial]
+    roteiro_dispensado: bool
+
+
+def _preferencias(usuario: Usuario) -> Preferencias:
+    return Preferencias(
+        tutoriais_dispensados=usuario.tutoriais_dispensados,
+        roteiro_dispensado=usuario.roteiro_dispensado,
+    )
+
+
 class MeResponse(BaseModel):
     id: uuid.UUID
     conta_id: uuid.UUID
@@ -163,6 +191,7 @@ class MeResponse(BaseModel):
     teste_termina_em: datetime | None
     situacao: Situacao
     limites: Limites
+    preferencias: Preferencias
 
 
 def _metodos_login(usuario: Usuario) -> list[str]:
@@ -213,7 +242,43 @@ def obter_dados_da_conta(
                 maximo=limite_da_conta(conta, "usuarios"),
             ),
         ),
+        preferencias=_preferencias(usuario),
     )
+
+
+class PreferenciasRequest(BaseModel):
+    """Os campos ausentes ficam como estão. Sem `| None`: `null` explícito é
+    422, e só o que veio no corpo (`model_fields_set`) é gravado."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tutoriais_dispensados: list[TelaDoTutorial] = Field(
+        default=None, max_length=len(TELAS_DO_TUTORIAL)
+    )
+    roteiro_dispensado: bool = None
+
+    @field_validator("tutoriais_dispensados")
+    @classmethod
+    def _sem_repetidos(cls, telas: list[str]) -> list[str]:
+        return list(dict.fromkeys(telas))
+
+
+@router.patch("/preferencias", response_model=Preferencias)
+@limiter.limit(LIMITE_PREFERENCIAS_POR_USUARIO, key_func=chave_por_usuario)
+def salvar_preferencias(
+    request: Request,
+    dados: PreferenciasRequest,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Preferencias:
+    campos = dados.model_fields_set
+    if "tutoriais_dispensados" in campos:
+        usuario.tutoriais_dispensados = dados.tutoriais_dispensados
+    if "roteiro_dispensado" in campos:
+        usuario.roteiro_dispensado = dados.roteiro_dispensado
+    resposta = _preferencias(usuario)  # antes do commit, que expira o objeto
+    db.commit()
+    return resposta
 
 
 class TrocaSenhaRequest(BaseModel):

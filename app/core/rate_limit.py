@@ -103,6 +103,8 @@ LIMITE_API_POR_CHAVE = "60/minute"
 # GET /me (issue #81): só leitura, sem risco de força bruta, mas o front
 # consulta a cada carregamento de tela — limite bem mais alto que o da troca.
 LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
+# PATCH /me/preferencias (issue #147): o front salva a cada tutorial dispensado.
+LIMITE_PREFERENCIAS_POR_USUARIO = "30/minute"
 
 
 def _claims_do_token(request: Request) -> dict | None:
