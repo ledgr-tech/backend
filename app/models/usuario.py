@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, String, false, text
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -15,6 +15,23 @@ Papel = Literal["admin", "gestor", "analista"]
 # Os papéis de um convite e de uma troca de papel: admin só por transferência.
 PAPEIS_SEM_ADMIN = ("gestor", "analista")
 PapelSemAdmin = Literal["gestor", "analista"]
+
+# As telas com tutorial de primeiro uso (issue #147), os valores aceitos em
+# `tutoriais_dispensados`. Espelha `TELAS_DO_TUTORIAL`/`TelaDoTutorial` do
+# front (lib/preferencias.ts): tela nova no front pede a mesma mudança aqui.
+TELAS_DO_TUTORIAL = (
+    "visao-geral",
+    "conciliacoes",
+    "nova-conciliacao",
+    "comparacao",
+    "divergencia",
+    "extratos",
+    "historico",
+    "fechamentos",
+    "configuracoes",
+)
+# O tipo sai da tupla, para a lista ficar num lugar só.
+TelaDoTutorial = Literal[TELAS_DO_TUTORIAL]
 
 # Domínio do e-mail que o usuário removido recebe no lugar do dele (issue #69).
 # `.invalid` é reservado (RFC 2606): nunca vira endereço de entrega.
@@ -47,6 +64,12 @@ class Usuario(Base, TimestampMixin):
     `sessoes_validas_desde` encerra as sessões abertas: a troca de senha, a
     redefinição pelo link e a remoção gravam o instante, e o token com
     login anterior a ele deixa de valer (issue #75).
+
+    `tutoriais_dispensados` e `roteiro_dispensado` (issue #147) são as
+    preferências de primeiro uso da pessoa, não da empresa nem da conta: os
+    tutoriais marcados com "Não mostrar de novo" (telas de
+    `TELAS_DO_TUTORIAL`) e o roteiro fechado com "Já sei usar". Valem em
+    qualquer navegador. Rota em app/api/me.py.
     """
 
     __tablename__ = "usuarios"
@@ -83,6 +106,13 @@ class Usuario(Base, TimestampMixin):
     # mesmo do `auth_time` do login. Ver app/core/auth.py.
     sessoes_validas_desde: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    tutoriais_dispensados: Mapped[list[str]] = mapped_column(
+        ARRAY(String), nullable=False, default=list, server_default=text("'{}'")
+    )
+    roteiro_dispensado: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
 
     conta: Mapped["Conta"] = relationship(back_populates="usuarios")  # noqa: F821
