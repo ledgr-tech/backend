@@ -12,12 +12,18 @@ from app.models.base import Base, TimestampMixin
 class Extrato(Base, TimestampMixin):
     """Metadados de um upload de extrato (issue #7).
 
-    Por decisão da ADR-002, o arquivo bruto NUNCA é persistido — só guardamos
-    metadados (nome do arquivo, formato, tamanho, status, quantidade de
-    lançamentos depois de processado). O conteúdo é lido em memória pra
+    Por decisão da ADR-002, o arquivo bruto NUNCA é persistido no banco — só
+    guardamos metadados (nome do arquivo, formato, tamanho, status, quantidade
+    de lançamentos depois de processado). O conteúdo é lido em memória pra
     validar tamanho e, desde a issue #12, também passado pra BackgroundTask
     de normalização (app/services/normalizacao.py); é descartado assim que
     essa task termina de processar, nunca gravado em disco nem em coluna.
+
+    `arquivo_chave` (issue #139, ADR-023) é a chave do objeto no bucket do R2
+    quando o arquivo original foi guardado: só no plano avançado, com
+    `ARQUIVO_ORIGINAL_HABILITADO` ligada (app/services/arquivo_original.py).
+    O arquivo fica cifrado no R2, nunca no banco. `NULL` quando não há
+    original: outros planos, falha no envio e todos os extratos de antes.
 
     `origem` diz de que lado da conciliação o extrato vem: 'banco' (extrato
     bancário) ou 'sistema' (exportação do sistema de gestão). É obrigatória
@@ -77,6 +83,7 @@ class Extrato(Base, TimestampMixin):
     periodo_fim: Mapped[date | None] = mapped_column(Date, nullable=True)
     saldo_final: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     saldo_data: Mapped[date | None] = mapped_column(Date, nullable=True)
+    arquivo_chave: Mapped[str | None] = mapped_column(String, nullable=True)
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
     lancamentos: Mapped[list["Lancamento"]] = relationship(back_populates="extrato")  # noqa: F821
