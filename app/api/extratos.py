@@ -59,6 +59,8 @@ antes do commit e grava a chave do objeto em `arquivo_chave`; nos outros
 planos, o ADR-002 continua valendo. Uma falha no R2 não derruba o upload: o
 extrato segue sem original. `arquivo_original` no upload, em cada item da
 listagem e no detalhe diz se há original guardado (e a flag está ligada).
+`GET /extratos/{extrato_id}/arquivo-original` devolve o arquivo como foi
+enviado, só para o admin e o gestor.
 """
 
 import logging
@@ -67,6 +69,7 @@ import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -77,6 +80,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from fastapi import status as http_status
@@ -86,13 +90,26 @@ from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.auth import EmpresaAtiva, obter_empresa_ativa, obter_empresa_id_ativa
+from app.core.auth import (
+    EmpresaAtiva,
+    exigir_papel,
+    obter_empresa_ativa,
+    obter_empresa_id_ativa,
+)
+from app.core.config import settings
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_UPLOAD, chave_por_conta, limiter
+from app.core.rate_limit import (
+    LIMITE_DOWNLOAD_ORIGINAL,
+    LIMITE_UPLOAD,
+    chave_por_conta,
+    limiter,
+)
 from app.models import ExecucaoConciliacao, Extrato, LinhaInvalida
 from app.services import saldo
 from app.services.arquivo_original import (
     ArquivoOriginal,
+    ArquivoOriginalCorrompido,
+    ArquivoOriginalNaoEncontrado,
     chave_do_objeto,
     conta_guarda_o_original,
     obter_arquivo_original,
@@ -106,6 +123,12 @@ router = APIRouter(prefix="/extratos", tags=["extratos"])
 
 FORMATOS_SUPORTADOS = {".ofx", ".csv"}
 TAMANHO_MAXIMO_BYTES = 5 * 1024 * 1024  # 5MB — ver issue #7, sem ADR dedicado
+
+# Download do arquivo original (issue #139, ADR-023): só o admin e o gestor.
+obter_admin_ou_gestor = exigir_papel("admin", "gestor")
+TIPOS_DO_ORIGINAL = {"csv": "text/csv", "ofx": "application/x-ofx"}
+ORIGINAL_NAO_DISPONIVEL = "Arquivo original não disponível."
+ORIGINAL_INDISPONIVEL = "Arquivo original indisponível no momento."
 
 
 class ExtratoUploadResponse(BaseModel):
@@ -380,4 +403,73 @@ async def obter_extrato(
         **vars(saldo.saldo_do_extrato(db, extrato)),
         erros=erros,
         arquivo_original=original_visivel(extrato.arquivo_chave),
+    )
+
+
+def content_disposition(nome: str) -> str:
+    """`attachment` com o nome do arquivo enviado. O nome vem do usuário: no
+    `filename`, o que não é ASCII imprimível, as aspas e a barra invertida
+    viram `_` (sem quebra de linha, não há como injetar cabeçalho); o nome
+    exato vai em UTF-8 no `filename*` (RFC 6266)."""
+    so_ascii = "".join(c if " " <= c <= "~" and c not in '"\\' else "_" for c in nome)
+    return f"attachment; filename=\"{so_ascii}\"; filename*=UTF-8''{quote(nome, safe='')}"
+
+
+@router.get(
+    "/{extrato_id}/arquivo-original",
+    dependencies=[Depends(obter_admin_ou_gestor)],
+    response_class=Response,
+)
+@limiter.limit(LIMITE_DOWNLOAD_ORIGINAL, key_func=chave_por_conta)
+def baixar_arquivo_original(
+    request: Request,
+    extrato_id: uuid.UUID,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
+    db: Annotated[Session, Depends(get_db)],
+    servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
+) -> Response:
+    """O arquivo original do extrato, como foi enviado (issue #139, ADR-023).
+
+    Síncrona de propósito: o FastAPI roda numa thread, e o cliente do R2 é
+    síncrono. O papel é conferido antes de tudo (403 para o analista). Não
+    olha o plano atual: o que foi guardado continua baixável depois que a
+    conta sai do avançado. No log, só a classe do erro e o id do extrato.
+    """
+    if not settings.arquivo_original_habilitado:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL)
+    if servico is None:
+        raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, ORIGINAL_INDISPONIVEL)
+    extrato = db.get(Extrato, extrato_id)
+    if extrato is None or extrato.empresa_id != empresa_id:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, "Extrato não encontrado.")
+    if extrato.arquivo_chave is None:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL)
+
+    try:
+        conteudo = servico.abrir(extrato.arquivo_chave)
+    except ArquivoOriginalNaoEncontrado as exc:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL) from exc
+    except ArquivoOriginalCorrompido as exc:
+        logger.error("arquivo original não abriu (%s), extrato %s", type(exc).__name__, extrato.id)
+        raise HTTPException(
+            http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Não foi possível abrir o arquivo original.",
+        ) from exc
+    except Exception as exc:  # R2 fora do ar ou token revogado: 503
+        logger.warning(
+            "arquivo original indisponível (%s), extrato %s", type(exc).__name__, extrato.id
+        )
+        raise HTTPException(
+            http_status.HTTP_503_SERVICE_UNAVAILABLE, ORIGINAL_INDISPONIVEL
+        ) from exc
+
+    # O Content-Type vai no cabeçalho, e não em `media_type`, para o Starlette
+    # não acrescentar `charset=utf-8`: o CSV pode ser Latin-1.
+    return Response(
+        content=conteudo,
+        headers={
+            "Content-Type": TIPOS_DO_ORIGINAL[extrato.formato],
+            "Content-Disposition": content_disposition(extrato.nome_arquivo),
+            "Cache-Control": "no-store",
+        },
     )

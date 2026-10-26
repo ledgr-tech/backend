@@ -11,13 +11,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from conftest import CHAVE_CIFRA_TESTE
+from conftest import CHAVE_CIFRA_TESTE, cabecalhos
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
+from app.api.extratos import content_disposition
 from app.core.config import settings
+from app.core.rate_limit import LIMITE_DOWNLOAD_ORIGINAL
 from app.models import Conta, Empresa, Extrato
-from app.services.arquivo_original import ArquivoOriginal, obter_arquivo_original
+from app.services.arquivo_original import (
+    ArquivoOriginal,
+    chave_do_objeto,
+    obter_arquivo_original,
+)
 from main import app
 
 client = TestClient(app)
@@ -229,3 +235,222 @@ def test_listagem_e_detalhe_mostram_arquivo_original(
     itens = client.get("/extratos", headers=headers).json()["itens"]
     assert [i["arquivo_original"] for i in itens] == [False, False]
     assert client.get(f"/extratos/{com.id}", headers=headers).json()["arquivo_original"] is False
+
+
+# --- download -----------------------------------------------------------------
+
+
+def _com_original(
+    db_session,
+    empresa: Empresa,
+    servico: ArquivoOriginal,
+    conteudo: bytes = OFX,
+    nome: str = "extrato.ofx",
+    formato: str = "ofx",
+) -> Extrato:
+    extrato = Extrato(
+        id=uuid.uuid4(),
+        empresa_id=empresa.id,
+        nome_arquivo=nome,
+        formato=formato,
+        tamanho_bytes=len(conteudo),
+        origem="banco",
+        status="concluido",
+    )
+    extrato.arquivo_chave = chave_do_objeto(empresa.conta_id, empresa.id, extrato.id)
+    servico.guardar(extrato.arquivo_chave, conteudo)
+    db_session.add(extrato)
+    db_session.commit()
+    return extrato
+
+
+@pytest.fixture
+def como(criar_usuario, gerar_token):
+    """Cabeçalhos de um usuário novo da conta da empresa, com o papel dado."""
+
+    def _como(papel: str, empresa: Empresa) -> dict[str, str]:
+        usuario = criar_usuario(conta_id=empresa.conta_id, papel=papel)
+        return cabecalhos(gerar_token(empresa.conta_id, usuario_id=usuario.id), empresa.id)
+
+    return _como
+
+
+def _baixar(headers, extrato_id):
+    return client.get(f"/extratos/{extrato_id}/arquivo-original", headers=headers)
+
+
+@pytest.mark.parametrize("papel", ["admin", "gestor"])
+def test_admin_e_gestor_baixam_o_original(db_session, criar_empresa, como, arquivo_original, papel):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+
+    response = _baixar(como(papel, empresa), extrato.id)
+
+    assert response.status_code == 200
+    assert response.content == OFX
+    assert response.headers["content-type"].startswith("application/x-ofx")
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_csv_sai_como_text_csv(db_session, criar_empresa, como, arquivo_original):
+    empresa = criar_empresa()
+    extrato = _com_original(
+        db_session, empresa, arquivo_original, b"data;valor\n", "extrato.csv", "csv"
+    )
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 200
+    assert response.content == b"data;valor\n"
+    assert response.headers["content-type"].startswith("text/csv")
+
+
+def test_analista_recebe_403(db_session, criar_empresa, como, arquivo_original):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+
+    response = _baixar(como("analista", empresa), extrato.id)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Só o admin ou o gestor da conta podem fazer isso."
+
+
+def test_flag_desligada_da_404(db_session, criar_empresa, como, arquivo_original, monkeypatch):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", False)
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Arquivo original não disponível."
+
+
+def test_flag_ligada_sem_configuracao_da_503(db_session, criar_empresa, como, monkeypatch):
+    # Foco 5 do plano.
+    empresa = criar_empresa()
+    extrato = Extrato(
+        empresa_id=empresa.id,
+        nome_arquivo="extrato.ofx",
+        formato="ofx",
+        tamanho_bytes=1,
+        origem="banco",
+        status="concluido",
+        arquivo_chave="contas/x/empresas/y/z",
+    )
+    db_session.add(extrato)
+    db_session.commit()
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", True)
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Arquivo original indisponível no momento."
+
+
+def test_extrato_sem_original_da_404(db_session, criar_empresa, como, arquivo_original):
+    empresa = criar_empresa()
+    _, sem = _extratos_com_e_sem_original(db_session, empresa)
+
+    response = _baixar(como("gestor", empresa), sem.id)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Arquivo original não disponível."
+
+
+def test_extrato_inexistente_da_404(db_session, criar_empresa, como, arquivo_original):
+    empresa = criar_empresa()
+
+    response = _baixar(como("gestor", empresa), uuid.uuid4())
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Extrato não encontrado."
+
+
+def test_objeto_que_sumiu_do_bucket_da_404(db_session, criar_empresa, como, arquivo_original):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    arquivo_original.armazenamento.objetos.clear()
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Arquivo original não disponível."
+
+
+def test_extrato_de_outra_empresa_da_mesma_conta_da_404(
+    db_session, criar_empresa, como, arquivo_original
+):
+    # Foco 4 do plano: a empresa ativa é a do cabeçalho.
+    empresa = criar_empresa()
+    outra = criar_empresa("Outra cliente", conta_id=empresa.conta_id)
+    extrato = _com_original(db_session, outra, arquivo_original)
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Extrato não encontrado."
+    assert OFX not in response.content
+
+
+def test_chave_trocada_da_500_sem_vazar(db_session, criar_empresa, como, arquivo_original, caplog):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    outra_chave = ArquivoOriginal(arquivo_original.armazenamento, bytes(32 * [9]))
+    app.dependency_overrides[obter_arquivo_original] = lambda: outra_chave
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Não foi possível abrir o arquivo original."
+    assert "ArquivoOriginalCorrompido" in caplog.text
+
+
+def test_r2_fora_do_ar_da_503(db_session, criar_empresa, como, arquivo_original, caplog):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    arquivo_original.armazenamento.falhar = True
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Arquivo original indisponível no momento."
+    assert "RuntimeError" in caplog.text
+    assert "r2.cloudflarestorage" not in caplog.text
+
+
+def test_download_continua_depois_de_sair_do_avancado(
+    db_session, criar_empresa, como, arquivo_original
+):
+    empresa = criar_empresa()
+    _no_plano(db_session, empresa, "avancado")
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    _no_plano(db_session, empresa, "padrao")
+
+    response = _baixar(como("gestor", empresa), extrato.id)
+
+    assert response.status_code == 200
+    assert response.content == OFX
+
+
+def test_download_tem_limite_por_conta(db_session, criar_empresa, como, arquivo_original):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    headers = como("gestor", empresa)
+    limite = int(LIMITE_DOWNLOAD_ORIGINAL.split("/")[0])
+
+    respostas = [_baixar(headers, extrato.id) for _ in range(limite + 1)]
+
+    assert respostas[-2].status_code == 200
+    assert respostas[-1].status_code == 429
+
+
+def test_content_disposition_com_acento_aspas_e_quebra_de_linha():
+    # Foco 1 do plano: o nome vem do usuário e não pode quebrar o cabeçalho.
+    valor = content_disposition('extrato "março"\r\nX.ofx')
+    assert "\r" not in valor and "\n" not in valor
+    assert valor == (
+        'attachment; filename="extrato _mar_o___X.ofx"; '
+        "filename*=UTF-8''extrato%20%22mar%C3%A7o%22%0D%0AX.ofx"
+    )
