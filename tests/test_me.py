@@ -8,12 +8,14 @@ rate limit testados com as fixtures de conftest.py.
 """
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api.me import LIMITE_CONSULTA_ME_POR_USUARIO
 from app.core.auth import CABECALHO_EMPRESA
+from app.core.config import settings
 from main import app
 
 client = TestClient(app)
@@ -71,6 +73,8 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         },
         # Usuário novo, nada dispensado (issue #147).
         "preferencias": {"tutoriais_dispensados": [], "roteiro_dispensado": False},
+        # Flag desligada e conta sem plano (issue #139).
+        "guarda_arquivo_original": False,
     }
     assert len(corpo["cnpj"]) == 14
     assert not corpo["cnpj"].isalpha()  # sem máscara (sem pontuação)
@@ -226,3 +230,42 @@ def test_rate_limit_por_usuario_nao_afeta_outro_usuario(db_session, criar_usuari
     assert respostas[-2].status_code == 200
     assert respostas[-1].status_code == 429
     assert _me(cabecalho_de(outro)).status_code == 200
+
+
+# --- arquivo original do extrato (issue #139, ADR-023) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "plano, ligar_servico, flag, esperado",
+    [
+        ("avancado", True, True, True),
+        ("padrao", True, True, False),
+        ("avancado", True, False, False),
+        # Flag ligada sem as variáveis do R2: nada é guardado.
+        ("avancado", False, True, False),
+    ],
+)
+def test_me_guarda_arquivo_original(
+    db_session,
+    criar_usuario,
+    cabecalho_de,
+    request,
+    monkeypatch,
+    plano,
+    ligar_servico,
+    flag,
+    esperado,
+):
+    if ligar_servico:
+        request.getfixturevalue("arquivo_original")
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", flag)
+    usuario = criar_usuario()
+    # O CHECK de `contas` exige o plano e o fim do teste juntos.
+    usuario.conta.plano = plano
+    usuario.conta.teste_termina_em = datetime(2099, 1, 1, tzinfo=UTC)
+    db_session.commit()
+
+    response = _me(cabecalho_de(usuario))
+
+    assert response.status_code == 200
+    assert response.json()["guarda_arquivo_original"] is esperado

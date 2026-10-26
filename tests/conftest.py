@@ -75,6 +75,11 @@ from app.models import (
     UsoAssistente,
     Usuario,
 )
+from app.services.arquivo_original import (
+    ArquivoOriginal,
+    ArquivoOriginalNaoEncontrado,
+    obter_arquivo_original,
+)
 from app.services.consulta_cnpj.cache import cache_por_cnpj as cache_consulta_cnpj
 from app.services.email import MensagemEmail
 
@@ -634,6 +639,65 @@ def provedor(monkeypatch):
     monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
     yield falso
     app.dependency_overrides.pop(obter_provedor_email_dependencia, None)
+
+
+CHAVE_CIFRA_TESTE = bytes(range(32))
+
+
+class ArmazenamentoEmMemoria:
+    """O `Armazenamento` do arquivo original (issue #139, ADR-023) num
+    dicionário, no lugar do R2. Com `falhar`, todo método levanta um erro com o
+    endpoint na mensagem, como os do boto3, para os testes conferirem que ela
+    não chega ao log."""
+
+    def __init__(self) -> None:
+        self.objetos: dict[str, bytes] = {}
+        self.falhar = False
+
+    def _talvez_falhar(self) -> None:
+        if self.falhar:
+            raise RuntimeError("https://abc.r2.cloudflarestorage.com fora do ar")
+
+    def enviar(self, chave_objeto: str, dados: bytes) -> None:
+        self._talvez_falhar()
+        self.objetos[chave_objeto] = dados
+
+    def baixar(self, chave_objeto: str) -> bytes:
+        self._talvez_falhar()
+        try:
+            return self.objetos[chave_objeto]
+        except KeyError:
+            raise ArquivoOriginalNaoEncontrado("objeto não está no bucket") from None
+
+    def apagar(self, chave_objeto: str) -> None:
+        self._talvez_falhar()
+        self.objetos.pop(chave_objeto, None)
+
+    def contar_prefixo(self, prefixo: str) -> int:
+        self._talvez_falhar()
+        return sum(1 for chave in self.objetos if chave.startswith(prefixo))
+
+    def apagar_prefixo(self, prefixo: str) -> int:
+        self._talvez_falhar()
+        chaves = [chave for chave in self.objetos if chave.startswith(prefixo)]
+        for chave in chaves:
+            del self.objetos[chave]
+        return len(chaves)
+
+
+@pytest.fixture
+def arquivo_original(monkeypatch):
+    """Liga o arquivo original do extrato (issue #139) com um
+    `ArmazenamentoEmMemoria` no lugar do R2: troca a dependency
+    `obter_arquivo_original` e entrega o serviço, com o armazenamento em
+    `.armazenamento`. O plano da conta continua sendo do teste."""
+    from main import app
+
+    servico = ArquivoOriginal(ArmazenamentoEmMemoria(), CHAVE_CIFRA_TESTE)
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", True)
+    app.dependency_overrides[obter_arquivo_original] = lambda: servico
+    yield servico
+    app.dependency_overrides.pop(obter_arquivo_original, None)
 
 
 @pytest.fixture

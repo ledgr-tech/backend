@@ -254,3 +254,24 @@ def obter_arquivo_original() -> ArquivoOriginal | None:
     """Dependency das rotas. `None` quando o R2 ou a chave não estão
     configurados; a flag `ARQUIVO_ORIGINAL_HABILITADO` quem confere é a rota."""
     return _arquivo_original_em_cache(*_valores(settings))
+
+
+def conta_guarda_o_original(conta, servico: ArquivoOriginal | None) -> bool:
+    """O upload desta conta guarda o original agora? Flag ligada, R2 e chave
+    configurados e o plano da conta entre os que guardam. É o mesmo teste do
+    upload e do `guarda_arquivo_original` do `GET /me`, para os dois nunca
+    divergirem."""
+    from app.core.plano import guarda_arquivo_original
+
+    return (
+        settings.arquivo_original_habilitado
+        and servico is not None
+        and guarda_arquivo_original(conta)
+    )
+
+
+def original_visivel(arquivo_chave: str | None) -> bool:
+    """O `arquivo_original` da listagem, do detalhe e do upload: há original
+    guardado e a flag está ligada. Não olha o plano atual: quem saiu do
+    avançado continua baixando o que já foi guardado (ADR-023)."""
+    return settings.arquivo_original_habilitado and arquivo_chave is not None
