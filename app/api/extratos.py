@@ -52,13 +52,24 @@ conferido contra a conta do token desde a issue #133), nunca do form. `GET`
 de extrato de outra empresa, inclusive de outra empresa da mesma conta,
 devolve 404 (não 403) pra não confirmar a existência do ID (mitigação de
 BOLA/IDOR). O upload tem rate limit de 10/min por conta.
+
+Arquivo original (issue #139, ADR-023): nas contas do plano avançado, com
+`ARQUIVO_ORIGINAL_HABILITADO` ligada, o upload cifra e envia o arquivo ao R2
+antes do commit e grava a chave do objeto em `arquivo_chave`; nos outros
+planos, o ADR-002 continua valendo. Uma falha no R2 não derruba o upload: o
+extrato segue sem original. `arquivo_original` no upload, em cada item da
+listagem e no detalhe diz se há original guardado (e a flag está ligada).
+`GET /extratos/{extrato_id}/arquivo-original` devolve o arquivo como foi
+enviado, só para o admin e o gestor.
 """
 
+import logging
 import os
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -69,30 +80,61 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from fastapi import status as http_status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_empresa_id_ativa
+from app.core.auth import (
+    EmpresaAtiva,
+    exigir_papel,
+    obter_empresa_ativa,
+    obter_empresa_id_ativa,
+)
+from app.core.config import settings
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_UPLOAD, chave_por_conta, limiter
+from app.core.rate_limit import (
+    LIMITE_DOWNLOAD_ORIGINAL,
+    LIMITE_UPLOAD,
+    chave_por_conta,
+    limiter,
+)
 from app.models import ExecucaoConciliacao, Extrato, LinhaInvalida
 from app.services import saldo
+from app.services.arquivo_original import (
+    ArquivoOriginal,
+    ArquivoOriginalCorrompido,
+    ArquivoOriginalNaoEncontrado,
+    chave_do_objeto,
+    conta_guarda_o_original,
+    obter_arquivo_original,
+    original_visivel,
+)
 from app.services.normalizacao import normalizar_extrato
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/extratos", tags=["extratos"])
 
 FORMATOS_SUPORTADOS = {".ofx", ".csv"}
 TAMANHO_MAXIMO_BYTES = 5 * 1024 * 1024  # 5MB — ver issue #7, sem ADR dedicado
 
+# Download do arquivo original (issue #139, ADR-023): só o admin e o gestor.
+obter_admin_ou_gestor = exigir_papel("admin", "gestor")
+TIPOS_DO_ORIGINAL = {"csv": "text/csv", "ofx": "application/x-ofx"}
+ORIGINAL_NAO_DISPONIVEL = "Arquivo original não disponível."
+ORIGINAL_INDISPONIVEL = "Arquivo original indisponível no momento."
+
 
 class ExtratoUploadResponse(BaseModel):
     extrato_id: uuid.UUID
     status: str
+    arquivo_original: bool
 
 
 class ErroLinhaResponse(BaseModel):
@@ -111,6 +153,7 @@ class ExtratoDetalheResponse(BaseModel):
     saldo_final: Decimal | None
     saldo_data: date | None
     erros: list[ErroLinhaResponse]
+    arquivo_original: bool
 
 
 @router.post(
@@ -121,11 +164,12 @@ class ExtratoDetalheResponse(BaseModel):
 @limiter.limit(LIMITE_UPLOAD, key_func=chave_por_conta)
 async def upload_extrato(
     request: Request,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     arquivo: Annotated[UploadFile, File()],
     origem: Annotated[Literal["banco", "sistema"], Form()],
     db: Annotated[Session, Depends(get_db)],
     background_tasks: BackgroundTasks,
+    servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
 ) -> ExtratoUploadResponse:
     extensao = os.path.splitext(arquivo.filename or "")[1].lower()
     if extensao not in FORMATOS_SUPORTADOS:
@@ -141,7 +185,11 @@ async def upload_extrato(
             detail="Arquivo excede o limite de 5MB.",
         )
 
+    empresa = ativa.empresa
+    conta_id, empresa_id = empresa.conta_id, empresa.id
+    guarda_original = conta_guarda_o_original(empresa.conta, servico)
     extrato = Extrato(
+        id=uuid.uuid4(),
         empresa_id=empresa_id,
         nome_arquivo=arquivo.filename,
         formato=extensao.lstrip("."),
@@ -149,12 +197,23 @@ async def upload_extrato(
         origem=origem,
         status="pendente",
     )
+    # Plano avançado (ADR-023): o original vai cifrado para o R2 antes do
+    # commit, e a chave só é gravada se o envio deu certo. A transação das
+    # dependencies de auth é encerrada antes: com o R2 lento, ela prenderia uma
+    # conexão do pool durante todo o envio. O commit abaixo abre outra.
+    if guarda_original:
+        db.rollback()
+        extrato.arquivo_chave = await _guardar_original(
+            servico, chave_do_objeto(conta_id, empresa_id, extrato.id), conteudo, extrato.id
+        )
 
     db.add(extrato)
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
+        if extrato.arquivo_chave is not None:
+            await _apagar_original_sem_extrato(servico, extrato.arquivo_chave, extrato.id)
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Empresa não encontrada.",
@@ -165,7 +224,42 @@ async def upload_extrato(
     # em memória pra task de normalização, que descarta depois de processar.
     background_tasks.add_task(normalizar_extrato, extrato.id, extrato.formato, conteudo)
 
-    return ExtratoUploadResponse(extrato_id=extrato.id, status=extrato.status)
+    return ExtratoUploadResponse(
+        extrato_id=extrato.id,
+        status=extrato.status,
+        arquivo_original=original_visivel(extrato.arquivo_chave),
+    )
+
+
+async def _guardar_original(
+    servico: ArquivoOriginal, chave: str, conteudo: bytes, extrato_id: uuid.UUID
+) -> str | None:
+    """Cifra e envia o original, fora do event loop (o cliente do R2 é
+    síncrono). Qualquer falha deixa o extrato sem original, e o upload segue:
+    o R2 fora do ar não impede a conciliação. No log, só a classe do erro."""
+    try:
+        await run_in_threadpool(servico.guardar, chave, conteudo)
+    except Exception as exc:  # noqa: BLE001 - o upload segue sem o original (ADR-023)
+        logger.warning(
+            "arquivo original não guardado (%s), extrato %s", type(exc).__name__, extrato_id
+        )
+        return None
+    return chave
+
+
+async def _apagar_original_sem_extrato(
+    servico: ArquivoOriginal, chave: str, extrato_id: uuid.UUID
+) -> None:
+    """O commit falhou depois do envio: tenta apagar o objeto, para não ficar
+    arquivo no R2 sem extrato no banco."""
+    try:
+        await run_in_threadpool(servico.apagar, chave)
+    except Exception as exc:  # noqa: BLE001 - o 404 do upload sai de qualquer jeito
+        logger.warning(
+            "arquivo original sem extrato não foi apagado (%s), extrato %s",
+            type(exc).__name__,
+            extrato_id,
+        )
 
 
 StatusExtrato = Literal["pendente", "processando", "concluido", "concluido_com_erros", "erro"]
@@ -186,6 +280,7 @@ class ItemExtratoResponse(BaseModel):
     saldo_data: date | None
     enviado_em: datetime
     conciliado: bool
+    arquivo_original: bool
 
 
 class ExtratoListaResponse(BaseModel):
@@ -236,6 +331,7 @@ def listar_extratos(
             Extrato.saldo_final,
             Extrato.saldo_data,
             Extrato.criado_em,
+            Extrato.arquivo_chave,
             linhas_nao_lidas.label("linhas_nao_lidas"),
             conciliado.label("conciliado"),
         )
@@ -277,6 +373,7 @@ def listar_extratos(
             ),
             enviado_em=linha.criado_em.replace(tzinfo=UTC),
             conciliado=linha.conciliado,
+            arquivo_original=original_visivel(linha.arquivo_chave),
         )
         for linha in linhas
     ]
@@ -310,4 +407,83 @@ async def obter_extrato(
         periodo_fim=extrato.periodo_fim,
         **vars(saldo.saldo_do_extrato(db, extrato)),
         erros=erros,
+        arquivo_original=original_visivel(extrato.arquivo_chave),
+    )
+
+
+def content_disposition(nome: str) -> str:
+    """`attachment` com o nome do arquivo enviado. O nome vem do usuário: no
+    `filename`, o que não é ASCII imprimível, as aspas e a barra invertida
+    viram `_` (sem quebra de linha, não há como injetar cabeçalho); o nome
+    exato vai em UTF-8 no `filename*` (RFC 6266)."""
+    so_ascii = "".join(c if " " <= c <= "~" and c not in '"\\' else "_" for c in nome)
+    return f"attachment; filename=\"{so_ascii}\"; filename*=UTF-8''{quote(nome, safe='')}"
+
+
+@router.get(
+    "/{extrato_id}/arquivo-original",
+    dependencies=[Depends(obter_admin_ou_gestor)],
+    response_class=Response,
+)
+@limiter.limit(LIMITE_DOWNLOAD_ORIGINAL, key_func=chave_por_conta)
+def baixar_arquivo_original(
+    request: Request,
+    extrato_id: uuid.UUID,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
+    db: Annotated[Session, Depends(get_db)],
+    servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
+) -> Response:
+    """O arquivo original do extrato, como foi enviado (issue #139, ADR-023).
+
+    Síncrona de propósito: o FastAPI roda numa thread, e o cliente do R2 é
+    síncrono. O papel é conferido antes de tudo (403 para o analista). Não
+    olha o plano atual: o que foi guardado continua baixável depois que a
+    conta sai do avançado. No log, só a classe do erro e o id do extrato.
+    """
+    if not settings.arquivo_original_habilitado:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL)
+    if servico is None:
+        raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, ORIGINAL_INDISPONIVEL)
+    extrato = db.get(Extrato, extrato_id)
+    if extrato is None or extrato.empresa_id != empresa_id:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, "Extrato não encontrado.")
+    if extrato.arquivo_chave is None:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL)
+    # O que a resposta precisa sai do banco antes do R2, e a transação é
+    # encerrada: com o R2 lento, ela prenderia uma conexão do pool.
+    chave, formato, nome, extrato_id = (
+        extrato.arquivo_chave,
+        extrato.formato,
+        extrato.nome_arquivo,
+        extrato.id,
+    )
+    db.rollback()
+
+    try:
+        conteudo = servico.abrir(chave)
+    except ArquivoOriginalNaoEncontrado as exc:
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL) from exc
+    except ArquivoOriginalCorrompido as exc:
+        logger.error("arquivo original não abriu (%s), extrato %s", type(exc).__name__, extrato_id)
+        raise HTTPException(
+            http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Não foi possível abrir o arquivo original.",
+        ) from exc
+    except Exception as exc:  # R2 fora do ar ou token revogado: 503
+        logger.warning(
+            "arquivo original indisponível (%s), extrato %s", type(exc).__name__, extrato_id
+        )
+        raise HTTPException(
+            http_status.HTTP_503_SERVICE_UNAVAILABLE, ORIGINAL_INDISPONIVEL
+        ) from exc
+
+    # O Content-Type vai no cabeçalho, e não em `media_type`, para o Starlette
+    # não acrescentar `charset=utf-8`: o CSV pode ser Latin-1.
+    return Response(
+        content=conteudo,
+        headers={
+            "Content-Type": TIPOS_DO_ORIGINAL[formato],
+            "Content-Disposition": content_disposition(nome),
+            "Cache-Control": "no-store",
+        },
     )

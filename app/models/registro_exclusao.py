@@ -20,7 +20,8 @@ class RegistroExclusao(Base):
     que a migração criou dela). `cnpj_sha256` é o sha256 hex do CNPJ da conta,
     para responder depois "a conta deste CNPJ foi excluída?" sem guardar o
     CNPJ. `contagens` é o número de linhas apagadas por tabela, inclusive
-    `empresas` e `contas`.
+    `empresas` e `contas`, e, quando o R2 estava configurado, o de arquivos
+    originais apagados no bucket, em `arquivos_originais_r2` (issue #139).
     `executado_por` é o texto digitado por quem rodou o script.
 
     Sem `TimestampMixin`: a linha nunca é alterada, e `executado_em` é o único

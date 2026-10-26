@@ -72,6 +72,9 @@ limiter = Limiter(key_func=ip_do_cliente)
 # upload chega pelo servidor do Next, com o IP da Vercel. Por conta, e não por
 # empresa cliente, desde a issue #133: trocar de empresa não multiplica o limite.
 LIMITE_UPLOAD = "10/minute"
+# Download do arquivo original do extrato (issue #139, ADR-023): por conta e no
+# mesmo valor do upload, pelo mesmo motivo.
+LIMITE_DOWNLOAD_ORIGINAL = "10/minute"
 # O /login, o /register e o /senha/* são chamados pelo servidor do Next: o
 # limite por IP só separa os usuários quando o front repassa o IP do
 # navegador (ver o docstring do módulo).

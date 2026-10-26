@@ -29,6 +29,11 @@ máximo do plano (`null` sem limite), com a mesma conta do 402 do
 `POST /empresas` e do `POST /empresa/convites`: usuários são os ativos mais os
 convites pendentes. O front mostra os avisos de limite com isso.
 
+`guarda_arquivo_original` (issue #139, ADR-023) diz se o upload desta conta
+guarda o arquivo original agora: flag `ARQUIVO_ORIGINAL_HABILITADO` ligada, R2
+e chave configurados e conta no plano avançado. O front avisa no upload com
+isso. É a mesma regra do upload (app/services/arquivo_original.py).
+
 Obsoletos, mantidos até o front migrar: `empresa_id`, igual a `conta_id` (o
 valor que o front grava no token, que o backend lê como id da conta), e
 `administrador`, igual a `papel == "admin"` (issue #69, ADR-015).
@@ -111,6 +116,11 @@ from app.core.rate_limit import (
 )
 from app.models import Convite, Empresa, Usuario
 from app.models.usuario import TELAS_DO_TUTORIAL, Papel, TelaDoTutorial
+from app.services.arquivo_original import (
+    ArquivoOriginal,
+    conta_guarda_o_original,
+    obter_arquivo_original,
+)
 from app.services.convites import condicoes_pendente
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
@@ -192,6 +202,7 @@ class MeResponse(BaseModel):
     situacao: Situacao
     limites: Limites
     preferencias: Preferencias
+    guarda_arquivo_original: bool
 
 
 def _metodos_login(usuario: Usuario) -> list[str]:
@@ -209,6 +220,7 @@ def obter_dados_da_conta(
     request: Request,
     usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
     db: Annotated[Session, Depends(get_db)],
+    servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
 ) -> MeResponse:
     conta = usuario.conta  # a dependency já carregou o usuário
     empresas = db.scalars(
@@ -243,6 +255,7 @@ def obter_dados_da_conta(
             ),
         ),
         preferencias=_preferencias(usuario),
+        guarda_arquivo_original=conta_guarda_o_original(conta, servico),
     )
 
 

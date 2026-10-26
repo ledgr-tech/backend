@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core import auth
-from app.core.plano import DURACAO_TESTE, PLANOS, situacao_da_conta
+from app.core.plano import DURACAO_TESTE, PLANOS, guarda_arquivo_original, situacao_da_conta
 from app.models import Conta
 from main import app
 
@@ -261,3 +261,24 @@ def test_teste_vira_encerrado_no_instante_de_teste_termina_em(
 
     _congelar(monkeypatch, fim)
     assert _me(cabecalho(administrador))["situacao"] == "teste_encerrado"
+
+
+# --- Arquivo original do extrato (issue #139, ADR-023) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "plano, esperado",
+    [("avancado", True), ("padrao", False), ("essencial", False), (None, False)],
+)
+def test_so_o_avancado_guarda_o_arquivo_original(plano, esperado):
+    conta = SimpleNamespace(plano=plano, teste_termina_em=None, assinatura_ativa=False)
+    assert guarda_arquivo_original(conta) is esperado
+
+
+def test_avancado_guarda_em_qualquer_situacao():
+    passado = datetime(2026, 1, 1, tzinfo=UTC)
+    for conta in (
+        SimpleNamespace(plano="avancado", teste_termina_em=passado, assinatura_ativa=False),
+        SimpleNamespace(plano="avancado", teste_termina_em=passado, assinatura_ativa=True),
+    ):
+        assert guarda_arquivo_original(conta) is True

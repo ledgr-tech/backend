@@ -88,6 +88,18 @@ def mcp_liberado(conta: _ComPlano) -> bool:
     return True
 
 
+# Arquivo original do extrato (issue #139, ADR-023): só o plano mais caro.
+PLANOS_QUE_GUARDAM_ARQUIVO: tuple[Plano, ...] = ("avancado",)
+
+
+def guarda_arquivo_original(conta: _ComPlano) -> bool:
+    """O plano da conta guarda o arquivo original de cada extrato enviado? Vale
+    o plano escolhido, em qualquer situação (teste, teste encerrado ou
+    assinatura ativa), como nos limites. Só a regra do plano: a flag e a
+    configuração do R2 quem confere é a rota."""
+    return conta.plano in PLANOS_QUE_GUARDAM_ARQUIVO
+
+
 def situacao_da_conta(conta: _ComPlano, instante: datetime | None = None) -> Situacao:
     if conta.assinatura_ativa:
         return "ativo"
