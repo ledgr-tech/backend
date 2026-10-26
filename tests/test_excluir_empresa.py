@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
-from conftest import _gerar_cnpj_alfanumerico
+from conftest import ArmazenamentoEmMemoria, _gerar_cnpj_alfanumerico
 from sqlalchemy import func, select
 
 from app.core import senha
@@ -44,6 +44,7 @@ from app.models import (
     UsoAssistente,
     Usuario,
 )
+from app.services.arquivo_original import chave_do_objeto, prefixo_da_conta
 from scripts import excluir_empresa as script
 
 NOME_ADMIN = "Ana Administradora"
@@ -633,3 +634,165 @@ def test_banco_remoto_com_a_flag_e_o_host_digitado_passa_da_guarda(banco_remoto)
         )
 
     assert banco_remoto == [URL_REMOTA]
+
+
+# --- arquivo original no R2 (issue #139, ADR-023) ------------------------------
+
+
+def _com_original(db_session, conta: Conta, armazenamento=None, objetos: int = 0) -> None:
+    """Marca um extrato da conta com `arquivo_chave` e, com `armazenamento`,
+    grava `objetos` objetos no prefixo da conta (o do extrato entre eles)."""
+    extrato = db_session.scalars(
+        select(Extrato)
+        .join(Empresa, Extrato.empresa_id == Empresa.id)
+        .where(Empresa.conta_id == conta.id)
+    ).first()
+    extrato.arquivo_chave = chave_do_objeto(conta.id, extrato.empresa_id, extrato.id)
+    db_session.commit()
+    if armazenamento is None:
+        return
+    armazenamento.objetos[extrato.arquivo_chave] = b"cifrado"
+    for _ in range(objetos - 1):
+        chave = f"{prefixo_da_conta(conta.id)}empresas/{extrato.empresa_id}/{uuid.uuid4()}"
+        armazenamento.objetos[chave] = b"cifrado"
+
+
+class _FalhaAoApagar(ArmazenamentoEmMemoria):
+    def apagar_prefixo(self, prefixo: str) -> int:
+        raise RuntimeError("https://abc.r2.cloudflarestorage.com fora do ar")
+
+
+def _registro(db_session, conta_id) -> RegistroExclusao:
+    return db_session.scalars(
+        select(RegistroExclusao).where(RegistroExclusao.empresa_id == conta_id)
+    ).one()
+
+
+def test_executar_apaga_os_arquivos_da_conta_e_nao_os_de_outra(
+    db_session, conta_povoada, registros, capsys
+):
+    conta, linhas = conta_povoada()
+    conta_id, cnpj = conta.id, conta.cnpj
+    registros(conta_id)
+    memoria = ArmazenamentoEmMemoria()
+    _com_original(db_session, conta, memoria, objetos=2)
+    de_outra = f"contas/{uuid.uuid4()}/empresas/{uuid.uuid4()}/{uuid.uuid4()}"
+    memoria.objetos[de_outra] = b"cifrado"
+
+    codigo = script.main(
+        ["--conta-id", str(conta_id), "--executar"],
+        perguntar=_Respostas("vitor", cnpj),
+        criar_armazenamento=lambda: memoria,
+    )
+
+    saida = capsys.readouterr().out
+    assert codigo == 0
+    assert list(memoria.objetos) == [de_outra]
+    assert _existentes(db_session, linhas) == []
+    assert _registro(db_session, conta_id).contagens["arquivos_originais_r2"] == 2
+    assert "Arquivos originais no R2: 2" in saida
+    assert prefixo_da_conta(conta_id) not in saida
+
+
+def test_simulacao_mostra_os_arquivos_e_nao_apaga(db_session, conta_povoada, capsys):
+    conta, linhas = conta_povoada()
+    memoria = ArmazenamentoEmMemoria()
+    _com_original(db_session, conta, memoria, objetos=2)
+
+    codigo = script.main(
+        ["--conta-id", str(conta.id)], perguntar=_Respostas(), criar_armazenamento=lambda: memoria
+    )
+
+    assert codigo == 0
+    assert "Arquivos originais no R2: 2" in capsys.readouterr().out
+    assert len(memoria.objetos) == 2
+    assert len(_existentes(db_session, linhas)) == len(linhas)
+
+
+def test_simulacao_sem_variaveis_e_com_original_avisa(db_session, conta_povoada, capsys):
+    conta, _ = conta_povoada()
+    _com_original(db_session, conta)
+
+    codigo = script.main(
+        ["--conta-id", str(conta.id)], perguntar=_Respostas(), criar_armazenamento=lambda: None
+    )
+
+    assert codigo == 0
+    assert "ARQUIVO_ORIGINAL_R2_*" in capsys.readouterr().out
+
+
+def test_sem_variaveis_e_com_original_recusa_sem_perguntar(db_session, conta_povoada, capsys):
+    conta, linhas = conta_povoada()
+    _com_original(db_session, conta)
+    perguntar = _Respostas()
+
+    codigo = script.main(
+        ["--conta-id", str(conta.id), "--executar"],
+        perguntar=perguntar,
+        criar_armazenamento=lambda: None,
+    )
+
+    assert codigo == 1
+    assert perguntar.perguntas == []
+    assert (
+        "Sem as variáveis ARQUIVO_ORIGINAL_R2_* no ambiente, os arquivos originais ficariam "
+        "no R2. Nada foi apagado." in capsys.readouterr().out
+    )
+    assert len(_existentes(db_session, linhas)) == len(linhas)
+
+
+def test_sem_variaveis_e_sem_original_segue(db_session, conta_povoada, registros):
+    conta, linhas = conta_povoada()
+    conta_id, cnpj = conta.id, conta.cnpj
+    registros(conta_id)
+
+    codigo = script.main(
+        ["--conta-id", str(conta_id), "--executar"],
+        perguntar=_Respostas("vitor", cnpj),
+        criar_armazenamento=lambda: None,
+    )
+
+    assert codigo == 0
+    assert _existentes(db_session, linhas) == []
+    assert "arquivos_originais_r2" not in _registro(db_session, conta_id).contagens
+
+
+def test_falha_ao_apagar_no_r2_nao_apaga_o_banco(db_session, conta_povoada, capsys):
+    conta, linhas = conta_povoada()
+    memoria = _FalhaAoApagar()
+    _com_original(db_session, conta, memoria, objetos=1)
+
+    codigo = script.main(
+        ["--conta-id", str(conta.id), "--executar"],
+        perguntar=_Respostas("vitor", conta.cnpj),
+        criar_armazenamento=lambda: memoria,
+    )
+
+    saida = capsys.readouterr().out
+    assert codigo == 1
+    assert "Falha ao apagar os arquivos originais no R2 (RuntimeError)." in saida
+    assert "Nada foi apagado do banco." in saida
+    assert "r2.cloudflarestorage" not in saida
+    assert len(_existentes(db_session, linhas)) == len(linhas)
+    assert len(memoria.objetos) == 1
+
+
+def test_falha_ao_consultar_o_r2_nao_apaga_nada(db_session, conta_povoada, capsys):
+    conta, linhas = conta_povoada()
+    memoria = ArmazenamentoEmMemoria()
+    _com_original(db_session, conta, memoria, objetos=1)
+    memoria.falhar = True
+    perguntar = _Respostas()
+
+    codigo = script.main(
+        ["--conta-id", str(conta.id), "--executar"],
+        perguntar=perguntar,
+        criar_armazenamento=lambda: memoria,
+    )
+
+    saida = capsys.readouterr().out
+    assert codigo == 1
+    assert perguntar.perguntas == []
+    assert "RuntimeError" in saida
+    assert "r2.cloudflarestorage" not in saida
+    assert len(_existentes(db_session, linhas)) == len(linhas)

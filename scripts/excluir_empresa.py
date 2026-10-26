@@ -31,8 +31,18 @@ Railway pelo `.env`. Por isso, por padrão, a guarda de
 app/core/banco_local.py recusa qualquer banco que não seja local. Banco
 remoto só com `--banco-remoto` e o host digitado como segunda confirmação.
 
+Arquivos originais no R2 (issue #139, ADR-023): no plano avançado, o
+arquivo de cada extrato fica cifrado no bucket próprio do R2, sob o prefixo da
+conta. O script conta os objetos do prefixo na simulação e, depois das duas
+confirmações, apaga todos ANTES da transação do banco. Para isso, quem roda
+precisa das variáveis `ARQUIVO_ORIGINAL_R2_*` do token do bucket no ambiente
+(não precisa da chave de cifra). Sem elas, e com algum extrato da conta com
+`arquivo_chave`, a execução recusa antes de perguntar qualquer coisa: os
+arquivos ficariam no R2 sem ninguém saber de quem são. Se o R2 falhar, nada é
+apagado do banco; apagar por prefixo é idempotente, e rodar de novo resolve.
+
 Nunca imprime nome nem e-mail de usuário: só contagens, a razão social e o
-CNPJ mascarado.
+CNPJ mascarado. Do R2, só a contagem e o nome da classe de um erro.
 """
 
 import argparse
@@ -80,6 +90,11 @@ from app.models import (
     TokenOAuth,
     UsoAssistente,
     Usuario,
+)
+from app.services.arquivo_original import (
+    Armazenamento,
+    armazenamento_do_ambiente,
+    prefixo_da_conta,
 )
 
 
@@ -138,6 +153,15 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
 TABELAS_QUE_FICAM = frozenset({RegistroExclusao.__tablename__})
 
 
+# Em `registros_exclusao.contagens`, ao lado das tabelas: quantos objetos o
+# script apagou no R2. Só entra quando o R2 estava configurado.
+CHAVE_CONTAGEM_ARQUIVOS = "arquivos_originais_r2"
+SEM_VARIAVEIS_DO_R2 = (
+    "Sem as variáveis ARQUIVO_ORIGINAL_R2_* no ambiente, os arquivos originais ficariam "
+    "no R2. Nada foi apagado."
+)
+
+
 def tabelas_apagadas() -> list[str]:
     return [model.__tablename__ for model, _ in ETAPAS]
 
@@ -167,7 +191,12 @@ class Exclusao:
     contagens: dict[str, int]
 
 
-def excluir_conta(db: Session, conta_id: uuid.UUID, executado_por: str) -> Exclusao:
+def excluir_conta(
+    db: Session,
+    conta_id: uuid.UUID,
+    executado_por: str,
+    arquivos_originais: int | None = None,
+) -> Exclusao:
     """Apaga a conta, as empresas dela e tudo o que é delas, grava o registro e
     faz o commit, numa transação só. Qualquer erro desfaz tudo e sobe.
 
@@ -188,6 +217,8 @@ def excluir_conta(db: Session, conta_id: uuid.UUID, executado_por: str) -> Exclu
                 execution_options={"synchronize_session": False},
             )
             contagens[model.__tablename__] = resultado.rowcount
+        if arquivos_originais is not None:
+            contagens[CHAVE_CONTAGEM_ARQUIVOS] = arquivos_originais
         registro_id = uuid.uuid4()
         registro = RegistroExclusao(
             id=registro_id,
@@ -260,7 +291,23 @@ def _imprimir_contagens(contagens: dict[str, int]) -> None:
     print(f"  {'total':<{largura}}  {sum(contagens.values())}")
 
 
-def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input) -> int:
+def _armazenamento_do_ambiente() -> Armazenamento | None:
+    return armazenamento_do_ambiente(settings)
+
+
+def _extratos_com_original(db: Session, conta_id: uuid.UUID) -> int:
+    return db.scalar(
+        select(func.count()).where(
+            Extrato.id.in_(_extratos_da_conta(conta_id)), Extrato.arquivo_chave.is_not(None)
+        )
+    )
+
+
+def main(
+    argv: list[str] | None = None,
+    perguntar: Callable[[str], str] = input,
+    criar_armazenamento: Callable[[], Armazenamento | None] = _armazenamento_do_ambiente,
+) -> int:
     args = _argumentos(argv)
     url = settings.database_url
     if not _banco_liberado(url, args.banco_remoto, perguntar):
@@ -281,8 +328,22 @@ def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input)
                 )
             )
             contagens = contar_linhas(db, conta.id)
+            com_original = _extratos_com_original(db, conta.id)
             # Fecha a leitura antes de esperar o que for digitado.
             db.rollback()
+
+            prefixo = prefixo_da_conta(conta.id)
+            armazenamento = criar_armazenamento()
+            objetos = None
+            if armazenamento is not None:
+                try:
+                    objetos = armazenamento.contar_prefixo(prefixo)
+                except Exception as exc:  # noqa: BLE001 - a mensagem do boto3 traz o endpoint
+                    print(
+                        f"Falha ao consultar os arquivos originais no R2 ({type(exc).__name__}). "
+                        "Nada foi apagado."
+                    )
+                    return 1
 
             print(f"Banco:           {destino.host}/{destino.database}")
             print(f"Conta:           {args.conta_id}")
@@ -292,10 +353,20 @@ def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input)
             print(f"Usuários ativos: {usuarios_ativos}")
             print("Linhas que seriam apagadas:" if not args.executar else "Linhas a apagar:")
             _imprimir_contagens(contagens)
+            if objetos is not None:
+                print(f"Arquivos originais no R2: {objetos}")
+            elif com_original:
+                print(
+                    f"Arquivos originais no R2: {com_original} extrato(s) com original, mas as "
+                    "variáveis ARQUIVO_ORIGINAL_R2_* não estão no ambiente."
+                )
 
             if not args.executar:
                 print("Simulação: nada foi apagado. Para apagar, rode de novo com --executar.")
                 return 0
+            if armazenamento is None and com_original:
+                print(SEM_VARIAVEIS_DO_R2)
+                return 1
 
             executado_por = perguntar("Quem está executando (fica no registro): ").strip()
             if not executado_por:
@@ -308,7 +379,20 @@ def main(argv: list[str] | None = None, perguntar: Callable[[str], str] = input)
                 print("O CNPJ digitado não confere. Nada foi apagado.")
                 return 1
 
-            exclusao = excluir_conta(db, args.conta_id, executado_por)
+            # R2 antes do banco: se o R2 falhar, a conta continua inteira no
+            # banco e o script pode rodar de novo.
+            arquivos = None
+            if armazenamento is not None:
+                try:
+                    arquivos = armazenamento.apagar_prefixo(prefixo)
+                except Exception as exc:  # noqa: BLE001 - a mensagem do boto3 traz o endpoint
+                    print(
+                        f"Falha ao apagar os arquivos originais no R2 ({type(exc).__name__}). "
+                        "Nada foi apagado do banco."
+                    )
+                    return 1
+
+            exclusao = excluir_conta(db, args.conta_id, executado_por, arquivos_originais=arquivos)
             print("Conta excluída. Linhas apagadas:")
             _imprimir_contagens(exclusao.contagens)
             print(f"Registro da exclusão: {exclusao.registro_id}")
