@@ -8,10 +8,13 @@ anyio==4.15.1
     # via
     #   -c ../requirements.txt
     #   httpx
-boto3==1.43.114
-    # via -r requirements.in
-botocore==1.43.114
+boto3==1.43.118
     # via
+    #   -c ../requirements.txt
+    #   -r requirements.in
+botocore==1.43.118
+    # via
+    #   -c ../requirements.txt
     #   boto3
     #   s3transfer
 certifi==2026.7.22
@@ -38,14 +41,17 @@ idna==3.20
     #   httpx
 jmespath==1.1.0
     # via
+    #   -c ../requirements.txt
     #   boto3
     #   botocore
 python-dateutil==2.9.0.post0
     # via
     #   -c ../requirements.txt
     #   botocore
-s3transfer==0.19.2
-    # via boto3
+s3transfer==0.19.3
+    # via
+    #   -c ../requirements.txt
+    #   boto3
 six==1.17.0
     # via
     #   -c ../requirements.txt
@@ -55,4 +61,6 @@ typing-extensions==4.16.0
     #   -c ../requirements.txt
     #   anyio
 urllib3==2.8.0
-    # via botocore
+    # via
+    #   -c ../requirements.txt
+    #   botocore

@@ -153,6 +153,18 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     monkeypatch.setattr(settings, "mcp_url_publica", "")
     monkeypatch.setattr(settings, "oauth_issuer", "")
     monkeypatch.setattr(settings, "oauth_redirects_permitidos", "")
+    # Arquivo original do extrato (issue #139): desligado e sem R2, como em
+    # produção; nenhum teste fala com o R2 de verdade. Quem testa usa a
+    # fixture `arquivo_original`, com o armazenamento em memória.
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", False)
+    for variavel in (
+        "arquivo_original_r2_endpoint",
+        "arquivo_original_r2_bucket",
+        "arquivo_original_r2_access_key_id",
+        "arquivo_original_r2_secret_access_key",
+        "arquivo_original_chave",
+    ):
+        monkeypatch.setattr(settings, variavel, "")
 
 
 @pytest.fixture(autouse=True)

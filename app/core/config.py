@@ -166,6 +166,21 @@ class Settings(BaseSettings):
     oauth_issuer: str = ""
     oauth_redirects_permitidos: str = ""
 
+    # Arquivo original do extrato (issue #139, ADR-023): ligada, as contas do
+    # plano avançado guardam o arquivo de cada extrato enviado, cifrado pelo
+    # backend, no bucket próprio do R2, e o admin e o gestor baixam o original.
+    # Desligada em produção até o retorno da consultoria jurídica e o texto da
+    # Política de privacidade, que hoje diz que o arquivo não é guardado. Ligada
+    # sem as cinco variáveis abaixo (ou com a chave inválida), nada é guardado e
+    # o download responde 503; o boot não cai. `arquivo_original_chave` é a
+    # chave do AES-256-GCM, 32 bytes em base64: perdê-la é perder os arquivos.
+    arquivo_original_habilitado: bool = False
+    arquivo_original_r2_endpoint: str = ""
+    arquivo_original_r2_bucket: str = ""
+    arquivo_original_r2_access_key_id: str = ""
+    arquivo_original_r2_secret_access_key: str = ""
+    arquivo_original_chave: str = ""
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:

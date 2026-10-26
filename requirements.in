@@ -37,3 +37,6 @@ authlib
 # Streamable HTTP. Versão fixada: o SDK acompanha a especificação do MCP.
 mcp==2.3.0
 rapidfuzz
+# API S3 do Cloudflare R2, para o arquivo original do extrato no plano avançado
+# (issue #139, ADR-023). O serviço de backup tem o próprio, em backup/.
+boto3
