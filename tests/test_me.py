@@ -269,3 +269,23 @@ def test_me_guarda_arquivo_original(
 
     assert response.status_code == 200
     assert response.json()["guarda_arquivo_original"] is esperado
+
+
+def test_me_com_endpoint_do_r2_invalido_continua_200(
+    db_session, criar_usuario, cabecalho_de, monkeypatch
+):
+    # Revisão final (I1): uma variável do R2 mal digitada em produção, com a
+    # flag desligada, não pode tirar o /me do ar.
+    monkeypatch.setattr(settings, "arquivo_original_r2_endpoint", "abc.r2.cloudflarestorage.com")
+    monkeypatch.setattr(settings, "arquivo_original_r2_bucket", "ledgr-extratos")
+    monkeypatch.setattr(settings, "arquivo_original_r2_access_key_id", "id")
+    monkeypatch.setattr(settings, "arquivo_original_r2_secret_access_key", "segredo")
+    monkeypatch.setattr(
+        settings, "arquivo_original_chave", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    )
+    usuario = criar_usuario()
+
+    response = _me(cabecalho_de(usuario))
+
+    assert response.status_code == 200
+    assert response.json()["guarda_arquivo_original"] is False

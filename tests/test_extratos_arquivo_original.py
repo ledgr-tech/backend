@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, text
 
 from app.api.extratos import content_disposition
 from app.core.config import settings
+from app.core.database import engine
 from app.core.rate_limit import LIMITE_DOWNLOAD_ORIGINAL
 from app.models import Conta, Empresa, Extrato
 from app.services.arquivo_original import (
@@ -454,3 +455,65 @@ def test_content_disposition_com_acento_aspas_e_quebra_de_linha():
         'attachment; filename="extrato _mar_o___X.ofx"; '
         "filename*=UTF-8''extrato%20%22mar%C3%A7o%22%0D%0AX.ofx"
     )
+
+
+# --- conexão do banco durante o R2 (revisão final, I2) --------------------------
+
+
+class _AnotaConexoes:
+    """Anota quantas conexões do pool estão emprestadas na hora em que o R2 é
+    chamado: com o R2 lento, uma conexão presa ali esgota o pool do app."""
+
+    def __init__(self, armazenamento):
+        self.armazenamento = armazenamento
+        self.durante: list[int] = []
+
+    def enviar(self, chave_objeto: str, dados: bytes) -> None:
+        self.durante.append(engine.pool.checkedout())
+        self.armazenamento.enviar(chave_objeto, dados)
+
+    def baixar(self, chave_objeto: str) -> bytes:
+        self.durante.append(engine.pool.checkedout())
+        return self.armazenamento.baixar(chave_objeto)
+
+    def __getattr__(self, nome):
+        return getattr(self.armazenamento, nome)
+
+
+def test_upload_devolve_a_conexao_ao_pool_antes_do_r2(
+    db_session, criar_empresa, auth_headers, arquivo_original
+):
+    empresa = criar_empresa()
+    _no_plano(db_session, empresa, "avancado")
+    headers = auth_headers(empresa.id)
+    anota = _AnotaConexoes(arquivo_original.armazenamento)
+    servico = ArquivoOriginal(anota, CHAVE_CIFRA_TESTE)
+    app.dependency_overrides[obter_arquivo_original] = lambda: servico
+    db_session.rollback()
+    antes = engine.pool.checkedout()
+
+    response = _enviar(headers)
+
+    assert response.status_code == 201
+    assert response.json()["arquivo_original"] is True
+    assert anota.durante == [antes]
+
+
+def test_download_devolve_a_conexao_ao_pool_antes_do_r2(
+    db_session, criar_empresa, como, arquivo_original
+):
+    empresa = criar_empresa()
+    extrato = _com_original(db_session, empresa, arquivo_original)
+    headers = como("gestor", empresa)
+    anota = _AnotaConexoes(arquivo_original.armazenamento)
+    servico = ArquivoOriginal(anota, CHAVE_CIFRA_TESTE)
+    app.dependency_overrides[obter_arquivo_original] = lambda: servico
+    extrato_id = extrato.id
+    db_session.rollback()
+    antes = engine.pool.checkedout()
+
+    response = _baixar(headers, extrato_id)
+
+    assert response.status_code == 200
+    assert response.content == OFX
+    assert anota.durante == [antes]

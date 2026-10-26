@@ -186,9 +186,11 @@ async def upload_extrato(
         )
 
     empresa = ativa.empresa
+    conta_id, empresa_id = empresa.conta_id, empresa.id
+    guarda_original = conta_guarda_o_original(empresa.conta, servico)
     extrato = Extrato(
         id=uuid.uuid4(),
-        empresa_id=empresa.id,
+        empresa_id=empresa_id,
         nome_arquivo=arquivo.filename,
         formato=extensao.lstrip("."),
         tamanho_bytes=len(conteudo),
@@ -196,10 +198,13 @@ async def upload_extrato(
         status="pendente",
     )
     # Plano avançado (ADR-023): o original vai cifrado para o R2 antes do
-    # commit, e a chave só é gravada se o envio deu certo.
-    if conta_guarda_o_original(empresa.conta, servico):
+    # commit, e a chave só é gravada se o envio deu certo. A transação das
+    # dependencies de auth é encerrada antes: com o R2 lento, ela prenderia uma
+    # conexão do pool durante todo o envio. O commit abaixo abre outra.
+    if guarda_original:
+        db.rollback()
         extrato.arquivo_chave = await _guardar_original(
-            servico, chave_do_objeto(empresa.conta_id, empresa.id, extrato.id), conteudo, extrato.id
+            servico, chave_do_objeto(conta_id, empresa_id, extrato.id), conteudo, extrato.id
         )
 
     db.add(extrato)
@@ -444,20 +449,29 @@ def baixar_arquivo_original(
         raise HTTPException(http_status.HTTP_404_NOT_FOUND, "Extrato não encontrado.")
     if extrato.arquivo_chave is None:
         raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL)
+    # O que a resposta precisa sai do banco antes do R2, e a transação é
+    # encerrada: com o R2 lento, ela prenderia uma conexão do pool.
+    chave, formato, nome, extrato_id = (
+        extrato.arquivo_chave,
+        extrato.formato,
+        extrato.nome_arquivo,
+        extrato.id,
+    )
+    db.rollback()
 
     try:
-        conteudo = servico.abrir(extrato.arquivo_chave)
+        conteudo = servico.abrir(chave)
     except ArquivoOriginalNaoEncontrado as exc:
         raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL) from exc
     except ArquivoOriginalCorrompido as exc:
-        logger.error("arquivo original não abriu (%s), extrato %s", type(exc).__name__, extrato.id)
+        logger.error("arquivo original não abriu (%s), extrato %s", type(exc).__name__, extrato_id)
         raise HTTPException(
             http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             "Não foi possível abrir o arquivo original.",
         ) from exc
     except Exception as exc:  # R2 fora do ar ou token revogado: 503
         logger.warning(
-            "arquivo original indisponível (%s), extrato %s", type(exc).__name__, extrato.id
+            "arquivo original indisponível (%s), extrato %s", type(exc).__name__, extrato_id
         )
         raise HTTPException(
             http_status.HTTP_503_SERVICE_UNAVAILABLE, ORIGINAL_INDISPONIVEL
@@ -468,8 +482,8 @@ def baixar_arquivo_original(
     return Response(
         content=conteudo,
         headers={
-            "Content-Type": TIPOS_DO_ORIGINAL[extrato.formato],
-            "Content-Disposition": content_disposition(extrato.nome_arquivo),
+            "Content-Type": TIPOS_DO_ORIGINAL[formato],
+            "Content-Disposition": content_disposition(nome),
             "Cache-Control": "no-store",
         },
     )

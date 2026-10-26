@@ -333,17 +333,17 @@ def main(
             db.rollback()
 
             prefixo = prefixo_da_conta(conta.id)
-            armazenamento = criar_armazenamento()
             objetos = None
-            if armazenamento is not None:
-                try:
+            try:
+                armazenamento = criar_armazenamento()
+                if armazenamento is not None:
                     objetos = armazenamento.contar_prefixo(prefixo)
-                except Exception as exc:  # noqa: BLE001 - a mensagem do boto3 traz o endpoint
-                    print(
-                        f"Falha ao consultar os arquivos originais no R2 ({type(exc).__name__}). "
-                        "Nada foi apagado."
-                    )
-                    return 1
+            except Exception as exc:  # noqa: BLE001 - a mensagem do boto3 traz o endpoint
+                print(
+                    f"Falha ao consultar os arquivos originais no R2 ({type(exc).__name__}). "
+                    "Nada foi apagado."
+                )
+                return 1
 
             print(f"Banco:           {destino.host}/{destino.database}")
             print(f"Conta:           {args.conta_id}")

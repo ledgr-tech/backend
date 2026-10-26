@@ -796,3 +796,26 @@ def test_falha_ao_consultar_o_r2_nao_apaga_nada(db_session, conta_povoada, capsy
     assert "RuntimeError" in saida
     assert "r2.cloudflarestorage" not in saida
     assert len(_existentes(db_session, linhas)) == len(linhas)
+
+
+def test_falha_ao_criar_o_cliente_do_r2_nao_apaga_nada(db_session, conta_povoada, capsys):
+    # Revisão final (I1): o cliente do R2 que não sobe não derruba o script com
+    # o endpoint no traceback.
+    conta, linhas = conta_povoada()
+
+    def _quebrado():
+        raise ValueError("Invalid endpoint: abc.r2.cloudflarestorage.com")
+
+    perguntar = _Respostas()
+    codigo = script.main(
+        ["--conta-id", str(conta.id), "--executar"],
+        perguntar=perguntar,
+        criar_armazenamento=_quebrado,
+    )
+
+    saida = capsys.readouterr().out
+    assert codigo == 1
+    assert perguntar.perguntas == []
+    assert "ValueError" in saida
+    assert "abc.r2" not in saida
+    assert len(_existentes(db_session, linhas)) == len(linhas)

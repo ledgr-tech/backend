@@ -188,6 +188,7 @@ def test_do_ambiente_configurado():
 
 
 def test_dependency_reaproveita_a_instancia_e_devolve_none_sem_configuracao(monkeypatch):
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", True)
     assert obter_arquivo_original() is None
     for nome, valor in CONFIG_OK.items():
         monkeypatch.setattr(settings, nome, valor)
@@ -211,3 +212,25 @@ def test_repr_nao_mostra_a_chave():
     servico = ArquivoOriginal(ArmazenamentoR2(ClienteS3Falso(), BUCKET), CHAVE)
     assert repr(CHAVE) not in repr(servico)
     assert modulo.TAMANHO_CHAVE_CIFRA == len(CHAVE)
+
+
+def test_dependency_com_flag_desligada_devolve_none(monkeypatch):
+    # Revisão final (I1): com a flag desligada, nem o cliente do R2 é criado.
+    for nome, valor in CONFIG_OK.items():
+        monkeypatch.setattr(settings, nome, valor)
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", False)
+    assert obter_arquivo_original() is None
+
+
+def test_endpoint_sem_esquema_conta_como_nao_configurado(monkeypatch, caplog):
+    # Revisão final (I1): o boto3 recusa o endpoint com ValueError; isso não
+    # pode derrubar a requisição nem levar o endpoint para o log.
+    endpoint = "abc.r2.cloudflarestorage.com"
+    for nome, valor in {**CONFIG_OK, "arquivo_original_r2_endpoint": endpoint}.items():
+        monkeypatch.setattr(settings, nome, valor)
+    monkeypatch.setattr(settings, "arquivo_original_habilitado", True)
+
+    assert obter_arquivo_original() is None
+    assert armazenamento_do_ambiente(settings) is None
+    assert "ValueError" in caplog.text
+    assert endpoint not in caplog.text

@@ -22,13 +22,19 @@ o que isso significa (o upload segue sem guardar, o download responde 503). O
 cliente do R2 é criado aqui, e não importado de scripts/backup_r2.py: a imagem
 do backup não leva o código da API, e a API não depende de script.
 
-Nada daqui loga: quem chama loga só o nome da classe da exceção, porque a
-mensagem de um erro do `boto3` traz o endpoint e o bucket.
+Com a flag desligada, `obter_arquivo_original` nem cria o cliente: uma
+variável do R2 mal digitada em produção, antes de o recurso ser ligado, não
+pode derrubar o `/me` e o upload de todas as contas. Um cliente que o `boto3`
+recusa (endpoint sem `https://`, por exemplo) conta como não configurado.
+
+No log, só o nome da classe da exceção, aqui e em quem chama: a mensagem de um
+erro do `boto3` traz o endpoint e o bucket.
 """
 
 import base64
 import binascii
 import functools
+import logging
 import os
 import uuid
 from collections.abc import Iterator
@@ -39,6 +45,8 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.core.config import Settings, settings
+
+logger = logging.getLogger(__name__)
 
 VERSAO_CIFRA = 1
 TAMANHO_NONCE = 12
@@ -119,7 +127,9 @@ def cliente_r2(endpoint: str, chave_id: str, segredo: str):
     import boto3
     from botocore.config import Config
 
-    return boto3.client(
+    # Sessão própria: a sessão padrão do boto3 não é thread-safe, e a
+    # dependency das rotas síncronas roda no threadpool.
+    return boto3.session.Session().client(
         "s3",
         endpoint_url=endpoint,
         aws_access_key_id=chave_id,
@@ -206,7 +216,12 @@ def _armazenamento(
     if not all(valores):
         return None
     endpoint, bucket, chave_id, segredo = valores
-    return ArmazenamentoR2(cliente_r2(endpoint, chave_id, segredo), bucket)
+    try:
+        cliente = cliente_r2(endpoint, chave_id, segredo)
+    except Exception as exc:  # noqa: BLE001 - variável mal formada conta como não configurada
+        logger.warning("cliente do R2 do arquivo original não foi criado (%s)", type(exc).__name__)
+        return None
+    return ArmazenamentoR2(cliente, bucket)
 
 
 def _arquivo_original(
@@ -251,8 +266,10 @@ _arquivo_original_em_cache = functools.lru_cache(maxsize=1)(_arquivo_original)
 
 
 def obter_arquivo_original() -> ArquivoOriginal | None:
-    """Dependency das rotas. `None` quando o R2 ou a chave não estão
-    configurados; a flag `ARQUIVO_ORIGINAL_HABILITADO` quem confere é a rota."""
+    """Dependency das rotas. `None` com a flag `ARQUIVO_ORIGINAL_HABILITADO`
+    desligada ou quando o R2 ou a chave não estão configurados."""
+    if not settings.arquivo_original_habilitado:
+        return None
     return _arquivo_original_em_cache(*_valores(settings))
 
 
