@@ -3,8 +3,36 @@
 Rotas da conta: ignoram o cabeçalho `X-Ledgr-Empresa`. São elas que dizem
 quais empresas o front pode mandar nele.
 
-`GET /empresas` lista todas as empresas da conta, para todos os papéis,
-ordenadas pela razão social e depois pelo id.
+`GET /empresas` lista as empresas da conta, para todos os papéis, paginada
+desde a issue #157, com o envelope das outras listagens (`total`, `limit`,
+`offset`, `itens`). Parâmetros:
+
+- `busca`: pela razão social, sem diferenciar maiúsculas nem acento, ou pelo
+  CNPJ, com ou sem máscara. O CNPJ só entra na busca quando o texto, sem a
+  máscara, tem algum dígito: senão "Padaria" acharia um CNPJ alfanumérico com
+  essas letras. A comparação sem acento é um `translate` dos acentos do
+  português (`_COM_ACENTO`), sem a extensão `unaccent`;
+- `ordem`: `nome` (padrão), `cnpj` ou `status`, e `direcao`: `asc` (padrão) ou
+  `desc`. As favoritas do usuário vêm sempre primeiro, em qualquer ordem; a
+  pedida vale dentro de cada grupo. Desempate pela razão social e pelo id;
+- `limit` de 1 a 100 (padrão 20) e `offset` a partir de 0. `offset` além do
+  total dá 422, como `ordem` e `direcao` fora da lista; com `offset` 0 e nada
+  achado, 200 com a lista vazia.
+
+Cada item traz `favorita` e `status`, a situação do mês mais recente da
+empresa. O mês é a competência (mês de `periodo_inicio`) mais recente entre
+os extratos do banco que já entraram numa conciliação, a regra do fechamento
+(app/services/fechamentos.py): `fechado` quando esse mês tem fechamento
+ativo, `em_aberto` quando não, e `sem_conciliacao` quando a empresa nunca
+conciliou (ou só extratos sem período). Tudo numa consulta por página: o
+status sai de uma subconsulta agrupada por empresa, o favorito de um outer
+join e o total de `count(*) OVER ()`. Sem índice novo para a busca: a
+consulta parte do índice de `conta_id`, e uma conta tem poucas empresas.
+
+`PUT` e `DELETE /empresas/{empresa_id}/favorita` (issue #157) favoritam e
+desfavoritam para o usuário do token, não para a conta. Idempotentes, 204,
+qualquer papel. Empresa de outra conta ou inexistente dá 404. Limite de
+`LIMITE_FAVORITAS_POR_USUARIO` por usuário.
 
 `POST /empresas` cadastra uma empresa cliente. Só o admin e o gestor
 (`exigir_papel`): o analista recebe 403. O CNPJ tem a mesma validação e
@@ -35,14 +63,17 @@ Logs só com o resultado categorizado; nunca o CNPJ nem a razão social.
 
 import logging
 import math
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
-from sqlalchemy import DateTime, cast, func, select
+from sqlalchemy import DateTime, and_, case, cast, delete, exists, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -56,7 +87,17 @@ from app.api.auth import (
 )
 from app.core.auth import exigir_papel, obter_usuario_autenticado
 from app.core.database import get_db
-from app.models import Configuracao, Conta, Empresa, Usuario
+from app.core.rate_limit import LIMITE_FAVORITAS_POR_USUARIO, chave_por_usuario, limiter
+from app.models import (
+    Configuracao,
+    Conta,
+    Empresa,
+    EmpresaFavorita,
+    ExecucaoConciliacao,
+    Extrato,
+    Fechamento,
+    Usuario,
+)
 from app.services.plano import barrar_no_limite, empresas_usadas
 
 logger = logging.getLogger(__name__)
@@ -64,6 +105,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/empresas", tags=["empresas"])
 
 LIMITE_EMPRESAS_POR_HORA = 20
+
+# Acentos do português, maiúsculos e minúsculos, e a letra sem acento. O mesmo
+# mapa normaliza a razão social no banco (`translate`) e a busca no Python,
+# então os dois lados comparam igual qualquer que seja o locale do Postgres.
+_COM_ACENTO = "ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ"
+_SEM_ACENTO = "aaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuuccnn"
+_SEM_ACENTO_PYTHON = str.maketrans(_COM_ACENTO, _SEM_ACENTO)
+_MASCARA_CNPJ = re.compile(r"[.\-/\s]")
+
+Ordem = Literal["nome", "cnpj", "status"]
+Direcao = Literal["asc", "desc"]
+StatusEmpresa = Literal["fechado", "em_aberto", "sem_conciliacao"]
 
 
 class EmpresaRequest(BaseModel):
@@ -79,8 +132,16 @@ class EmpresaResponse(BaseModel):
     criado_em: datetime
 
 
+class EmpresaItemResponse(EmpresaResponse):
+    favorita: bool
+    status: StatusEmpresa
+
+
 class EmpresaListaResponse(BaseModel):
-    itens: list[EmpresaResponse]
+    total: int
+    limit: int
+    offset: int
+    itens: list[EmpresaItemResponse]
 
 
 def _resposta(empresa: Empresa) -> EmpresaResponse:
@@ -94,17 +155,168 @@ def _resposta(empresa: Empresa) -> EmpresaResponse:
     )
 
 
+def _nome_normalizado(coluna):
+    return func.lower(func.translate(coluna, _COM_ACENTO, _SEM_ACENTO))
+
+
+def _filtro_da_busca(busca: str | None):
+    """Condição da busca, ou None sem texto (regra no docstring do módulo)."""
+    texto = (busca or "").strip()
+    if not texto:
+        return None
+    condicoes = [
+        _nome_normalizado(Empresa.razao_social).contains(
+            texto.translate(_SEM_ACENTO_PYTHON).lower(), autoescape=True
+        )
+    ]
+    cnpj = _MASCARA_CNPJ.sub("", texto).upper()
+    if cnpj.isalnum() and any(caractere.isdigit() for caractere in cnpj):
+        condicoes.append(Empresa.cnpj.contains(cnpj, autoescape=True))
+    return or_(*condicoes)
+
+
+def _status_das_empresas(conta_id: uuid.UUID):
+    """`status` de cada empresa da conta como expressão, a partir da
+    competência mais recente com conciliação (subconsulta agrupada, uma linha
+    por empresa que já conciliou)."""
+    competencias = (
+        select(
+            Extrato.empresa_id,
+            func.max(func.to_char(Extrato.periodo_inicio, "YYYY-MM")).label("competencia"),
+        )
+        .join(ExecucaoConciliacao, ExecucaoConciliacao.extrato_banco_id == Extrato.id)
+        .join(Empresa, Empresa.id == Extrato.empresa_id)
+        .where(Empresa.conta_id == conta_id, Extrato.periodo_inicio.is_not(None))
+        .group_by(Extrato.empresa_id)
+        .subquery()
+    )
+    fechado = exists().where(
+        Fechamento.empresa_id == Empresa.id,
+        Fechamento.competencia == competencias.c.competencia,
+        Fechamento.reaberto_em.is_(None),
+    )
+    status = case(
+        (competencias.c.competencia.is_(None), "sem_conciliacao"),
+        (fechado, "fechado"),
+        else_="em_aberto",
+    )
+    return competencias, status
+
+
 @router.get("", response_model=EmpresaListaResponse)
 def listar_empresas(
     usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
     db: Annotated[Session, Depends(get_db)],
+    busca: Annotated[str | None, Query(max_length=100)] = None,
+    ordem: Annotated[Ordem, Query()] = "nome",
+    direcao: Annotated[Direcao, Query()] = "asc",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> EmpresaListaResponse:
-    empresas = db.scalars(
-        select(Empresa)
+    competencias, status_expr = _status_das_empresas(usuario.conta_id)
+    favorita = EmpresaFavorita.usuario_id.is_not(None).label("favorita")
+    status = status_expr.label("status")
+    nome = _nome_normalizado(Empresa.razao_social)
+    chave = {"nome": nome, "cnpj": Empresa.cnpj, "status": status}[ordem]
+
+    consulta = (
+        select(Empresa, favorita, status, func.count().over().label("total"))
+        .outerjoin(competencias, competencias.c.empresa_id == Empresa.id)
+        .outerjoin(
+            EmpresaFavorita,
+            and_(
+                EmpresaFavorita.empresa_id == Empresa.id,
+                EmpresaFavorita.usuario_id == usuario.id,
+            ),
+        )
         .where(Empresa.conta_id == usuario.conta_id)
-        .order_by(Empresa.razao_social, Empresa.id)
+        .order_by(
+            favorita.desc(),
+            chave.desc() if direcao == "desc" else chave.asc(),
+            nome,
+            Empresa.id,
+        )
+        .limit(limit)
+        .offset(offset)
     )
-    return EmpresaListaResponse(itens=[_resposta(empresa) for empresa in empresas])
+    filtro = _filtro_da_busca(busca)
+    if filtro is not None:
+        consulta = consulta.where(filtro)
+    linhas = db.execute(consulta).all()
+
+    # Página vazia com offset > 0: o offset passou do total (que a página
+    # vazia não traz), no mesmo formato dos outros 422 de parâmetro.
+    if not linhas and offset > 0:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("query", "offset"),
+                    "msg": "offset além do total de empresas.",
+                    "input": offset,
+                }
+            ]
+        )
+    return EmpresaListaResponse(
+        total=linhas[0].total if linhas else 0,
+        limit=limit,
+        offset=offset,
+        itens=[
+            EmpresaItemResponse(
+                **_resposta(linha.Empresa).model_dump(),
+                favorita=linha.favorita,
+                status=linha.status,
+            )
+            for linha in linhas
+        ],
+    )
+
+
+def _empresa_da_conta(db: Session, empresa_id: uuid.UUID, conta_id: uuid.UUID) -> Empresa:
+    """A empresa, ou 404 se não existe ou é de outra conta (sem confirmar qual)."""
+    empresa = db.scalar(
+        select(Empresa).where(Empresa.id == empresa_id, Empresa.conta_id == conta_id)
+    )
+    if empresa is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Empresa não encontrada."
+        )
+    return empresa
+
+
+@router.put("/{empresa_id}/favorita", status_code=http_status.HTTP_204_NO_CONTENT)
+@limiter.limit(LIMITE_FAVORITAS_POR_USUARIO, key_func=chave_por_usuario)
+def favoritar_empresa(
+    request: Request,
+    empresa_id: uuid.UUID,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    empresa = _empresa_da_conta(db, empresa_id, usuario.conta_id)
+    # Favoritar de novo não muda nada, nem o `criado_em`.
+    db.execute(
+        insert(EmpresaFavorita)
+        .values(usuario_id=usuario.id, empresa_id=empresa.id, conta_id=usuario.conta_id)
+        .on_conflict_do_nothing(index_elements=["usuario_id", "empresa_id"])
+    )
+    db.commit()
+
+
+@router.delete("/{empresa_id}/favorita", status_code=http_status.HTTP_204_NO_CONTENT)
+@limiter.limit(LIMITE_FAVORITAS_POR_USUARIO, key_func=chave_por_usuario)
+def desfavoritar_empresa(
+    request: Request,
+    empresa_id: uuid.UUID,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    empresa = _empresa_da_conta(db, empresa_id, usuario.conta_id)
+    db.execute(
+        delete(EmpresaFavorita).where(
+            EmpresaFavorita.usuario_id == usuario.id, EmpresaFavorita.empresa_id == empresa.id
+        )
+    )
+    db.commit()
 
 
 def _conferir_com_a_conta_travada(db: Session, conta_id: uuid.UUID, cnpj: str) -> Conta:

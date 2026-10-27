@@ -122,6 +122,8 @@ LIMITE_CONSENTIMENTO_MCP_POR_USUARIO = "10/minute"
 LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 # PATCH /me/preferencias (issue #147): o front salva a cada tutorial dispensado.
 LIMITE_PREFERENCIAS_POR_USUARIO = "30/minute"
+# Favoritar e desfavoritar empresa (issue #157): um clique por empresa no seletor.
+LIMITE_FAVORITAS_POR_USUARIO = "30/minute"
 
 
 def _claims_do_token(request: Request) -> dict | None:
