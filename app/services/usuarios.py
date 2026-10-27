@@ -12,7 +12,10 @@ usuário removido:
 - tem os links pendentes de `tokens_email` invalidados;
 - tem as sessões encerradas (issue #75);
 - perde as conexões MCP que criou (issue #136): o ChatGPT ou o Claude que ela
-  conectou para de ler na hora.
+  conectou para de ler na hora;
+- perde as empresas favoritas (issue #157). O `ON DELETE CASCADE` de
+  `empresas_favoritas` só age quando a linha do usuário sai (o script de
+  exclusão), e a remoção não apaga a linha.
 
 Toda rota autenticada recusa o removido com 401, já no token que ele tinha
 (app/core/auth.py), e o `/login` responde como senha errada.
@@ -20,11 +23,11 @@ Toda rota autenticada recusa o removido com 401, já no token que ele tinha
 A mesma função serve para o próprio usuário desativar a conta (issue #68).
 """
 
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlalchemy.orm import Session
 
 from app.core.auth import encerrar_sessoes
-from app.models import TokenEmail, Usuario
+from app.models import EmpresaFavorita, TokenEmail, Usuario
 from app.models.usuario import DOMINIO_EMAIL_REMOVIDO
 from app.services.conexoes_mcp import revogar_conexoes_do_criador
 
@@ -48,3 +51,4 @@ def remover_usuario(db: Session, usuario: Usuario) -> None:
         .values(usado_em=func.now())
     )
     revogar_conexoes_do_criador(db, usuario.id)
+    db.execute(delete(EmpresaFavorita).where(EmpresaFavorita.usuario_id == usuario.id))

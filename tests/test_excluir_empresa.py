@@ -31,6 +31,7 @@ from app.models import (
     Convite,
     DecisaoLinha,
     Empresa,
+    EmpresaFavorita,
     ExecucaoConciliacao,
     ExplicacaoDivergencia,
     Extrato,
@@ -259,11 +260,18 @@ def _povoar(
     linhas += _povoar_conexao_mcp(db_session, conta, empresas[0], admin)
     for empresa in empresas:
         linhas += _povoar_empresa(db_session, empresa, admin, convidado)
+    # Favoritas (issue #157): a PK é composta, então entram com a tupla.
+    favoritas = [
+        EmpresaFavorita(usuario_id=admin.id, empresa_id=empresa.id, conta_id=conta.id)
+        for empresa in empresas
+    ]
+    db_session.add_all(favoritas)
     db_session.commit()
     return (
         [(Conta, conta.id)]
         + [(Empresa, empresa.id) for empresa in empresas]
         + [(type(linha), linha.id) for linha in linhas]
+        + [(EmpresaFavorita, (f.usuario_id, f.empresa_id)) for f in favoritas]
     )
 
 

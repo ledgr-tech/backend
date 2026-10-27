@@ -85,7 +85,15 @@ def test_todos_os_papeis_listam_as_empresas_da_conta_em_ordem(
     itens = resposta.json()["itens"]
     alfas = sorted([alfa_1, alfa_2], key=lambda e: e.id)
     assert [item["id"] for item in itens] == [str(e.id) for e in [*alfas, primeira, zeta]]
-    assert set(itens[0]) == {"id", "razao_social", "cnpj", "cnpj_verificado_em", "criado_em"}
+    assert set(itens[0]) == {
+        "id",
+        "razao_social",
+        "cnpj",
+        "cnpj_verificado_em",
+        "criado_em",
+        "favorita",
+        "status",
+    }
     assert itens[0]["cnpj"] == alfas[0].cnpj
     assert itens[0]["cnpj_verificado_em"] is None
     assert datetime.fromisoformat(itens[0]["criado_em"]).tzinfo is not None

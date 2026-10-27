@@ -27,7 +27,12 @@ class Empresa(Base, TimestampMixin):
     nem o quadro de sócios."""
 
     __tablename__ = "empresas"
-    __table_args__ = (UniqueConstraint("conta_id", "cnpj", name="uq_empresas_conta_id_cnpj"),)
+    __table_args__ = (
+        UniqueConstraint("conta_id", "cnpj", name="uq_empresas_conta_id_cnpj"),
+        # Alvo da FK composta de `empresas_favoritas` (issue #157), que prende o
+        # favorito à mesma conta da empresa.
+        UniqueConstraint("id", "conta_id", name="uq_empresas_id_conta_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conta_id: Mapped[uuid.UUID] = mapped_column(

@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, String, false, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    false,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -89,6 +99,9 @@ class Usuario(Base, TimestampMixin):
             unique=True,
             postgresql_where=text("papel = 'admin'"),
         ),
+        # Alvo da FK composta de `empresas_favoritas` (issue #157), que prende o
+        # favorito à mesma conta do usuário.
+        UniqueConstraint("id", "conta_id", name="uq_usuarios_id_conta_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
