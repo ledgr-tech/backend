@@ -109,10 +109,11 @@ rejeitada, conferida ou sem decisão) também é 422, como aprovar sem
 justificativa pendente. Mês fechado é 409, com a mesma mensagem das outras
 decisões.
 
-Com a flag ligada, a justificativa aprovada em vigor não pode ser retirada
-(`justificativa_desfeita`): 409 até quem aprovou desfazer a aprovação. Depois
-disso, pendente, a retirada segue liberada para todos. Com a flag desligada,
-a retirada continua como antes.
+Com a flag ligada, a justificativa aprovada em vigor não pode ser alterada
+nem retirada (`TIPOS_QUE_TIRAM_A_APROVACAO`: justificar de novo, conferir e
+`justificativa_desfeita`): 409 para qualquer papel, até quem aprovou desfazer
+a aprovação. Depois disso, pendente, as três seguem as regras de antes. Com a
+flag desligada, nada muda.
 
 Enquanto `APROVACAO_JUSTIFICATIVAS_HABILITADA` estiver desligada (o padrão, até
 o front aprovar), a justificativa é gravada já aprovada: na mesma transação
@@ -583,8 +584,11 @@ SEM_APROVACAO_PARA_DESFAZER = "Não há aprovação para desfazer nesta linha."
 SO_QUEM_APROVOU = "Só quem aprovou pode desfazer a aprovação."
 JUSTIFICATIVA_APROVADA = (
     "Esta justificativa está aprovada. Quem aprovou precisa desfazer a aprovação "
-    "antes de retirá-la."
+    "antes de alterá-la ou retirá-la."
 )
+# Os tipos que tiram de vigor uma justificativa aprovada (issue #164):
+# justificar de novo e conferir a substituem, e a retirada a desfaz.
+TIPOS_QUE_TIRAM_A_APROVACAO = ("justificada", "conferida", "justificativa_desfeita")
 
 
 class DecisaoRequest(BaseModel):
@@ -720,14 +724,6 @@ def registrar_decisao(
             if corpo.tipo == "conferencia_desfeita":
                 raise _regra_violada("Não há conferência para desfazer nesta linha.")
             raise _regra_violada("Não há justificativa para desfazer nesta linha.")
-        # Com a aprovação ligada, a justificativa aprovada só sai depois de
-        # desfeita a aprovação, por quem aprovou (issue #164).
-        if settings.aprovacao_justificativas_habilitada and decisoes.justificativa_aprovada(
-            vigente
-        ):
-            raise HTTPException(
-                status_code=http_status.HTTP_409_CONFLICT, detail=JUSTIFICATIVA_APROVADA
-            )
     elif corpo.tipo in decisoes.TIPOS_APROVACAO:
         eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
         if not decisoes.aguardando_aprovacao(
@@ -751,6 +747,16 @@ def registrar_decisao(
             raise _regra_violada(SEM_APROVACAO_PARA_DESFAZER)
         if not _pode_desfazer_aprovacao(db, usuario, vigente.aprovacao):
             raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_QUEM_APROVOU)
+
+    # Com a aprovação ligada, a justificativa aprovada em vigor só é alterada
+    # (justificar de novo, conferir) ou retirada depois que quem aprovou desfaz
+    # a aprovação (issue #164). Com a flag desligada, nada muda.
+    if corpo.tipo in TIPOS_QUE_TIRAM_A_APROVACAO and settings.aprovacao_justificativas_habilitada:
+        eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
+        if decisoes.justificativa_aprovada(decisoes.decisao_vigente(eventos.get(corpo.chave, []))):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT, detail=JUSTIFICATIVA_APROVADA
+            )
 
     evento = DecisaoLinha(
         empresa_id=empresa_id,
