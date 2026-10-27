@@ -361,13 +361,23 @@ def test_paginacao_de_20_com_total(db_session, conta, criar_empresa):
     assert (filtrada["total"], len(filtrada["itens"])) == (10, 3)
 
 
-def test_offset_alem_do_total_e_422_e_busca_sem_resultado_e_200(db_session, conta):
-    _, _, headers = conta
+def test_offset_alem_do_total_e_busca_sem_resultado_dao_lista_vazia(
+    db_session, conta, criar_empresa
+):
+    conta_id, _, headers = conta
+    criar_empresa("Cliente A", conta_id=conta_id)
+    criar_empresa("Cliente B", conta_id=conta_id)
+    criar_empresa("Outra Ltda", conta_id=conta_id)
 
-    resposta = _listar(headers["admin"], offset=1)
+    alem = _listar(headers["admin"], offset=40)
+    filtrada = _listar(headers["admin"], busca="cliente", offset=2)
 
-    assert resposta.status_code == 422
-    assert resposta.json()["detail"][0]["loc"] == ["query", "offset"]
+    assert alem.status_code == 200
+    # O total é o da conta, mesmo sem itens na página.
+    assert alem.json() == {"total": 4, "limit": 20, "offset": 40, "itens": []}
+    assert filtrada.status_code == 200
+    # E o total respeita a busca.
+    assert filtrada.json() == {"total": 2, "limit": 20, "offset": 2, "itens": []}
     vazia = _listar(headers["admin"], busca="nenhuma empresa assim")
     assert vazia.status_code == 200
     assert vazia.json() == {"total": 0, "limit": 20, "offset": 0, "itens": []}

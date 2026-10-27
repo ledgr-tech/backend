@@ -16,8 +16,9 @@ desde a issue #157, com o envelope das outras listagens (`total`, `limit`,
   `desc`. As favoritas do usuário vêm sempre primeiro, em qualquer ordem; a
   pedida vale dentro de cada grupo. Desempate pela razão social e pelo id;
 - `limit` de 1 a 100 (padrão 20) e `offset` a partir de 0. `offset` além do
-  total dá 422, como `ordem` e `direcao` fora da lista; com `offset` 0 e nada
-  achado, 200 com a lista vazia.
+  total dá 200 com a lista vazia e o total, como nas outras listagens.
+  `ordem` e `direcao` fora da lista, `limit` e `offset` fora do intervalo dão
+  422.
 
 Cada item traz `favorita` e `status`, a situação do mês mais recente da
 empresa. O mês é a competência (mês de `periodo_inicio`) mais recente entre
@@ -26,7 +27,8 @@ os extratos do banco que já entraram numa conciliação, a regra do fechamento
 ativo, `em_aberto` quando não, e `sem_conciliacao` quando a empresa nunca
 conciliou (ou só extratos sem período). Tudo numa consulta por página: o
 status sai de uma subconsulta agrupada por empresa, o favorito de um outer
-join e o total de `count(*) OVER ()`. Sem índice novo para a busca: a
+join e o total de `count(*) OVER ()`. A página além do total não traz linha
+de onde ler o total, e só ela faz uma segunda consulta, a contagem. Sem índice novo para a busca: a
 consulta parte do índice de `conta_id`, e uma conta tem poucas empresas.
 
 `PUT` e `DELETE /empresas/{empresa_id}/favorita` (issue #157) favoritam e
@@ -70,7 +72,6 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
-from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from sqlalchemy import DateTime, and_, case, cast, delete, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
@@ -229,7 +230,6 @@ def listar_empresas(
                 EmpresaFavorita.usuario_id == usuario.id,
             ),
         )
-        .where(Empresa.conta_id == usuario.conta_id)
         .order_by(
             favorita.desc(),
             chave.desc() if direcao == "desc" else chave.asc(),
@@ -239,26 +239,21 @@ def listar_empresas(
         .limit(limit)
         .offset(offset)
     )
+    filtros = [Empresa.conta_id == usuario.conta_id]
     filtro = _filtro_da_busca(busca)
     if filtro is not None:
-        consulta = consulta.where(filtro)
-    linhas = db.execute(consulta).all()
+        filtros.append(filtro)
+    linhas = db.execute(consulta.where(*filtros)).all()
 
-    # Página vazia com offset > 0: o offset passou do total (que a página
-    # vazia não traz), no mesmo formato dos outros 422 de parâmetro.
-    if not linhas and offset > 0:
-        raise RequestValidationError(
-            [
-                {
-                    "type": "value_error",
-                    "loc": ("query", "offset"),
-                    "msg": "offset além do total de empresas.",
-                    "input": offset,
-                }
-            ]
-        )
+    if linhas:
+        total = linhas[0].total
+    elif offset > 0:
+        # O offset passou do total: a página vazia não traz o `count(*) OVER ()`.
+        total = db.scalar(select(func.count()).select_from(Empresa).where(*filtros))
+    else:
+        total = 0
     return EmpresaListaResponse(
-        total=linhas[0].total if linhas else 0,
+        total=total,
         limit=limit,
         offset=offset,
         itens=[
