@@ -12,6 +12,7 @@ from app.models.conta import Conta
 from app.models.convite import Convite
 from app.models.decisao_linha import DecisaoLinha
 from app.models.empresa import Empresa
+from app.models.empresa_favorita import EmpresaFavorita
 from app.models.execucao_conciliacao import ExecucaoConciliacao
 from app.models.explicacao_divergencia import ExplicacaoDivergencia
 from app.models.extrato import Extrato
@@ -41,6 +42,7 @@ __all__ = [
     "Convite",
     "DecisaoLinha",
     "Empresa",
+    "EmpresaFavorita",
     "ExecucaoConciliacao",
     "ExplicacaoDivergencia",
     "Extrato",
