@@ -95,6 +95,18 @@ justificativa aguardando aprovação na linha (422). A rejeição aceita um
 motivo opcional em `texto`, com o tamanho máximo da justificativa; a
 aprovação não tem texto. Quem justificou pode aprovar a própria.
 
+Desfazer a aprovação (issue #164, `aprovacao_desfeita`, sem texto) volta a
+justificativa aprovada para aguardando aprovação e devolve a decisão em vigor,
+pendente. A aprovação e a reversão ficam em `eventos`. Só quem aprovou desfaz
+(403 para qualquer outro, inclusive o admin), com três exceções do admin:
+quem aprovou foi removido, saiu da conta ou não é mais admin nem gestor, ou a
+aprovação é da migração da #132 (`AUTOR_APROVACAO_DA_MIGRACAO`). O analista
+recebe 403 antes de qualquer outra validação, como em aprovar. Com
+`APROVACAO_JUSTIFICATIVAS_HABILITADA` desligada, 409: sem a flag não existe o
+estado pendente. Linha sem justificativa aprovada em vigor (pendente,
+rejeitada, conferida ou sem decisão) também é 409, assim como o mês fechado,
+com a mesma mensagem das outras decisões.
+
 Enquanto `APROVACAO_JUSTIFICATIVAS_HABILITADA` estiver desligada (o padrão, até
 o front aprovar), a justificativa é gravada já aprovada: na mesma transação
 entra a `justificativa_aprovada` em nome de quem justificou, um microssegundo
@@ -131,7 +143,14 @@ from app.core.auth import (
 )
 from app.core.config import settings
 from app.core.database import get_db
-from app.models import Conciliacao, DecisaoLinha, ExplicacaoDivergencia, Extrato, Lancamento
+from app.models import (
+    Conciliacao,
+    DecisaoLinha,
+    ExplicacaoDivergencia,
+    Extrato,
+    Lancamento,
+    Usuario,
+)
 from app.services import decisoes, saldo
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
@@ -543,11 +562,18 @@ TipoDecisao = Literal[
     "justificativa_desfeita",
     "justificativa_aprovada",
     "justificativa_rejeitada",
+    "aprovacao_desfeita",
 ]
 
 SEM_JUSTIFICATIVA_AGUARDANDO = "Não há justificativa aguardando aprovação nesta linha."
 # Quem aprova e rejeita justificativas (issue #132, ADR-019).
 PAPEIS_QUE_APROVAM = ("admin", "gestor")
+# Desfazer a aprovação (issue #164).
+APROVACAO_DESLIGADA = (
+    "A aprovação de justificativas está desligada, então não há aprovação para desfazer."
+)
+SEM_APROVACAO_PARA_DESFAZER = "Não há aprovação para desfazer nesta linha."
+SO_QUEM_APROVOU = "Só quem aprovou pode desfazer a aprovação."
 
 
 class DecisaoRequest(BaseModel):
@@ -582,6 +608,31 @@ def _linha_da_chave(
     return next((linha for linha in db.execute(consulta) if _chave(linha) == chave), None)
 
 
+def _conflito(detalhe: str) -> HTTPException:
+    return HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=detalhe)
+
+
+def _pode_desfazer_aprovacao(db: Session, usuario: Usuario, aprovacao: DecisaoLinha) -> bool:
+    """Quem aprovou desfaz. O admin desfaz também quando quem aprovou não pode
+    mais (removido, de outra conta ou sem papel de aprovar) e na aprovação da
+    migração da #132, que não é de ninguém: sem isso, essas aprovações ficariam
+    impossíveis de desfazer. O analista já recebeu 403 antes."""
+    da_migracao = aprovacao.autor_nome == decisoes.AUTOR_APROVACAO_DA_MIGRACAO
+    if not da_migracao and aprovacao.usuario_id == usuario.id:
+        return True
+    if usuario.papel != "admin":
+        return False
+    if da_migracao:
+        return True
+    aprovador = db.get(Usuario, aprovacao.usuario_id)
+    return (
+        aprovador is None
+        or aprovador.removido_em is not None
+        or aprovador.conta_id != usuario.conta_id
+        or aprovador.papel not in PAPEIS_QUE_APROVAM
+    )
+
+
 def _aprovar_junto(db: Session, justificativa: DecisaoLinha) -> None:
     """Aprovação de quem justificou, na mesma transação, com a flag de
     aprovação desligada. O `em` dela é o da justificativa mais um
@@ -613,11 +664,16 @@ def registrar_decisao(
     db: Annotated[Session, Depends(get_db)],
 ) -> DecisaoResponse | None:
     usuario, empresa_id = ativa.usuario, ativa.empresa.id
-    if corpo.tipo in decisoes.TIPOS_APROVACAO and usuario.papel not in PAPEIS_QUE_APROVAM:
+    desfaz_aprovacao = corpo.tipo == decisoes.TIPO_APROVACAO_DESFEITA
+    if (
+        corpo.tipo in decisoes.TIPOS_APROVACAO or desfaz_aprovacao
+    ) and usuario.papel not in PAPEIS_QUE_APROVAM:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=mensagem_de_papel(PAPEIS_QUE_APROVAM),
         )
+    if desfaz_aprovacao and not settings.aprovacao_justificativas_habilitada:
+        raise _conflito(APROVACAO_DESLIGADA)
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
 
     # As travas (mês e extrato do banco) vêm ANTES da rodada: uma rodada nova
@@ -671,6 +727,15 @@ def registrar_decisao(
                 f"O motivo pode ter até {TAMANHO_MAXIMO_JUSTIFICATIVA} caracteres."
             )
         texto = motivo
+    elif desfaz_aprovacao:
+        if (corpo.texto or "").strip():
+            raise _regra_violada("Desfazer a aprovação não tem texto.")
+        eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
+        vigente = decisoes.decisao_vigente(eventos.get(corpo.chave, []))
+        if not decisoes.justificativa_aprovada(vigente):
+            raise _conflito(SEM_APROVACAO_PARA_DESFAZER)
+        if not _pode_desfazer_aprovacao(db, usuario, vigente.aprovacao):
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_QUEM_APROVOU)
 
     evento = DecisaoLinha(
         empresa_id=empresa_id,

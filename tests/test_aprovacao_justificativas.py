@@ -2,7 +2,8 @@
 
 Toda justificativa nasce aguardando aprovação; só admin e gestor aprovam,
 rejeitam, fecham e reabrem; o mês não fecha com justificativa aguardando
-aprovação, nem com ressalva. Cenário: uma conta com admin, gestor e analista,
+aprovação, nem com ressalva. Desde a issue #164, quem aprovou desfaz a
+aprovação, com as exceções do admin. Cenário: uma conta com admin, gestor e analista,
 uma empresa e pares conciliados pela API em setembro de 2026.
 """
 
@@ -19,6 +20,8 @@ from app.api.justificativas import MAXIMO_ITENS
 from app.core.auth import CABECALHO_EMPRESA
 from app.core.config import settings
 from app.models import DecisaoLinha, Fechamento
+from app.services.decisoes import AUTOR_APROVACAO_DA_MIGRACAO
+from app.services.usuarios import remover_usuario
 from main import app
 
 client = TestClient(app)
@@ -713,3 +716,293 @@ def test_ligar_a_flag_nao_muda_o_que_ja_foi_aprovado(db_session, cenario, monkey
     assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
     assert c.item(banco, "30.00")["decisao"]["situacao"] == "pendente"
     assert c.fechar().json() == _aguardando(1)
+
+
+# --- desfazer a aprovação (issue #164) ----------------------------------------------
+
+SO_QUEM_APROVOU = {"detail": "Só quem aprovou pode desfazer a aprovação."}
+SEM_APROVACAO = {"detail": "Não há aprovação para desfazer nesta linha."}
+FECHADO = {"detail": "A competência 2026-09 está fechada. Reabra o fechamento para alterar."}
+
+
+def _aprovada(c, quem_aprova="gestor"):
+    """Par com a linha de 20.00 justificada pelo analista e aprovada."""
+    banco = c.par([("10.00", "a"), ("20.00", "b")])
+    c.decidir("analista", banco, "20.00", "justificada", "motivo")
+    assert c.decidir(quem_aprova, banco, "20.00", "justificativa_aprovada").status_code == 200
+    return banco
+
+
+def _outro_gestor(c, criar_usuario, gerar_token):
+    gestor = criar_usuario(
+        conta_id=c.usuarios["admin"].conta_id, nome="Outro Gestor", papel="gestor"
+    )
+    c.headers["outro_gestor"] = cabecalhos(
+        gerar_token(gestor.conta_id, usuario_id=gestor.id), c.empresa_id
+    )
+    return gestor
+
+
+@pytest.mark.parametrize("quem_aprova", ["admin", "gestor"])
+def test_quem_aprovou_desfaz_e_a_justificativa_volta_a_pendente(db_session, cenario, quem_aprova):
+    c = cenario()
+    banco = _aprovada(c, quem_aprova)
+    assert c.listar(banco)["aguardando_aprovacao"] == 0
+
+    resposta = c.decidir(quem_aprova, banco, "20.00", "aprovacao_desfeita")
+
+    assert resposta.status_code == 200
+    decisao = resposta.json()
+    assert (decisao["tipo"], decisao["texto"], decisao["situacao"]) == (
+        "justificada",
+        "motivo",
+        "pendente",
+    )
+    assert (decisao["aprovada_por"], decisao["aprovada_em"]) == (None, None)
+    item = c.item(banco, "20.00")
+    assert item["decisao"] == decisao
+    assert [e["tipo"] for e in item["eventos"]] == [
+        "justificada",
+        "justificativa_aprovada",
+        "aprovacao_desfeita",
+    ]
+    assert item["eventos"][-1]["autor"] == c.usuarios[quem_aprova].nome
+    assert c.listar(banco)["aguardando_aprovacao"] == 1
+    (execucao,) = client.get(
+        "/execucoes", headers=c.headers["admin"], params={"extrato_banco_id": str(banco.id)}
+    ).json()["itens"]
+    assert (
+        execucao["contagens"]["justificadas"],
+        execucao["contagens"]["aguardando_aprovacao"],
+    ) == (
+        0,
+        1,
+    )
+    assert c.fechar().json() == _aguardando(1)
+
+
+def test_outro_gestor_admin_e_analista_nao_desfazem(
+    db_session, cenario, criar_usuario, gerar_token
+):
+    c = cenario()
+    _outro_gestor(c, criar_usuario, gerar_token)
+    banco = _aprovada(c, "gestor")
+
+    respostas = {
+        quem: c.decidir(quem, banco, "20.00", "aprovacao_desfeita")
+        for quem in ("outro_gestor", "admin", "analista")
+    }
+
+    assert respostas["outro_gestor"].status_code == respostas["admin"].status_code == 403
+    assert respostas["outro_gestor"].json() == respostas["admin"].json() == SO_QUEM_APROVOU
+    # O analista nunca aprova, então nem chega a ver se foi ele.
+    assert respostas["analista"].status_code == 403
+    assert respostas["analista"].json() == SO_ADMIN_OU_GESTOR
+    item = c.item(banco, "20.00")
+    assert item["decisao"]["situacao"] == "aprovada"
+    assert item["eventos"][-1]["tipo"] == "justificativa_aprovada"
+
+
+def test_admin_que_aprovou_desfaz_e_o_gestor_nao(db_session, cenario):
+    c = cenario()
+    banco = _aprovada(c, "admin")
+
+    gestor = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+    admin = c.decidir("admin", banco, "20.00", "aprovacao_desfeita")
+
+    assert gestor.json() == SO_QUEM_APROVOU
+    assert admin.status_code == 200
+
+
+def _rebaixar(db_session, usuario):
+    usuario.papel = "analista"
+    db_session.commit()
+
+
+def _remover(db_session, usuario):
+    remover_usuario(db_session, usuario)
+    db_session.commit()
+
+
+@pytest.mark.parametrize("o_que_mudou", [_remover, _rebaixar], ids=["removido", "rebaixado"])
+def test_admin_desfaz_quando_quem_aprovou_nao_pode_mais(
+    db_session, cenario, criar_usuario, gerar_token, o_que_mudou
+):
+    c = cenario()
+    gestor = _outro_gestor(c, criar_usuario, gerar_token)
+    banco = _aprovada(c, "outro_gestor")
+    # Com quem aprovou ainda gestor, nem o admin nem outro gestor desfazem.
+    assert c.decidir("admin", banco, "20.00", "aprovacao_desfeita").json() == SO_QUEM_APROVOU
+
+    o_que_mudou(db_session, gestor)
+    outro_gestor = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+    admin = c.decidir("admin", banco, "20.00", "aprovacao_desfeita")
+
+    # A exceção é só do admin.
+    assert outro_gestor.json() == SO_QUEM_APROVOU
+    assert admin.status_code == 200
+    assert admin.json()["situacao"] == "pendente"
+    assert c.item(banco, "20.00")["eventos"][-1]["autor"] == "Ana Admin"
+
+
+def test_quem_aprovou_e_foi_rebaixado_nao_desfaz_mais(db_session, cenario):
+    c = cenario()
+    banco = _aprovada(c, "gestor")
+
+    _rebaixar(db_session, c.usuarios["gestor"])
+    resposta = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+
+    assert resposta.json() == SO_ADMIN_OU_GESTOR
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
+
+
+def test_so_o_admin_desfaz_a_aprovacao_da_migracao_da_132(db_session, cenario):
+    c = cenario()
+    banco = c.par([("10.00", "a"), ("20.00", "b")])
+    c.decidir("gestor", banco, "20.00", "justificada", "antes de 21/10")
+    # Como a migração da #132 gravou: em nome de quem justificou, com o autor fixo.
+    gestor = c.usuarios["gestor"]
+    db_session.add(
+        DecisaoLinha(
+            empresa_id=c.empresa_id,
+            extrato_banco_id=banco.id,
+            chave=c.chave(banco, "20.00"),
+            tipo="justificativa_aprovada",
+            usuario_id=gestor.id,
+            autor_nome=AUTOR_APROVACAO_DA_MIGRACAO,
+            rodada=1,
+            extrato_sistema_id=c.item(banco, "20.00")["extrato_sistema_id"],
+        )
+    )
+    db_session.commit()
+    assert c.item(banco, "20.00")["decisao"]["aprovada_por"] == AUTOR_APROVACAO_DA_MIGRACAO
+
+    quem_justificou = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+    admin = c.decidir("admin", banco, "20.00", "aprovacao_desfeita")
+
+    assert quem_justificou.json() == SO_QUEM_APROVOU
+    assert admin.status_code == 200
+    assert admin.json()["situacao"] == "pendente"
+
+
+@pytest.mark.parametrize("ressalva", [None, "fecha com ressalva"], ids=["sem", "com_ressalva"])
+def test_desfazer_em_mes_fechado_e_409_ate_reabrir(db_session, cenario, ressalva):
+    c = cenario()
+    # Com ressalva, a linha de 30.00 fica em aberto no fechamento.
+    linhas = [("10.00", "a"), ("20.00", "b")] + ([("30.00", "c")] if ressalva else [])
+    banco = c.par(linhas)
+    c.decidir("analista", banco, "20.00", "justificada", "motivo")
+    c.decidir("gestor", banco, "20.00", "justificativa_aprovada")
+    assert c.fechar(ressalva=ressalva).status_code == 201
+
+    fechado = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+
+    assert fechado.status_code == 409
+    assert fechado.json() == FECHADO
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
+    assert c.reabrir("admin").status_code == 200
+    assert c.decidir("gestor", banco, "20.00", "aprovacao_desfeita").status_code == 200
+
+
+def test_desfazer_com_a_flag_desligada_e_409(db_session, cenario, monkeypatch):
+    monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
+    c = cenario()
+    banco = c.par([("10.00", "a"), ("20.00", "b")])
+    c.decidir("gestor", banco, "20.00", "justificada", "nasce aprovada")
+
+    resposta = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+
+    assert resposta.status_code == 409
+    assert resposta.json() == {
+        "detail": (
+            "A aprovação de justificativas está desligada, então não há aprovação para desfazer."
+        )
+    }
+    assert c.decidir("analista", banco, "20.00", "aprovacao_desfeita").json() == SO_ADMIN_OU_GESTOR
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
+
+
+@pytest.mark.parametrize("estado", ["pendente", "rejeitada", "desfeita", "conferida", "nenhuma"])
+def test_desfazer_sem_aprovacao_em_vigor_e_409(db_session, cenario, estado):
+    c = cenario()
+    banco = c.par([("10.00", "a"), ("20.00", "b")])
+    if estado != "nenhuma":
+        tipo = "conferida" if estado == "conferida" else "justificada"
+        c.decidir("analista", banco, "20.00", tipo, "motivo" if tipo == "justificada" else None)
+    if estado == "rejeitada":
+        c.decidir("gestor", banco, "20.00", "justificativa_rejeitada")
+    if estado == "desfeita":
+        c.decidir("gestor", banco, "20.00", "justificativa_aprovada")
+        c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+
+    resposta = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+
+    assert resposta.status_code == 409
+    assert resposta.json() == SEM_APROVACAO
+
+
+def test_desfazer_com_texto_e_422(db_session, cenario):
+    c = cenario()
+    banco = _aprovada(c)
+
+    resposta = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita", "porque sim")
+
+    assert resposta.status_code == 422
+    assert resposta.json() == {"detail": "Desfazer a aprovação não tem texto."}
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
+
+
+def test_desfazer_e_aprovar_de_novo_guarda_tudo_em_ordem(db_session, cenario):
+    c = cenario()
+    banco = _aprovada(c, "gestor")
+
+    c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+    aprovar_de_novo = c.decidir("admin", banco, "20.00", "justificativa_aprovada")
+
+    assert aprovar_de_novo.status_code == 200
+    assert aprovar_de_novo.json()["aprovada_por"] == "Ana Admin"
+    eventos = c.item(banco, "20.00")["eventos"]
+    assert [(e["tipo"], e["autor"]) for e in eventos] == [
+        ("justificada", "Analista da Silva"),
+        ("justificativa_aprovada", "Gestor da Silva"),
+        ("aprovacao_desfeita", "Gestor da Silva"),
+        ("justificativa_aprovada", "Ana Admin"),
+    ]
+    assert [e["em"] for e in eventos] == sorted(e["em"] for e in eventos)
+    # A nova aprovação é do admin: agora o gestor não desfaz mais, e o admin sim.
+    assert c.decidir("gestor", banco, "20.00", "aprovacao_desfeita").json() == SO_QUEM_APROVOU
+    assert c.decidir("admin", banco, "20.00", "aprovacao_desfeita").status_code == 200
+    tipos = db_session.scalars(
+        select(DecisaoLinha.tipo).where(DecisaoLinha.extrato_banco_id == banco.id)
+    ).all()
+    assert tipos.count("aprovacao_desfeita") == 2
+
+
+def test_desfazer_aprovacao_com_outra_empresa_ativa_ou_de_outra_conta_e_404(
+    db_session, cenario, criar_empresa
+):
+    c = cenario()
+    banco = _aprovada(c, "admin")
+    outra = criar_empresa("Cliente 2", conta_id=c.usuarios["admin"].conta_id)
+    corpo = {"chave": c.chave(banco, "20.00"), "tipo": "aprovacao_desfeita"}
+    outra_conta = cenario()
+
+    na_outra_empresa = client.post(
+        f"/conciliacoes/{banco.id}/decisoes",
+        headers={**c.headers["admin"], CABECALHO_EMPRESA: str(outra.id)},
+        json=corpo,
+    )
+    da_outra_conta = client.post(
+        f"/conciliacoes/{banco.id}/decisoes", headers=outra_conta.headers["admin"], json=corpo
+    )
+    com_a_empresa_da_outra_conta = client.post(
+        f"/conciliacoes/{banco.id}/decisoes",
+        headers={**outra_conta.headers["admin"], CABECALHO_EMPRESA: str(c.empresa_id)},
+        json=corpo,
+    )
+
+    assert na_outra_empresa.status_code == da_outra_conta.status_code == 404
+    assert na_outra_empresa.json() == da_outra_conta.json() == {"detail": "Extrato não encontrado."}
+    assert com_a_empresa_da_outra_conta.status_code == 404
+    assert com_a_empresa_da_outra_conta.json() == {"detail": "Empresa não encontrada."}
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
