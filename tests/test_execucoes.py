@@ -545,5 +545,10 @@ def test_justificadas_conta_so_divergentes_justificadas_e_zero_nas_nao_atuais(
     assert anterior["atual"] is False and anterior["contagens"]["justificadas"] == 0
     assert anterior["contagens"]["aguardando_aprovacao"] == 0
 
+    # Desde a issue #164, a aprovada só sai depois de desfeita a aprovação.
+    decidir("20.00", "aprovacao_desfeita")
+    contagens = itens_execucoes()[0]["contagens"]
+    assert (contagens["justificadas"], contagens["aguardando_aprovacao"]) == (0, 1)
     decidir("20.00", "justificativa_desfeita")
-    assert itens_execucoes()[0]["contagens"]["justificadas"] == 0
+    contagens = itens_execucoes()[0]["contagens"]
+    assert (contagens["justificadas"], contagens["aguardando_aprovacao"]) == (0, 0)
