@@ -10,7 +10,9 @@ Uma linha "diverge" quando o status não é `match_exato` nem
 Aprovação (issue #132, ADR-019): toda justificativa nasce aguardando
 aprovação. `justificativa_aprovada` marca a justificada em vigor como
 aprovada; `justificativa_rejeitada` e `justificativa_desfeita` voltam a linha
-para nenhuma decisão. Justificar de novo cria uma justificativa nova,
+para nenhuma decisão. `aprovacao_desfeita` (issue #164) volta a justificada
+aprovada em vigor para aguardando aprovação; a aprovação e a reversão ficam
+no histórico. Justificar de novo cria uma justificativa nova,
 aguardando aprovação, mesmo que a anterior estivesse aprovada. Nas contagens,
 "justificadas" são só as aprovadas, "aguardando aprovação" são as pendentes, e
 a divergência com justificativa pendente não é "sem justificativa".
@@ -42,6 +44,9 @@ TIPOS_DECISAO = ("conferida", "justificada")
 TIPOS_DESFAZER = {"conferencia_desfeita": "conferida", "justificativa_desfeita": "justificada"}
 # Aprovar e rejeitar a justificativa em vigor (issue #132): só admin e gestor.
 TIPOS_APROVACAO = ("justificativa_aprovada", "justificativa_rejeitada")
+# Desfazer a aprovação em vigor (issue #164): só quem aprovou, com as exceções
+# do admin em app/api/conciliacoes.py.
+TIPO_APROVACAO_DESFEITA = "aprovacao_desfeita"
 AUTOR_APROVACAO_DA_MIGRACAO = "Ledgr (atualização de 21/10)"
 
 SituacaoJustificativa = Literal["pendente", "aprovada"]
@@ -166,8 +171,9 @@ class DecisaoEmVigor:
 def decisao_vigente(eventos: list[DecisaoLinha]) -> DecisaoEmVigor | None:
     """`conferida` e `justificada` passam a valer (a justificada, aguardando
     aprovação); `justificativa_aprovada` aprova a justificada pendente em
-    vigor; a rejeição e os dois "desfeita" voltam a nenhuma decisão.
-    `eventos` em ordem cronológica."""
+    vigor e `aprovacao_desfeita` volta a aprovada para pendente; a rejeição e
+    os dois "desfeita" das decisões voltam a nenhuma decisão. `eventos` em
+    ordem cronológica."""
     vigente = None
     for evento in eventos:
         if evento.tipo in TIPOS_DECISAO:
@@ -175,6 +181,9 @@ def decisao_vigente(eventos: list[DecisaoLinha]) -> DecisaoEmVigor | None:
         elif evento.tipo == "justificativa_aprovada":
             if vigente is not None and vigente.situacao == "pendente":
                 vigente = DecisaoEmVigor(vigente.evento, aprovacao=evento)
+        elif evento.tipo == TIPO_APROVACAO_DESFEITA:
+            if vigente is not None and vigente.situacao == "aprovada":
+                vigente = DecisaoEmVigor(vigente.evento)
         else:
             vigente = None
     return vigente

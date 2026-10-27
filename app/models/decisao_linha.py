@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
-# Todos os tipos de evento (issues #83 e #132). A regra de cada um mora em
+# Todos os tipos de evento (issues #83, #132 e #164). A regra de cada um mora em
 # app/services/decisoes.py.
 TIPOS_DE_EVENTO = (
     "conferida",
@@ -16,6 +16,7 @@ TIPOS_DE_EVENTO = (
     "justificativa_desfeita",
     "justificativa_aprovada",
     "justificativa_rejeitada",
+    "aprovacao_desfeita",
 )
 
 
@@ -24,7 +25,8 @@ class DecisaoLinha(Base):
     justificar e desfazer cada um. Desde a issue #132, também aprovar e
     rejeitar a justificativa (`justificativa_aprovada` e
     `justificativa_rejeitada`), só por admin ou gestor. Toda justificativa
-    nasce aguardando aprovação.
+    nasce aguardando aprovação. Desde a issue #164, `aprovacao_desfeita` volta
+    a justificativa aprovada para aguardando aprovação.
 
     Só de inserção: nunca editada nem apagada. A decisão em vigor de uma linha
     é derivada da sequência de eventos (`app/services/decisoes.py`).
