@@ -102,10 +102,17 @@ pendente. A aprovação e a reversão ficam em `eventos`. Só quem aprovou desfa
 quem aprovou foi removido, saiu da conta ou não é mais admin nem gestor, ou a
 aprovação é da migração da #132 (`AUTOR_APROVACAO_DA_MIGRACAO`). O analista
 recebe 403 antes de qualquer outra validação, como em aprovar. Com
-`APROVACAO_JUSTIFICATIVAS_HABILITADA` desligada, 409: sem a flag não existe o
+`APROVACAO_JUSTIFICATIVAS_HABILITADA` desligada, 422, o código de aprovar com
+a flag desligada (lá, sem justificativa pendente): sem a flag não existe o
 estado pendente. Linha sem justificativa aprovada em vigor (pendente,
-rejeitada, conferida ou sem decisão) também é 409, assim como o mês fechado,
-com a mesma mensagem das outras decisões.
+rejeitada, conferida ou sem decisão) também é 422, como aprovar sem
+justificativa pendente. Mês fechado é 409, com a mesma mensagem das outras
+decisões.
+
+Com a flag ligada, a justificativa aprovada em vigor não pode ser retirada
+(`justificativa_desfeita`): 409 até quem aprovou desfazer a aprovação. Depois
+disso, pendente, a retirada segue liberada para todos. Com a flag desligada,
+a retirada continua como antes.
 
 Enquanto `APROVACAO_JUSTIFICATIVAS_HABILITADA` estiver desligada (o padrão, até
 o front aprovar), a justificativa é gravada já aprovada: na mesma transação
@@ -574,6 +581,10 @@ APROVACAO_DESLIGADA = (
 )
 SEM_APROVACAO_PARA_DESFAZER = "Não há aprovação para desfazer nesta linha."
 SO_QUEM_APROVOU = "Só quem aprovou pode desfazer a aprovação."
+JUSTIFICATIVA_APROVADA = (
+    "Esta justificativa está aprovada. Quem aprovou precisa desfazer a aprovação "
+    "antes de retirá-la."
+)
 
 
 class DecisaoRequest(BaseModel):
@@ -606,10 +617,6 @@ def _linha_da_chave(
             return None
         consulta = consulta.where(Conciliacao.lancamento_banco_id == lancamento_banco_id)
     return next((linha for linha in db.execute(consulta) if _chave(linha) == chave), None)
-
-
-def _conflito(detalhe: str) -> HTTPException:
-    return HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=detalhe)
 
 
 def _pode_desfazer_aprovacao(db: Session, usuario: Usuario, aprovacao: DecisaoLinha) -> bool:
@@ -673,7 +680,7 @@ def registrar_decisao(
             detail=mensagem_de_papel(PAPEIS_QUE_APROVAM),
         )
     if desfaz_aprovacao and not settings.aprovacao_justificativas_habilitada:
-        raise _conflito(APROVACAO_DESLIGADA)
+        raise _regra_violada(APROVACAO_DESLIGADA)
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
 
     # As travas (mês e extrato do banco) vêm ANTES da rodada: uma rodada nova
@@ -713,6 +720,14 @@ def registrar_decisao(
             if corpo.tipo == "conferencia_desfeita":
                 raise _regra_violada("Não há conferência para desfazer nesta linha.")
             raise _regra_violada("Não há justificativa para desfazer nesta linha.")
+        # Com a aprovação ligada, a justificativa aprovada só sai depois de
+        # desfeita a aprovação, por quem aprovou (issue #164).
+        if settings.aprovacao_justificativas_habilitada and decisoes.justificativa_aprovada(
+            vigente
+        ):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT, detail=JUSTIFICATIVA_APROVADA
+            )
     elif corpo.tipo in decisoes.TIPOS_APROVACAO:
         eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
         if not decisoes.aguardando_aprovacao(
@@ -733,7 +748,7 @@ def registrar_decisao(
         eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
         vigente = decisoes.decisao_vigente(eventos.get(corpo.chave, []))
         if not decisoes.justificativa_aprovada(vigente):
-            raise _conflito(SEM_APROVACAO_PARA_DESFAZER)
+            raise _regra_violada(SEM_APROVACAO_PARA_DESFAZER)
         if not _pode_desfazer_aprovacao(db, usuario, vigente.aprovacao):
             raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_QUEM_APROVOU)
 

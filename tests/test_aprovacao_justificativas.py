@@ -342,15 +342,13 @@ def test_justificar_de_novo_uma_aprovada_volta_a_ficar_pendente(db_session, cena
     assert c.fechar().json() == _aguardando(1)
 
 
-@pytest.mark.parametrize("aprovada", [True, False], ids=["aprovada", "pendente"])
-def test_todos_desfazem_justificativa_aprovada_ou_pendente(db_session, cenario, aprovada):
+@pytest.mark.parametrize("quem", ["admin", "gestor", "analista"])
+def test_todos_desfazem_justificativa_pendente(db_session, cenario, quem):
     c = cenario()
     banco = c.par([("10.00", "a"), ("20.00", "b")])
     c.decidir("gestor", banco, "20.00", "justificada", "motivo")
-    if aprovada:
-        c.decidir("gestor", banco, "20.00", "justificativa_aprovada")
 
-    desfazer = c.decidir("analista", banco, "20.00", "justificativa_desfeita")
+    desfazer = c.decidir(quem, banco, "20.00", "justificativa_desfeita")
 
     assert desfazer.status_code == 200
     assert c.item(banco, "20.00")["decisao"] is None
@@ -722,6 +720,12 @@ def test_ligar_a_flag_nao_muda_o_que_ja_foi_aprovado(db_session, cenario, monkey
 
 SO_QUEM_APROVOU = {"detail": "Só quem aprovou pode desfazer a aprovação."}
 SEM_APROVACAO = {"detail": "Não há aprovação para desfazer nesta linha."}
+APROVADA_NAO_SAI = {
+    "detail": (
+        "Esta justificativa está aprovada. Quem aprovou precisa desfazer a aprovação "
+        "antes de retirá-la."
+    )
+}
 FECHADO = {"detail": "A competência 2026-09 está fechada. Reabra o fechamento para alterar."}
 
 
@@ -904,15 +908,16 @@ def test_desfazer_em_mes_fechado_e_409_ate_reabrir(db_session, cenario, ressalva
     assert c.decidir("gestor", banco, "20.00", "aprovacao_desfeita").status_code == 200
 
 
-def test_desfazer_com_a_flag_desligada_e_409(db_session, cenario, monkeypatch):
+def test_desfazer_com_a_flag_desligada_e_422_como_aprovar(db_session, cenario, monkeypatch):
     monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
     c = cenario()
     banco = c.par([("10.00", "a"), ("20.00", "b")])
     c.decidir("gestor", banco, "20.00", "justificada", "nasce aprovada")
 
     resposta = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
+    aprovar = c.decidir("gestor", banco, "20.00", "justificativa_aprovada")
 
-    assert resposta.status_code == 409
+    assert resposta.status_code == aprovar.status_code == 422
     assert resposta.json() == {
         "detail": (
             "A aprovação de justificativas está desligada, então não há aprovação para desfazer."
@@ -923,7 +928,7 @@ def test_desfazer_com_a_flag_desligada_e_409(db_session, cenario, monkeypatch):
 
 
 @pytest.mark.parametrize("estado", ["pendente", "rejeitada", "desfeita", "conferida", "nenhuma"])
-def test_desfazer_sem_aprovacao_em_vigor_e_409(db_session, cenario, estado):
+def test_desfazer_sem_aprovacao_em_vigor_e_422(db_session, cenario, estado):
     c = cenario()
     banco = c.par([("10.00", "a"), ("20.00", "b")])
     if estado != "nenhuma":
@@ -937,7 +942,7 @@ def test_desfazer_sem_aprovacao_em_vigor_e_409(db_session, cenario, estado):
 
     resposta = c.decidir("gestor", banco, "20.00", "aprovacao_desfeita")
 
-    assert resposta.status_code == 409
+    assert resposta.status_code == 422
     assert resposta.json() == SEM_APROVACAO
 
 
@@ -1006,3 +1011,53 @@ def test_desfazer_aprovacao_com_outra_empresa_ativa_ou_de_outra_conta_e_404(
     assert com_a_empresa_da_outra_conta.status_code == 404
     assert com_a_empresa_da_outra_conta.json() == {"detail": "Empresa não encontrada."}
     assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
+
+
+# --- justificativa aprovada não é retirada (issue #164) -----------------------------
+
+
+@pytest.mark.parametrize("quem", ["admin", "gestor", "analista"])
+def test_justificativa_aprovada_nao_e_retirada(db_session, cenario, quem):
+    c = cenario()
+    banco = _aprovada(c, "gestor")
+
+    retirar = c.decidir(quem, banco, "20.00", "justificativa_desfeita")
+
+    assert retirar.status_code == 409
+    assert retirar.json() == APROVADA_NAO_SAI
+    item = c.item(banco, "20.00")
+    assert item["decisao"]["situacao"] == "aprovada"
+    assert item["eventos"][-1]["tipo"] == "justificativa_aprovada"
+
+
+@pytest.mark.parametrize("quem", ["admin", "gestor", "analista"])
+def test_retirar_depois_de_desfazer_a_aprovacao(db_session, cenario, quem):
+    c = cenario()
+    banco = _aprovada(c, "gestor")
+    assert c.decidir("gestor", banco, "20.00", "aprovacao_desfeita").status_code == 200
+
+    retirar = c.decidir(quem, banco, "20.00", "justificativa_desfeita")
+
+    assert retirar.status_code == 200
+    item = c.item(banco, "20.00")
+    assert item["decisao"] is None
+    assert [e["tipo"] for e in item["eventos"]] == [
+        "justificada",
+        "justificativa_aprovada",
+        "aprovacao_desfeita",
+        "justificativa_desfeita",
+    ]
+
+
+@pytest.mark.parametrize("quem", ["admin", "gestor", "analista"])
+def test_flag_desligada_continua_retirando_a_aprovada(db_session, cenario, monkeypatch, quem):
+    monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
+    c = cenario()
+    banco = c.par([("10.00", "a"), ("20.00", "b")])
+    c.decidir("analista", banco, "20.00", "justificada", "nasce aprovada")
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "aprovada"
+
+    retirar = c.decidir(quem, banco, "20.00", "justificativa_desfeita")
+
+    assert retirar.status_code == 200
+    assert c.item(banco, "20.00")["decisao"] is None
