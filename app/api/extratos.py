@@ -53,6 +53,12 @@ de extrato de outra empresa, inclusive de outra empresa da mesma conta,
 devolve 404 (não 403) pra não confirmar a existência do ID (mitigação de
 BOLA/IDOR). O upload tem rate limit de 10/min por conta.
 
+Importação via IA (issue #158, ADR-013): o rascunho da importação é um
+extrato com `status` "rascunho", fora da listagem, do total e dos filtros, e
+`GET /extratos/{id}` e o download do original respondem 404 para ele, como
+para um extrato inexistente. A importação tem rota própria
+(app/api/importacoes_ia.py).
+
 Arquivo original (issue #139, ADR-023): nas contas do plano avançado, com
 `ARQUIVO_ORIGINAL_HABILITADO` ligada, o upload cifra e envia o arquivo ao R2
 antes do commit e grava a chave do objeto em `arquivo_chave`; nos outros
@@ -105,6 +111,7 @@ from app.core.rate_limit import (
     limiter,
 )
 from app.models import ExecucaoConciliacao, Extrato, LinhaInvalida
+from app.models.extrato import STATUS_RASCUNHO
 from app.services import saldo
 from app.services.arquivo_original import (
     ArquivoOriginal,
@@ -299,7 +306,8 @@ def listar_extratos(
     origem: Annotated[Literal["banco", "sistema"] | None, Query()] = None,
     status: Annotated[list[StatusExtrato] | None, Query()] = None,
 ) -> ExtratoListaResponse:
-    filtros = [Extrato.empresa_id == empresa_id]
+    # O rascunho da importação via IA (issue #158) não é extrato até ser confirmado.
+    filtros = [Extrato.empresa_id == empresa_id, Extrato.status != STATUS_RASCUNHO]
     if origem is not None:
         filtros.append(Extrato.origem == origem)
     if status:
@@ -387,7 +395,7 @@ async def obter_extrato(
     db: Annotated[Session, Depends(get_db)],
 ) -> ExtratoDetalheResponse:
     extrato = db.get(Extrato, extrato_id)
-    if extrato is None or extrato.empresa_id != empresa_id:
+    if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Extrato não encontrado.",
@@ -445,7 +453,7 @@ def baixar_arquivo_original(
     if servico is None:
         raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, ORIGINAL_INDISPONIVEL)
     extrato = db.get(Extrato, extrato_id)
-    if extrato is None or extrato.empresa_id != empresa_id:
+    if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
         raise HTTPException(http_status.HTTP_404_NOT_FOUND, "Extrato não encontrado.")
     if extrato.arquivo_chave is None:
         raise HTTPException(http_status.HTTP_404_NOT_FOUND, ORIGINAL_NAO_DISPONIVEL)

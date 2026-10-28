@@ -159,6 +159,7 @@ from app.models import (
     Lancamento,
     Usuario,
 )
+from app.models.extrato import STATUS_RASCUNHO
 from app.services import decisoes, saldo
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
@@ -221,8 +222,10 @@ def _garantir_mes_aberto(db: Session, empresa_id: uuid.UUID, extrato_banco: Extr
 
 
 def _obter_extrato_da_empresa(db: Session, extrato_id: uuid.UUID, empresa_id: uuid.UUID) -> Extrato:
+    """O extrato da empresa, ou 404. O rascunho da importação via IA (issue
+    #158) também é 404: não é extrato até ser confirmado."""
     extrato = db.get(Extrato, extrato_id)
-    if extrato is None or extrato.empresa_id != empresa_id:
+    if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Extrato não encontrado.",
