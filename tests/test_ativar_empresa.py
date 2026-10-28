@@ -212,3 +212,23 @@ def test_banco_remoto_com_a_flag_e_o_host_digitado_passa_da_guarda(banco_remoto)
         )
 
     assert banco_remoto == [URL_REMOTA]
+
+
+def test_mudanca_grava_o_evento_da_conta_com_origem_script(db_session, criar_conta_com_cliente):
+    """Issue #156: o script grava o mesmo evento do painel, sem operador."""
+    from sqlalchemy import select
+
+    from app.models import EventoConta
+
+    conta = criar_conta_com_cliente()
+
+    script.main(
+        ["--conta", str(conta.id), "--ativo", "true", "--motivo", "Piloto de novembro"],
+        perguntar=_Respostas(conta.cnpj),
+    )
+    script.main(["--conta", str(conta.id), "--ativo", "true"], perguntar=_Respostas(conta.cnpj))
+
+    eventos = db_session.scalars(select(EventoConta).where(EventoConta.conta_id == conta.id)).all()
+    assert [(e.tipo, e.motivo, e.origem, e.operador_id) for e in eventos] == [
+        ("piloto_ligado", "Piloto de novembro", "script", None)
+    ]

@@ -32,6 +32,7 @@ from app.models import (
     DecisaoLinha,
     Empresa,
     EmpresaFavorita,
+    EventoConta,
     ExecucaoConciliacao,
     ExplicacaoDivergencia,
     Extrato,
@@ -39,6 +40,7 @@ from app.models import (
     Lancamento,
     LinhaInvalida,
     LinkRelatorio,
+    OperadorLedgr,
     PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
@@ -280,6 +282,20 @@ def _povoar(
         for empresa in empresas
     ]
     db_session.add_all(favoritas)
+    # Painel administrativo (issue #156): o admin é operador e inativou a conta.
+    operador = OperadorLedgr(usuario_id=admin.id, incluido_por="teste")
+    db_session.add(operador)
+    db_session.flush()
+    evento = EventoConta(
+        conta_id=conta.id,
+        tipo="inativada",
+        motivo="teste",
+        operador_id=operador.id,
+        operador_nome=NOME_ADMIN,
+        origem="painel",
+    )
+    db_session.add(evento)
+    linhas += [operador, evento]
     db_session.commit()
     return (
         [(Conta, conta.id)]
