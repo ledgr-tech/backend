@@ -20,6 +20,8 @@ from app.api.extratos import router as extratos_router
 from app.api.fechamentos import router as fechamentos_router
 from app.api.importacoes_ia import router as importacoes_ia_router
 from app.api.justificativas import router as justificativas_router
+from app.api.links_relatorio import router as links_relatorio_router
+from app.api.links_relatorio import router_publico as relatorios_publicos_router
 from app.api.mcp import PortaDoMcp, caminho_do_mcp, ciclo_de_vida_do_mcp
 from app.api.me import router as me_router
 from app.api.oauth import router as oauth_router
@@ -79,6 +81,8 @@ app.include_router(importacoes_ia_router)
 app.include_router(conciliacoes_router)
 app.include_router(execucoes_router)
 app.include_router(fechamentos_router)
+app.include_router(links_relatorio_router)
+app.include_router(relatorios_publicos_router)
 app.include_router(justificativas_router)
 app.include_router(assistente_router)
 app.include_router(explicacoes_router)

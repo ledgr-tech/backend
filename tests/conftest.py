@@ -70,6 +70,7 @@ from app.models import (
     Fechamento,
     Lancamento,
     LinhaInvalida,
+    LinkRelatorio,
     PedidoAutorizacaoOAuth,
     TokenOAuth,
     UsoAssistente,
@@ -471,6 +472,7 @@ def _apagar_empresa(db_session, empresa_id: uuid.UUID) -> None:
     da conta desde a issue #133 e saem na limpeza de `criar_conta`."""
     # Eventos de decisão (issue #83) têm FK pra extratos e usuarios.
     db_session.query(DecisaoLinha).filter_by(empresa_id=empresa_id).delete()
+    db_session.query(LinkRelatorio).filter_by(empresa_id=empresa_id).delete()
     db_session.query(Fechamento).filter_by(empresa_id=empresa_id).delete()
     extrato_ids = [
         row.id for row in db_session.query(Extrato.id).filter_by(empresa_id=empresa_id).all()

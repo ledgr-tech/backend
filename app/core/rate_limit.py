@@ -127,6 +127,11 @@ LIMITE_FAVORITAS_POR_USUARIO = "30/minute"
 # Revisão da importação via IA (issue #159): corrigir, remover, adicionar e
 # confirmar. A pessoa corrige linha a linha conferindo o PDF.
 LIMITE_REVISAO_IMPORTACAO_POR_USUARIO = "60/minute"
+# Link público do relatório (issue #165, ADR-024): criar e revogar, por
+# usuário; a consulta pública, sem login, por IP (o do navegador, repassado
+# pelo front com o segredo), contra a tentativa de adivinhar tokens.
+LIMITE_LINKS_RELATORIO_POR_USUARIO = "10/minute"
+LIMITE_RELATORIO_PUBLICO = "30/minute"
 
 
 def _claims_do_token(request: Request) -> dict | None:
