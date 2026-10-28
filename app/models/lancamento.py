@@ -38,6 +38,11 @@ class Lancamento(Base, TimestampMixin):
     `empresa_id` é indexado (toda query real do sistema filtra por tenant,
     mesma decisão já aplicada em Extrato/Usuario). `extrato_id`, `data` e
     `valor` também têm índice simples próprio (issue #15).
+
+    `posicao` (issue #158) é a ordem do lançamento no JSON da importação via
+    IA, a partir de 0, o mesmo índice de `lancamentos[N]` nas mensagens de
+    erro. É a ordem da revisão do rascunho e da renumeração de `ocorrencia`
+    na confirmação (#159). Nula nos extratos OFX e CSV.
     """
 
     __tablename__ = "lancamentos"
@@ -63,5 +68,6 @@ class Lancamento(Base, TimestampMixin):
     ocorrencia: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
+    posicao: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     extrato: Mapped["Extrato"] = relationship(back_populates="lancamentos")  # noqa: F821

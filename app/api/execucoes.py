@@ -75,6 +75,7 @@ from sqlalchemy.orm import Session, aliased
 from app.core.auth import obter_empresa_id_ativa
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
+from app.models.extrato import STATUS_RASCUNHO
 from app.services.decisoes import contar_justificativas
 from app.services.execucoes import calcular_percentual_acerto
 
@@ -155,7 +156,7 @@ def listar_execucoes(
 ) -> ExecucaoListaResponse:
     if extrato_banco_id is not None:
         extrato = db.get(Extrato, extrato_banco_id)
-        if extrato is None or extrato.empresa_id != empresa_id:
+        if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
             raise _extrato_nao_encontrado()
 
     extrato_banco = aliased(Extrato)
