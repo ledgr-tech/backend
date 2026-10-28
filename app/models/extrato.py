@@ -1,8 +1,18 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, text
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +70,12 @@ class Extrato(Base, TimestampMixin):
     descartado. A confirmação (#159) o torna um extrato do sistema como os
     outros. O índice parcial `ix_extratos_rascunho_criado_em` serve à limpeza
     dos vencidos.
+
+    `confirmado_por_id`, `confirmado_por_nome` e `confirmado_em` (issue #159)
+    registram quem confirmou a importação via IA e quando: a conferência é de
+    quem confirma (ADR-013). O nome é a cópia do momento, como em
+    `fechamentos`, e o id vira `NULL` se o usuário for apagado. Nulos nos
+    outros extratos e no rascunho.
     """
 
     __tablename__ = "extratos"
@@ -69,6 +85,11 @@ class Extrato(Base, TimestampMixin):
             "status IN ('pendente', 'processando', 'concluido', 'concluido_com_erros', 'erro', "
             "'rascunho')",
             name="ck_extratos_status_valido",
+        ),
+        CheckConstraint(
+            "(confirmado_em IS NULL AND confirmado_por_nome IS NULL AND confirmado_por_id IS NULL) "
+            "OR (confirmado_em IS NOT NULL AND confirmado_por_nome IS NOT NULL)",
+            name="ck_extratos_confirmacao_consistente",
         ),
         Index(
             "ix_extratos_rascunho_criado_em",
@@ -104,6 +125,15 @@ class Extrato(Base, TimestampMixin):
     saldo_final: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     saldo_data: Mapped[date | None] = mapped_column(Date, nullable=True)
     arquivo_chave: Mapped[str | None] = mapped_column(String, nullable=True)
+    confirmado_por_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "usuarios.id", name="fk_extratos_confirmado_por_id_usuarios", ondelete="SET NULL"
+        ),
+        nullable=True,
+    )
+    confirmado_por_nome: Mapped[str | None] = mapped_column(String, nullable=True)
+    confirmado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     empresa: Mapped["Empresa"] = relationship(back_populates="extratos")  # noqa: F821
     lancamentos: Mapped[list["Lancamento"]] = relationship(back_populates="extrato")  # noqa: F821

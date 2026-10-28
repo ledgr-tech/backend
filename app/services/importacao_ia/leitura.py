@@ -20,6 +20,10 @@ Três tipos de erro:
   (`lancamentos[12].valor`, a partir de 0), o número do lançamento (a partir
   de 1) e uma mensagem em português. `total` conta todos.
 
+`ler_campos` (issue #159) valida um lançamento só, no corpo da correção ou
+da linha nova da revisão, com as mesmas regras e mensagens, e o caminho é o
+nome do campo.
+
 As mensagens repetem o que veio em `data` e `valor` (até 30 caracteres),
 para a pessoa achar a linha no relatório, mas nunca a descrição. Nada disto
 vai para log.
@@ -188,9 +192,17 @@ def _json(texto: str) -> object:
         ) from exc
 
 
+def _numero(valor: object) -> bool:
+    """Número do JSON: `_Numero` na leitura do arquivo, `int` ou `float` no
+    corpo já lido pelo FastAPI (issue #159)."""
+    return isinstance(valor, _Numero | int | float) and not isinstance(valor, bool)
+
+
 def _eco(valor: object) -> str:
     if isinstance(valor, _Numero):
         bruto = valor.texto
+    elif _numero(valor):
+        bruto = str(valor)
     elif isinstance(valor, str):
         bruto = f'"{valor}"'
     elif isinstance(valor, bool):
@@ -250,7 +262,7 @@ def _data(valor: object, caminho: str, erro, posicao: int) -> date | None:
 
 
 def _valor(valor: object, caminho: str, erro, posicao: int) -> Decimal | None:
-    if isinstance(valor, _Numero):
+    if _numero(valor):
         erro(
             caminho,
             f'use o número entre aspas, como "-1234.56" (veio {_eco(valor)}, sem aspas)',
@@ -362,3 +374,34 @@ def ler_importacao(conteudo: bytes) -> list[LancamentoImportado]:
     if erro.total:
         raise ArquivoForaDoSchema(erro.erros, erro.total)
     return lancamentos
+
+
+_VALIDADORES = {"data": _data, "valor": _valor, "descricao": _descricao}
+
+
+def ler_campos(corpo: dict, *, todos: bool, numero: int | None = None) -> dict:
+    """Os campos de um lançamento da revisão (issue #159), validados como no
+    schema v1: com `todos`, os três são obrigatórios (linha nova); sem, pelo
+    menos um (correção). Levanta `ArquivoForaDoSchema` com o nome do campo no
+    caminho e `numero` (o do lançamento corrigido, a partir de 1) no erro."""
+    posicao = numero - 1 if numero is not None else None
+    erro = _Erros()
+    for chave in corpo:
+        if chave not in CAMPOS_DO_LANCAMENTO:
+            lista = ", ".join(CAMPOS_DO_LANCAMENTO)
+            erro(chave, f"campo não aceito: aqui o Ledgr só lê {lista}", posicao)
+    if todos:
+        for chave in CAMPOS_DO_LANCAMENTO:
+            if chave not in corpo:
+                erro(chave, "campo obrigatório", posicao)
+    elif not any(chave in corpo for chave in CAMPOS_DO_LANCAMENTO):
+        erro("(lançamento)", "informe data, valor ou descricao para corrigir", posicao)
+    lidos = {}
+    for chave, validar in _VALIDADORES.items():
+        if chave in corpo:
+            lido = validar(corpo[chave], chave, erro, posicao)
+            if lido is not None:
+                lidos[chave] = lido
+    if erro.total:
+        raise ArquivoForaDoSchema(erro.erros, erro.total)
+    return lidos

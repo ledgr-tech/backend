@@ -124,6 +124,9 @@ LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 LIMITE_PREFERENCIAS_POR_USUARIO = "30/minute"
 # Favoritar e desfavoritar empresa (issue #157): um clique por empresa no seletor.
 LIMITE_FAVORITAS_POR_USUARIO = "30/minute"
+# Revisão da importação via IA (issue #159): corrigir, remover, adicionar e
+# confirmar. A pessoa corrige linha a linha conferindo o PDF.
+LIMITE_REVISAO_IMPORTACAO_POR_USUARIO = "60/minute"
 
 
 def _claims_do_token(request: Request) -> dict | None:
