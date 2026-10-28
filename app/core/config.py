@@ -130,6 +130,12 @@ class Settings(BaseSettings):
     # gravado: o que foi aprovado com ela desligada continua aprovado.
     aprovacao_justificativas_habilitada: bool = False
 
+    # Link público do relatório do fechamento (issue #165, ADR-024). Desligada,
+    # criar link e consultar o relatório público dão 404; listar e revogar
+    # continuam, para limpar links se ela for desligada depois de ligada. Liga
+    # quando a Política de privacidade citar o compartilhamento.
+    link_publico_habilitado: bool = False
+
     # Limites por plano (issue #133, ADR-019): quantas empresas clientes e
     # quantos usuários (ativos mais convites pendentes) a conta pode ter.
     # Inteiros positivos e opcionais: sem valor, não há limite. Os valores

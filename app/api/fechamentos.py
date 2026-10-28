@@ -37,6 +37,9 @@ antes dela não têm `aguardando_aprovacao`, que sai 0 na resposta; o
 `justificadas` deles conta as justificativas da época, todas aprovadas pela
 migração.
 
+Reabrir revoga, na mesma transação, os links públicos do relatório daquele
+fechamento, com o motivo "reabertura" (issue #165, app/api/links_relatorio.py).
+
 Nunca loga a ressalva nem descrição de lançamento.
 """
 
@@ -58,7 +61,7 @@ from app.core.auth import (
 )
 from app.core.database import get_db
 from app.models import Fechamento, Usuario
-from app.services import fechamentos
+from app.services import fechamentos, relatorio_publico
 from app.services.travas import travar_mes
 
 router = APIRouter(prefix="/fechamentos", tags=["fechamentos"])
@@ -264,6 +267,8 @@ def reabrir_competencia(
     fechamento.reaberto_por_id = usuario.id
     fechamento.reaberto_por_nome = usuario.nome
     fechamento.reaberto_em = func.clock_timestamp()
+    # Os links públicos deste fechamento morrem com ele (issue #165, ADR-024).
+    relatorio_publico.revogar_do_fechamento(db, fechamento, usuario)
     db.commit()
     db.refresh(fechamento)
     return _resposta(fechamento)

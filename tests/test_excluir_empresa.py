@@ -38,6 +38,7 @@ from app.models import (
     Fechamento,
     Lancamento,
     LinhaInvalida,
+    LinkRelatorio,
     PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
@@ -145,7 +146,20 @@ def _povoar_empresa(db_session, empresa: Empresa, admin: Usuario, convidado: Usu
     ]
     db_session.add_all(linhas)
     db_session.flush()
-    return [banco, sistema, lancamento_banco, lancamento_sistema, *linhas]
+    # Link público do relatório (issue #165): aponta para o fechamento.
+    (fechamento,) = [linha for linha in linhas if isinstance(linha, Fechamento)]
+    link = LinkRelatorio(
+        empresa_id=empresa.id,
+        fechamento_id=fechamento.id,
+        prefixo="abcdefgh",
+        hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+        criado_por_id=admin.id,
+        criado_por_nome=NOME_ADMIN,
+        expira_em=func.now() + timedelta(days=30),
+    )
+    db_session.add(link)
+    db_session.flush()
+    return [banco, sistema, lancamento_banco, lancamento_sistema, *linhas, link]
 
 
 def _povoar_conexao_mcp(db_session, conta: Conta, empresa: Empresa, admin: Usuario) -> list:
