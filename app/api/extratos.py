@@ -400,7 +400,12 @@ async def obter_extrato(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Extrato não encontrado.",
         )
+    return detalhe_do_extrato(db, extrato)
 
+
+def detalhe_do_extrato(db: Session, extrato: Extrato) -> ExtratoDetalheResponse:
+    """O corpo de `GET /extratos/{id}`. Também é a resposta da confirmação da
+    importação via IA (issue #159, app/api/importacoes_ia.py)."""
     erros = [
         ErroLinhaResponse(identificador=linha.identificador, motivo=linha.motivo)
         for linha in extrato.linhas_invalidas
