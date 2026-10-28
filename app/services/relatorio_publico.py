@@ -4,7 +4,8 @@ consulta pelo token e o relatório montado campo a campo.
 - **Token:** `secrets.token_urlsafe(32)` (256 bits). Só o sha256 e os 8
   primeiros caracteres ficam no banco.
 - **Link válido:** `link_valido` faz uma consulta só, pelo hash, com todas as
-  condições juntas (não revogado, não vencido, fechamento sem reabertura).
+  condições juntas (não revogado, não vencido, fechamento sem reabertura e,
+  desde a issue #156, conta não inativa).
   Qualquer motivo de recusa é a mesma ausência de linha, sem caminho
   diferente por motivo.
 - **Relatório:** `relatorio` monta a resposta só com os campos de
@@ -29,7 +30,15 @@ from dataclasses import dataclass
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.orm import Session, aliased
 
-from app.models import Conciliacao, DecisaoLinha, Empresa, Fechamento, Lancamento, Usuario
+from app.models import (
+    Conciliacao,
+    Conta,
+    DecisaoLinha,
+    Empresa,
+    Fechamento,
+    Lancamento,
+    Usuario,
+)
 from app.models.link_relatorio import LinkRelatorio
 from app.services import decisoes
 
@@ -100,10 +109,14 @@ def link_valido(db: Session, token: str) -> tuple[LinkRelatorio, Fechamento] | N
             (Fechamento.id == LinkRelatorio.fechamento_id)
             & (Fechamento.empresa_id == LinkRelatorio.empresa_id),
         )
+        .join(Empresa, Empresa.id == LinkRelatorio.empresa_id)
+        .join(Conta, Conta.id == Empresa.conta_id)
         .where(
             LinkRelatorio.hash == hash_do_token(token),
             *ativo(),
             Fechamento.reaberto_em.is_(None),
+            # Conta inativa (issue #156): o mesmo 404 dos links inválidos.
+            Conta.inativada_em.is_(None),
         )
     ).one_or_none()
     return (linha.LinkRelatorio, linha.Fechamento) if linha is not None else None

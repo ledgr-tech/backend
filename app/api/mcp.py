@@ -54,6 +54,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 from starlette.types import Receive, Scope, Send
 
+from app.core import conta_inativa
 from app.core.auth import (
     PREFIXO_TOKEN_MCP,
     ConexaoAutenticada,
@@ -442,6 +443,9 @@ def _autenticar(token: str | None) -> tuple[ConexaoAutenticada | None, bool, HTT
             conexao, registrar = autenticar_token_mcp(db, token)
         except HTTPException as erro:
             return None, False, erro
+        except conta_inativa.ContaInativaError:
+            # Conta inativa (issue #156): o mesmo 403 das outras rotas.
+            return None, False, HTTPException(status_code=403, detail=conta_inativa.corpo())
     return conexao, registrar, None
 
 
@@ -482,7 +486,8 @@ class PortaDoMcp:
         if erro is not None:
             if erro.status_code == 401:
                 logger.info("mcp resultado=nao_autenticado")
-            await _resposta_json(erro.status_code, {"detail": erro.detail}, erro.headers)(send)
+            corpo = erro.detail if isinstance(erro.detail, dict) else {"detail": erro.detail}
+            await _resposta_json(erro.status_code, corpo, erro.headers)(send)
             return
         segundos = _segundos_ate_liberar(token)
         if segundos is not None:

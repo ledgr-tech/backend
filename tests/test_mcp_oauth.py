@@ -20,9 +20,9 @@ import pytest
 from conftest import FRONTEND_URL_TESTE, cabecalhos, empresa_unica
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 
-from app.core import auth
+from app.core import auth, conta_inativa
 from app.core.auth import ConexaoAutenticada, obter_conexao_mcp
 from app.core.config import settings
 from app.models import ClienteOAuth, CodigoOAuth, ConexaoMcp, TokenOAuth
@@ -49,6 +49,8 @@ def _rota_mcp(conexao: Annotated[ConexaoAutenticada, Depends(obter_conexao_mcp)]
     }
 
 
+# A app real registra o handler da conta inativa (issue #156) em main.py.
+app_mcp.add_exception_handler(conta_inativa.ContaInativaError, conta_inativa.tratar)
 client_mcp = TestClient(app_mcp)
 
 
@@ -1036,3 +1038,50 @@ def test_logs_sem_codigo_token_pedido_nem_state(mcp, conta, caplog):
         "estado-do-cliente",
     ):
         assert segredo not in texto
+
+
+# --- conta inativa (issue #156) -----------------------------------------------------------
+
+
+def _inativar(db_session, conta_id, inativa: bool) -> None:
+    from app.models import Conta
+
+    db_session.execute(
+        update(Conta)
+        .where(Conta.id == conta_id)
+        .values(
+            inativada_em=func.now() if inativa else None,
+            motivo_inativacao="teste" if inativa else None,
+        )
+    )
+    db_session.commit()
+
+
+def test_conta_inativa_para_o_token_e_a_renovacao(mcp, conta, db_session):
+    c = conta()
+    client_id, tokens = c.conectar()
+    _, _verifier, pedido_id = c.pedido()
+
+    _inativar(db_session, c.admin.conta_id, True)
+    uso = usar(tokens["access_token"])
+    renovacao = renovar(client_id, tokens["refresh_token"])
+    aprovacao = c.aprovar(pedido_id)
+
+    assert (uso.status_code, uso.json()) == (403, conta_inativa.corpo())
+    assert (renovacao.status_code, renovacao.json()["error"]) == (400, "invalid_grant")
+    assert (aprovacao.status_code, aprovacao.json()) == (403, conta_inativa.corpo())
+    _inativar(db_session, c.admin.conta_id, False)
+    assert usar(tokens["access_token"]).status_code == 200
+    assert renovar(client_id, tokens["refresh_token"]).status_code == 200
+
+
+def test_conta_inativa_nao_troca_o_codigo(mcp, conta, db_session):
+    c = conta()
+    client_id, verifier, pedido_id = c.pedido()
+    aprovada = c.aprovar(pedido_id)
+    code = _query(aprovada.json()["redirecionar_para"])["code"]
+
+    _inativar(db_session, c.admin.conta_id, True)
+    tokens = trocar_codigo(client_id, code, verifier)
+
+    assert (tokens.status_code, tokens.json()["error"]) == (400, "invalid_grant")

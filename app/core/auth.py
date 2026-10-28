@@ -53,6 +53,10 @@ resolve uma vez por requisição:
 - `exigir_papel(*papeis)` deixa passar só os papéis dados e devolve 403 aos
   outros (issue #133, ADR-019); `obter_admin_autenticado` é o caso do admin.
 
+Conta inativa (issue #156, ADR-025): `obter_sessao_autenticada` barra as
+escritas da conta inativa com 403 `conta_inativa`, `obter_chave_api` e
+`autenticar_token_mcp` barram tudo (regras em app/core/conta_inativa.py).
+
 Chave da API pública (issue #135, ADR-021): `obter_chave_api` é a outra porta
 de entrada, ao lado do NextAuth, só para as rotas `/v1`. O token
 (`Authorization: Bearer ledgr_...`) tem de começar com `PREFIXO_CHAVE_API`; a
@@ -97,6 +101,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
+from app.core import conta_inativa
 from app.core.config import settings
 from app.core.database import SessionLocal, get_db
 from app.models import ChaveApi, ConexaoMcp, Empresa, TokenOAuth, Usuario
@@ -253,10 +258,18 @@ def encerrar_sessoes(usuario: Usuario) -> None:
 
 
 def obter_sessao_autenticada(
+    request: Request,
     credenciais: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     db: Annotated[Session, Depends(get_db)],
 ) -> SessaoAutenticada:
-    return _sessao_do_token(credenciais, db)
+    sessao = _sessao_do_token(credenciais, db)
+    # Conta inativa (issue #156, ADR-025): toda escrita para aqui, menos as
+    # liberadas em app/core/conta_inativa.py. Só as escritas consultam a conta.
+    if conta_inativa.escrita_bloqueada(request) and conta_inativa.conta_esta_inativa(
+        db, sessao.usuario.conta_id
+    ):
+        raise conta_inativa.ContaInativaError
+    return sessao
 
 
 def obter_usuario_autenticado(
@@ -420,6 +433,9 @@ def obter_chave_api(
     )
     if chave is None or chave.revogada_em is not None:
         raise _chave_invalida()
+    # A API pública para na conta inativa (issue #156, ADR-025).
+    if conta_inativa.conta_esta_inativa(db, chave.conta_id):
+        raise conta_inativa.ContaInativaError
     autenticada = ChaveAutenticada(
         chave_id=chave.id,
         prefixo=chave.prefixo,
@@ -514,6 +530,9 @@ def autenticar_token_mcp(db: Session, token: str | None) -> tuple[ConexaoAutenti
     if linha is None or linha[0].resource != recurso:
         raise _token_mcp_invalido()
     token_oauth, conexao = linha
+    # O MCP para na conta inativa (issue #156, ADR-025).
+    if conta_inativa.conta_esta_inativa(db, conexao.conta_id):
+        raise conta_inativa.ContaInativaError
     ultimo = conexao.ultimo_uso_em
     autenticada = ConexaoAutenticada(
         conexao_id=conexao.id,

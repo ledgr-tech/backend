@@ -54,6 +54,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 
 from app.core.config import settings
+from app.core.conta_inativa import conta_da_empresa_esta_inativa
 from app.core.database import SessionLocal
 from app.models import Conciliacao, Empresa, ExplicacaoDivergencia, Lancamento
 from app.services.decisoes import chave_da_linha
@@ -346,9 +347,14 @@ def _linhas_em_ordem(
 def _gerar_em_sessao_propria(
     preparo: Preparo, provedor: ProvedorDeIA, sessao: Callable[[], Session]
 ) -> ResultadoGeracao | None:
-    """Uma linha, numa sessão só desta thread. `None` em erro inesperado."""
+    """Uma linha, numa sessão só desta thread. `None` em erro inesperado e na
+    conta inativada no meio da geração (issue #156): a linha não vai ao
+    provedor."""
     try:
         with sessao() as db:
+            if conta_da_empresa_esta_inativa(db, preparo.empresa_id):
+                logger.info("explicacao_automatica resultado=conta_inativa")
+                return None
             return gerar(db, preparo, provedor, origem="explicacao_automatica")
     except Exception as exc:  # noqa: BLE001 - a falha de uma linha não derruba as outras
         logger.info("explicacao_automatica erro_inesperado classe=%s", type(exc).__name__)

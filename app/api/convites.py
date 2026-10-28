@@ -20,6 +20,9 @@ tocar no banco (app/core/google.py), e o e-mail do Google tem de ser o do
 convite. Cria o usuário sem senha, com o `google_sub`, e responde com
 `LoginResponse`, porque já é o login.
 
+Conta inativa (issue #156, ADR-025): o aceite dá 403 `conta_inativa`, porque
+criaria um usuário na conta; a consulta segue.
+
 Token inexistente, expirado, usado ou cancelado: 400 nas três, nunca 401 (o
 frontend trata todo 401 como sessão expirada). Se o e-mail ganhou conta entre
 o convite e o aceite: 409.
@@ -52,7 +55,7 @@ from app.api.auth import (
     resposta_de_usuario,
     usuario_pelo_google_sub,
 )
-from app.core import senha
+from app.core import conta_inativa, senha
 from app.core.database import get_db
 from app.core.google import identidade_ou_erro_http
 from app.core.rate_limit import LIMITE_CONVITE, limiter
@@ -137,6 +140,9 @@ def aceitar(
     if convite is None:
         logger.info("convite_aceite resultado=token_invalido")
         raise _convite_invalido()
+    if conta_inativa.conta_esta_inativa(db, convite.conta_id):
+        logger.info("convite_aceite resultado=conta_inativa")
+        raise conta_inativa.ContaInativaError
 
     email_em_uso = HTTPException(
         status_code=http_status.HTTP_409_CONFLICT, detail="E-mail já cadastrado."
@@ -185,6 +191,9 @@ def aceitar_com_google(
     if convite is None:
         logger.info("convite_aceite_google resultado=token_invalido")
         raise _convite_invalido()
+    if conta_inativa.conta_esta_inativa(db, convite.conta_id):
+        logger.info("convite_aceite_google resultado=conta_inativa")
+        raise conta_inativa.ContaInativaError
     if identidade.email != convite.email:
         logger.info("convite_aceite_google resultado=email_diferente")
         raise HTTPException(
