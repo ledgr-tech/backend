@@ -114,6 +114,9 @@ class Usuario(Base, TimestampMixin):
     google_sub: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
     papel: Mapped[str] = mapped_column(String, nullable=False)
     removido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Último login, pelo `POST /login` ou o `/login/google` (issue #156): o
+    # painel administrativo mostra o mais recente da conta.
+    ultimo_login_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Token com `auth_time` anterior a isto é recusado (issue #75, ADR-016).
     # Nulo: nenhuma sessão foi encerrada. Gravado no relógio do backend, o
     # mesmo do `auth_time` do login. Ver app/core/auth.py.

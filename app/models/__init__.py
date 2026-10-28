@@ -3,6 +3,7 @@
 Sempre que um model novo for criado, importar aqui também.
 """
 
+from app.models.admin import AcessoAdmin, EventoConta, OperadorLedgr
 from app.models.assistente import PerguntaSemResposta, UsoAssistente
 from app.models.base import Base
 from app.models.chave_api import ChaveApi
@@ -32,6 +33,7 @@ from app.models.token_email import TokenEmail
 from app.models.usuario import Usuario
 
 __all__ = [
+    "AcessoAdmin",
     "Base",
     "ChaveApi",
     "ClienteOAuth",
@@ -44,6 +46,7 @@ __all__ = [
     "DecisaoLinha",
     "Empresa",
     "EmpresaFavorita",
+    "EventoConta",
     "ExecucaoConciliacao",
     "ExplicacaoDivergencia",
     "Extrato",
@@ -51,6 +54,7 @@ __all__ = [
     "Lancamento",
     "LinhaInvalida",
     "LinkRelatorio",
+    "OperadorLedgr",
     "PedidoAutorizacaoOAuth",
     "PerguntaSemResposta",
     "RegistroExclusao",

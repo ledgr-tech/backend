@@ -31,7 +31,13 @@ class Conta(Base, TimestampMixin):
 
     As contas que existiam antes da #133 têm o mesmo id da empresa de que
     vieram: o JWT já emitido leva esse id no claim `empresa_id`, que passou a
-    ser lido como o id da conta (app/core/auth.py)."""
+    ser lido como o id da conta (app/core/auth.py).
+
+    Inativação (issue #156, ADR-025): `inativada_em` e `motivo_inativacao`,
+    gravados pelo operador do Ledgr no `/admin`. Fica à parte da situação
+    comercial, que continua calculada como antes: a conta inativa fica
+    somente leitura (app/core/conta_inativa.py), e reativar devolve tudo. Quem
+    inativou, reativou ou ligou o piloto fica em `eventos_conta`."""
 
     __tablename__ = "contas"
     __table_args__ = (
@@ -42,6 +48,10 @@ class Conta(Base, TimestampMixin):
         CheckConstraint(
             "(plano IS NULL) = (teste_termina_em IS NULL)",
             name="ck_contas_plano_e_fim_do_teste_juntos",
+        ),
+        CheckConstraint(
+            "(inativada_em IS NULL) = (motivo_inativacao IS NULL)",
+            name="ck_contas_inativacao_completa",
         ),
     )
 
@@ -58,6 +68,8 @@ class Conta(Base, TimestampMixin):
     assinatura_ativa: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    inativada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    motivo_inativacao: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     empresas: Mapped[list["Empresa"]] = relationship(back_populates="conta")  # noqa: F821
     usuarios: Mapped[list["Usuario"]] = relationship(back_populates="conta")  # noqa: F821
