@@ -2,11 +2,15 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, Integer, Numeric, String
+from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+# Importação via IA ainda não confirmada (issue #158, ADR-013): fora de toda
+# conciliação, listagem e contagem, como se não existisse.
+STATUS_RASCUNHO = "rascunho"
 
 
 class Extrato(Base, TimestampMixin):
@@ -46,14 +50,30 @@ class Extrato(Base, TimestampMixin):
     arquivo bruto não é guardado, ADR-002, então não há de onde tirar). O
     CHECK garante que os dois vêm juntos (ou nenhum). O saldo inicial não é
     gravado: é calculado na leitura (app/services/saldo.py).
+
+    Importação via IA (issue #158, ADR-013): o relatório do sistema de gestão
+    convertido pela IA do próprio usuário entra com `formato` "json" e
+    `status` "rascunho" (`STATUS_RASCUNHO`), gravado na hora pela rota, sem
+    BackgroundTask (app/services/importacao_ia). O rascunho fica fora de
+    toda conciliação, listagem e contagem, e as rotas de extrato e de
+    conciliação respondem 404 para ele. Expira em 7 dias e some ao ser
+    descartado. A confirmação (#159) o torna um extrato do sistema como os
+    outros. O índice parcial `ix_extratos_rascunho_criado_em` serve à limpeza
+    dos vencidos.
     """
 
     __tablename__ = "extratos"
     __table_args__ = (
-        CheckConstraint("formato IN ('ofx', 'csv')", name="ck_extratos_formato_suportado"),
+        CheckConstraint("formato IN ('ofx', 'csv', 'json')", name="ck_extratos_formato_suportado"),
         CheckConstraint(
-            "status IN ('pendente', 'processando', 'concluido', 'concluido_com_erros', 'erro')",
+            "status IN ('pendente', 'processando', 'concluido', 'concluido_com_erros', 'erro', "
+            "'rascunho')",
             name="ck_extratos_status_valido",
+        ),
+        Index(
+            "ix_extratos_rascunho_criado_em",
+            "criado_em",
+            postgresql_where=text("status = 'rascunho'"),
         ),
         CheckConstraint("origem IN ('banco', 'sistema')", name="ck_extratos_origem_valida"),
         CheckConstraint(
@@ -74,7 +94,7 @@ class Extrato(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("empresas.id"), nullable=False, index=True
     )
     nome_arquivo: Mapped[str] = mapped_column(String, nullable=False)
-    formato: Mapped[str] = mapped_column(String(3), nullable=False)
+    formato: Mapped[str] = mapped_column(String(4), nullable=False)
     tamanho_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="pendente")
     origem: Mapped[str] = mapped_column(String, nullable=False)
