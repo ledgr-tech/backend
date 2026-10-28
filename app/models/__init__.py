@@ -19,6 +19,7 @@ from app.models.extrato import Extrato
 from app.models.fechamento import Fechamento
 from app.models.lancamento import Lancamento
 from app.models.linha_invalida import LinhaInvalida
+from app.models.link_relatorio import LinkRelatorio
 from app.models.oauth import (
     ClienteOAuth,
     CodigoOAuth,
@@ -49,6 +50,7 @@ __all__ = [
     "Fechamento",
     "Lancamento",
     "LinhaInvalida",
+    "LinkRelatorio",
     "PedidoAutorizacaoOAuth",
     "PerguntaSemResposta",
     "RegistroExclusao",
