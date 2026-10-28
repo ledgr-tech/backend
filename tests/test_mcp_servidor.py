@@ -17,7 +17,7 @@ from conftest import cabecalhos, empresa_unica
 from fastapi.testclient import TestClient
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from test_mcp_oauth import (
     CALLBACK_CLAUDE,
     ISSUER,
@@ -506,3 +506,33 @@ def test_criador_removido_corta_o_mcp(cenario, criar_usuario):
     assert removido.status_code == 204
     with TestClient(app, base_url=BASE) as cliente:
         assert _post_mcp(cliente, token).status_code == 401
+
+
+@pytest.mark.usefixtures("mcp")
+def test_conta_inativa_da_403_no_mcp(cenario, db_session):
+    """Issue #156: o /mcp para na conta inativa, com o corpo das outras rotas."""
+    from app.core import conta_inativa
+    from app.models import Conta
+
+    token = cenario.conectar()
+
+    def inativar(inativa: bool) -> None:
+        db_session.execute(
+            update(Conta)
+            .where(Conta.id == cenario.admin.conta_id)
+            .values(
+                inativada_em=func.now() if inativa else None,
+                motivo_inativacao="teste" if inativa else None,
+            )
+        )
+        db_session.commit()
+
+    inativar(True)
+    with TestClient(app, base_url=BASE) as cliente:
+        parado = _post_mcp(cliente, token)
+    inativar(False)
+    with TestClient(app, base_url=BASE) as cliente:
+        voltou = _post_mcp(cliente, token)
+
+    assert (parado.status_code, parado.json()) == (403, conta_inativa.corpo())
+    assert voltou.status_code not in (401, 403)

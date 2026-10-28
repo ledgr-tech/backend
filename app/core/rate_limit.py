@@ -132,6 +132,10 @@ LIMITE_REVISAO_IMPORTACAO_POR_USUARIO = "60/minute"
 # pelo front com o segredo), contra a tentativa de adivinhar tokens.
 LIMITE_LINKS_RELATORIO_POR_USUARIO = "10/minute"
 LIMITE_RELATORIO_PUBLICO = "30/minute"
+# Painel administrativo interno (issue #156, ADR-025): por operador (o usuário
+# do token), leituras e ações em contadores separados.
+LIMITE_ADMIN_LEITURA_POR_USUARIO = "60/minute"
+LIMITE_ADMIN_ACAO_POR_USUARIO = "10/minute"
 
 
 def _claims_do_token(request: Request) -> dict | None:

@@ -79,6 +79,7 @@ from app.models import (
     DecisaoLinha,
     Empresa,
     EmpresaFavorita,
+    EventoConta,
     ExecucaoConciliacao,
     ExplicacaoDivergencia,
     Extrato,
@@ -86,6 +87,7 @@ from app.models import (
     Lancamento,
     LinhaInvalida,
     LinkRelatorio,
+    OperadorLedgr,
     PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
@@ -126,7 +128,10 @@ def _da_conta(coluna_empresa_id):
 # `linhas_invalidas` e `tokens_email` saem pelo extrato e pelo usuário;
 # `tokens_oauth` e `codigos_oauth`, pela conexão MCP (issue #136);
 # `empresas_favoritas`, pelo `conta_id` dela (issue #157), antes de usuários e
-# empresas; `links_relatorio` (issue #165), antes dos fechamentos. Os `clientes_oauth` ficam: não são de nenhuma conta.
+# empresas; `links_relatorio` (issue #165), antes dos fechamentos;
+# `eventos_conta` e `operadores_ledgr` (issue #156), antes dos usuários. O
+# `acessos_admin` fica: não tem FK nem `conta_id`, é o registro de quem do
+# Ledgr consultou a conta. Os `clientes_oauth` ficam: não são de nenhuma conta.
 # tests/test_excluir_empresa.py confere a ordem e que nenhuma tabela ligada à
 # conta ou às empresas dela ficou de fora.
 ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...] = (
@@ -148,6 +153,8 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
     (TokenEmail, lambda c: TokenEmail.usuario_id.in_(_usuarios_da_conta(c))),
     (Configuracao, _da_conta(Configuracao.empresa_id)),
     (EmpresaFavorita, lambda c: EmpresaFavorita.conta_id == c),
+    (EventoConta, lambda c: EventoConta.conta_id == c),
+    (OperadorLedgr, lambda c: OperadorLedgr.usuario_id.in_(_usuarios_da_conta(c))),
     (Usuario, lambda c: Usuario.conta_id == c),
     (Empresa, lambda c: Empresa.conta_id == c),
     (UsoAssistente, lambda c: UsoAssistente.conta_id == c),

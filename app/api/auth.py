@@ -56,7 +56,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
 from fastapi.exceptions import RequestValidationError
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -449,7 +449,15 @@ def login(
 
     auth_time = instante_do_login()  # depois de a senha ser conferida
     bloqueio_login.limpar(email)
+    registrar_login(db, usuario)
     return LoginResponse(**resposta_de_usuario(usuario).model_dump(), auth_time=auth_time)
+
+
+def registrar_login(db: Session, usuario: Usuario) -> None:
+    """`ultimo_login_em` (issue #156), que o painel administrativo mostra."""
+    usuario.ultimo_login_em = func.now()
+    db.commit()
+    db.refresh(usuario)
 
 
 def usuario_pelo_google_sub(db: Session, sub: str) -> Usuario | None:
@@ -475,6 +483,7 @@ def login_google(
     usuario = usuario_pelo_google_sub(db, identidade.sub)
     if usuario is not None:
         logger.info("login_google resultado=entrou")
+        registrar_login(db, usuario)
         return resposta_de_login(usuario)
 
     if db.scalar(select(Usuario.id).where(Usuario.email == identidade.email)):

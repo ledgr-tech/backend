@@ -64,6 +64,7 @@ from app.models import (
     Convite,
     DecisaoLinha,
     Empresa,
+    EventoConta,
     ExecucaoConciliacao,
     ExplicacaoDivergencia,
     Extrato,
@@ -71,6 +72,7 @@ from app.models import (
     Lancamento,
     LinhaInvalida,
     LinkRelatorio,
+    OperadorLedgr,
     PedidoAutorizacaoOAuth,
     TokenOAuth,
     UsoAssistente,
@@ -540,6 +542,11 @@ def criar_conta(db_session):
         db_session.query(ChaveApi).filter_by(conta_id=conta_id).delete()
         _apagar_conexoes_mcp(db_session, ConexaoMcp.conta_id == conta_id)
         db_session.query(PedidoAutorizacaoOAuth).filter_by(conta_id=conta_id).delete()
+        # Painel administrativo (issue #156).
+        db_session.query(EventoConta).filter_by(conta_id=conta_id).delete()
+        db_session.query(OperadorLedgr).filter(
+            OperadorLedgr.usuario_id.in_(select(Usuario.id).where(Usuario.conta_id == conta_id))
+        ).delete(synchronize_session=False)
         db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
         db_session.query(UsoAssistente).filter_by(conta_id=conta_id).delete()
         db_session.query(Conta).filter_by(id=conta_id).delete()
@@ -742,6 +749,9 @@ def criar_usuario(db_session, criar_empresa):
 
     db_session.rollback()
     db_session.query(DecisaoLinha).filter(DecisaoLinha.usuario_id.in_(criados)).delete(
+        synchronize_session=False
+    )
+    db_session.query(OperadorLedgr).filter(OperadorLedgr.usuario_id.in_(criados)).delete(
         synchronize_session=False
     )
     db_session.query(Usuario).filter(Usuario.id.in_(criados)).delete(synchronize_session=False)

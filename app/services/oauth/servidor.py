@@ -51,6 +51,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.conta_inativa import conta_esta_inativa
 from app.models import ClienteOAuth, CodigoOAuth, ConexaoMcp, TokenOAuth
 from app.services.conexoes_mcp import revogar_conexao
 from app.services.oauth.redirects import mesmo_redirect, redirect_permitido
@@ -317,7 +318,12 @@ class GrantCodigo(grants.AuthorizationCodeGrant):
 
     def authenticate_user(self, authorization_code):
         conexao = self.server.db.get(ConexaoMcp, authorization_code.modelo.conexao_id)
-        return conexao if conexao is not None and conexao.revogada_em is None else None
+        if conexao is None or conexao.revogada_em is not None:
+            return None
+        # Conta inativa (issue #156): sem token novo, `invalid_grant`.
+        if conta_esta_inativa(self.server.db, conexao.conta_id):
+            return None
+        return conexao
 
 
 class GrantRenovacao(grants.RefreshTokenGrant):
@@ -350,6 +356,9 @@ class GrantRenovacao(grants.RefreshTokenGrant):
         )
         conexao = db.get(ConexaoMcp, modelo.conexao_id)
         if not valido or modelo.revogado_em is not None or conexao.revogada_em is not None:
+            return None
+        # Conta inativa (issue #156): a renovação também para, `invalid_grant`.
+        if conta_esta_inativa(db, conexao.conta_id):
             return None
         return Token(modelo, "renovacao")
 
