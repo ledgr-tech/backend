@@ -2,10 +2,17 @@
 competência, `GET /fechamentos` lista o histórico e
 `DELETE /fechamentos/{competencia}` reabre.
 
-Regra do mês e resumo em app/services/fechamentos.py. Sempre pela empresa do
-token; conta única, sem papéis nem 403. Fechar e reabrir pegam a trava
+Regra do mês e resumo em app/services/fechamentos.py. Sempre pela empresa
+ativa (cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a
+issue #133). Fechar e reabrir são só do admin e do gestor (issue #132,
+ADR-019): o analista recebe 403; listar continua para todos. Fechar e reabrir pegam a trava
 EXCLUSIVA do mês (app/services/travas.py), então esperam qualquer conciliação
 ou decisão em andamento naquele mês e as seguintes esperam por eles.
+
+O mês não fecha com justificativa aguardando aprovação (issue #132), nem com
+ressalva: 409 com quantas faltam aprovar ou rejeitar, conferido antes das
+pendências. A ressalva continua cobrindo só divergência sem justificativa e
+linha não lida.
 
 Erros de regra saem com `detail` em texto, porque o front mostra o motivo
 direto. Com o mês fechado, `POST /conciliacoes` e `POST
@@ -21,9 +28,17 @@ Resumo congelado gravado em cada fechamento:
       "contagens": {"total", "match_exato", "match_tolerancia", "duplicado",
                     "sem_correspondencia", "tarifa_bancaria",
                     "divergente_valor", "divergente_data"},
-      "justificadas": int, "pendentes": int, "linhas_nao_lidas": int,
-      "valor_em_aberto": "0.00"
+      "justificadas": int, "aguardando_aprovacao": int, "pendentes": int,
+      "linhas_nao_lidas": int, "valor_em_aberto": "0.00"
     }
+
+`justificadas` são só as aprovadas desde a issue #132. Os resumos congelados
+antes dela não têm `aguardando_aprovacao`, que sai 0 na resposta; o
+`justificadas` deles conta as justificativas da época, todas aprovadas pela
+migração.
+
+Reabrir revoga, na mesma transação, os links públicos do relatório daquele
+fechamento, com o motivo "reabertura" (issue #165, app/api/links_relatorio.py).
 
 Nunca loga a ressalva nem descrição de lançamento.
 """
@@ -38,13 +53,21 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
+from app.core.auth import (
+    EmpresaAtiva,
+    exigir_papel,
+    obter_empresa_ativa,
+    obter_empresa_id_ativa,
+)
 from app.core.database import get_db
 from app.models import Fechamento, Usuario
-from app.services import fechamentos
+from app.services import fechamentos, relatorio_publico
 from app.services.travas import travar_mes
 
 router = APIRouter(prefix="/fechamentos", tags=["fechamentos"])
+
+# Fechar e reabrir (issue #132, ADR-019).
+obter_admin_ou_gestor = exigir_papel("admin", "gestor")
 
 TAMANHO_MAXIMO_RESSALVA = 1000
 
@@ -73,6 +96,8 @@ class ResumoResponse(BaseModel):
     pares: list[ParResumoResponse]
     contagens: ContagensResumoResponse
     justificadas: int
+    # Ausente nos resumos congelados antes da issue #132.
+    aguardando_aprovacao: int = 0
     pendentes: int
     linhas_nao_lidas: int
     valor_em_aberto: str
@@ -131,6 +156,15 @@ def _plural(quantidade: int, singular: str, plural: str) -> str:
     return f"{quantidade} {singular if quantidade == 1 else plural}"
 
 
+def _aguardando_aprovacao(quantidade: int) -> str:
+    justificativas = _plural(
+        quantidade,
+        "justificativa aguardando aprovação",
+        "justificativas aguardando aprovação",
+    )
+    return f"Há {justificativas} nesta competência. Aprove ou rejeite antes de fechar."
+
+
 def _o_que_falta(pendentes: int, linhas_nao_lidas: int) -> str:
     partes = []
     if pendentes:
@@ -149,10 +183,11 @@ def _o_que_falta(pendentes: int, linhas_nao_lidas: int) -> str:
 )
 def fechar_competencia(
     corpo: FechamentoRequest,
-    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    _papel: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FechamentoResponse:
-    empresa_id = usuario.empresa_id
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     _validar_competencia(corpo.competencia)
     ressalva = (corpo.ressalva or "").strip() or None
     if ressalva is not None and len(ressalva) > TAMANHO_MAXIMO_RESSALVA:
@@ -173,6 +208,10 @@ def fechar_competencia(
         )
 
     resumo = fechamentos.resumo_do_mes(db, empresa_id, pares)
+    if resumo["aguardando_aprovacao"]:
+        raise _erro(
+            http_status.HTTP_409_CONFLICT, _aguardando_aprovacao(resumo["aguardando_aprovacao"])
+        )
     if (resumo["pendentes"] or resumo["linhas_nao_lidas"]) and ressalva is None:
         raise _erro(
             http_status.HTTP_409_CONFLICT,
@@ -195,7 +234,7 @@ def fechar_competencia(
 
 @router.get("", response_model=FechamentoListaResponse)
 def listar_fechamentos(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     competencia: Annotated[str | None, Query()] = None,
 ) -> FechamentoListaResponse:
@@ -212,10 +251,11 @@ def listar_fechamentos(
 @router.delete("/{competencia}", response_model=FechamentoResponse)
 def reabrir_competencia(
     competencia: str,
-    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    _papel: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> FechamentoResponse:
-    empresa_id = usuario.empresa_id
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     _validar_competencia(competencia)
 
     travar_mes(db, empresa_id, competencia)
@@ -227,6 +267,8 @@ def reabrir_competencia(
     fechamento.reaberto_por_id = usuario.id
     fechamento.reaberto_por_nome = usuario.nome
     fechamento.reaberto_em = func.clock_timestamp()
+    # Os links públicos deste fechamento morrem com ele (issue #165, ADR-024).
+    relatorio_publico.revogar_do_fechamento(db, fechamento, usuario)
     db.commit()
     db.refresh(fechamento)
     return _resposta(fechamento)

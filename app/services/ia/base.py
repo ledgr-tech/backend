@@ -74,6 +74,42 @@ class RespostaIA:
     modelo: str
 
 
+@dataclass(frozen=True)
+class MensagemHistorico:
+    """Um turno anterior da conversa com o assistente (issue #137), já
+    mascarado. O backend não guarda conversa: o front manda a cada pergunta."""
+
+    papel: Literal["usuario", "assistente"]
+    texto: str
+
+
+@dataclass(frozen=True)
+class PerguntaAjuda:
+    """O que vai ao provedor numa pergunta ao assistente da Central de ajuda
+    (issue #137, ADR-020). Nenhum dado de lançamento, da empresa ou da conta:
+    a Central serializada, a pergunta e o histórico já mascarados e, se veio,
+    o id da tela em que a pessoa está."""
+
+    central: str
+    pergunta: str
+    historico: tuple[MensagemHistorico, ...]
+    tela: str | None
+
+
+@dataclass(frozen=True)
+class RespostaAjuda:
+    """A saída estruturada do modelo, já conferida no formato. `citacoes` são
+    pares (pagina, funcao) como o modelo devolveu; quem chama confere se
+    existem no conteúdo atual."""
+
+    resposta: str
+    respondida: bool
+    citacoes: tuple[tuple[str, str], ...]
+    tokens_entrada: int
+    tokens_saida: int
+    modelo: str
+
+
 class ProvedorDeIA(Protocol):
     """Interface que qualquer provedor de LLM precisa cumprir (ADR-011).
     Síncrona de propósito — ver docstring do módulo."""
@@ -81,6 +117,10 @@ class ProvedorDeIA(Protocol):
     def explicar_divergencia(
         self, contexto: ContextoDivergencia, *, identificador_anonimo: str | None = None
     ) -> RespostaIA: ...
+
+    def responder_ajuda(
+        self, pergunta: PerguntaAjuda, *, identificador_anonimo: str | None = None
+    ) -> RespostaAjuda: ...
 
 
 class ProvedorIAIndisponivel(Exception):

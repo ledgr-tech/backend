@@ -7,6 +7,16 @@ Uma linha "diverge" quando o status não é `match_exato` nem
 `match_tolerancia` (as cinco categorias de divergência), mesma regra de
 `estaResolvida` no frontend. Só linha divergente aceita decisão.
 
+Aprovação (issue #132, ADR-019): toda justificativa nasce aguardando
+aprovação. `justificativa_aprovada` marca a justificada em vigor como
+aprovada; `justificativa_rejeitada` e `justificativa_desfeita` voltam a linha
+para nenhuma decisão. `aprovacao_desfeita` (issue #164) volta a justificada
+aprovada em vigor para aguardando aprovação; a aprovação e a reversão ficam
+no histórico. Justificar de novo cria uma justificativa nova,
+aguardando aprovação, mesmo que a anterior estivesse aprovada. Nas contagens,
+"justificadas" são só as aprovadas, "aguardando aprovação" são as pendentes, e
+a divergência com justificativa pendente não é "sem justificativa".
+
 Rodada: a rodada N de um extrato do banco é o N-ésimo extrato do sistema
 conciliado com ele, na ordem da PRIMEIRA execução de cada par em
 `execucoes_conciliacao`. Reconciliar o mesmo par não cria rodada nova, e a
@@ -20,6 +30,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session, aliased
@@ -31,6 +42,14 @@ STATUS_RESOLVIDOS = frozenset({"match_exato", "match_tolerancia"})
 
 TIPOS_DECISAO = ("conferida", "justificada")
 TIPOS_DESFAZER = {"conferencia_desfeita": "conferida", "justificativa_desfeita": "justificada"}
+# Aprovar e rejeitar a justificativa em vigor (issue #132): só admin e gestor.
+TIPOS_APROVACAO = ("justificativa_aprovada", "justificativa_rejeitada")
+# Desfazer a aprovação em vigor (issue #164): só quem aprovou, com as exceções
+# do admin em app/api/conciliacoes.py.
+TIPO_APROVACAO_DESFEITA = "aprovacao_desfeita"
+AUTOR_APROVACAO_DA_MIGRACAO = "Ledgr (atualização de 21/10)"
+
+SituacaoJustificativa = Literal["pendente", "aprovada"]
 
 
 def diverge(status: str) -> bool:
@@ -129,13 +148,53 @@ def carregar_eventos(
     return por_chave
 
 
-def decisao_vigente(eventos: list[DecisaoLinha]) -> DecisaoLinha | None:
-    """`conferida` e `justificada` passam a valer; os dois "desfeita" voltam a
-    nenhuma decisão. `eventos` em ordem cronológica."""
+@dataclass(frozen=True)
+class DecisaoEmVigor:
+    """A decisão em vigor de uma linha: o evento `conferida` ou `justificada`
+    e, na justificada aprovada, o evento da aprovação."""
+
+    evento: DecisaoLinha
+    aprovacao: DecisaoLinha | None = None
+
+    @property
+    def tipo(self) -> str:
+        return self.evento.tipo
+
+    @property
+    def situacao(self) -> SituacaoJustificativa | None:
+        """`pendente` ou `aprovada` na justificada; `None` na conferida."""
+        if self.evento.tipo != "justificada":
+            return None
+        return "aprovada" if self.aprovacao is not None else "pendente"
+
+
+def decisao_vigente(eventos: list[DecisaoLinha]) -> DecisaoEmVigor | None:
+    """`conferida` e `justificada` passam a valer (a justificada, aguardando
+    aprovação); `justificativa_aprovada` aprova a justificada pendente em
+    vigor e `aprovacao_desfeita` volta a aprovada para pendente; a rejeição e
+    os dois "desfeita" das decisões voltam a nenhuma decisão. `eventos` em
+    ordem cronológica."""
     vigente = None
     for evento in eventos:
-        vigente = evento if evento.tipo in TIPOS_DECISAO else None
+        if evento.tipo in TIPOS_DECISAO:
+            vigente = DecisaoEmVigor(evento)
+        elif evento.tipo == "justificativa_aprovada":
+            if vigente is not None and vigente.situacao == "pendente":
+                vigente = DecisaoEmVigor(vigente.evento, aprovacao=evento)
+        elif evento.tipo == TIPO_APROVACAO_DESFEITA:
+            if vigente is not None and vigente.situacao == "aprovada":
+                vigente = DecisaoEmVigor(vigente.evento)
+        else:
+            vigente = None
     return vigente
+
+
+def aguardando_aprovacao(vigente: DecisaoEmVigor | None) -> bool:
+    return vigente is not None and vigente.situacao == "pendente"
+
+
+def justificativa_aprovada(vigente: DecisaoEmVigor | None) -> bool:
+    return vigente is not None and vigente.situacao == "aprovada"
 
 
 @dataclass(frozen=True)
@@ -157,13 +216,13 @@ def como_evento(evento: DecisaoLinha) -> Evento:
     )
 
 
-def contar_justificadas(
+def _vigentes_das_linhas(
     db: Session,
     empresa_id: uuid.UUID,
     pares: set[tuple[uuid.UUID, uuid.UUID]],
-) -> dict[tuple[uuid.UUID, uuid.UUID], int]:
-    """Linhas divergentes de cada par `(extrato_banco_id, extrato_sistema_id)`
-    cuja decisão em vigor é `justificada`, valendo justificativa de qualquer
+) -> dict[tuple[uuid.UUID, uuid.UUID], list[tuple[str, DecisaoEmVigor | None]]]:
+    """A chave e a decisão em vigor de cada linha divergente de cada par
+    `(extrato_banco_id, extrato_sistema_id)`, valendo decisão de qualquer
     rodada. Duas consultas, qualquer que seja o número de pares: as linhas
     divergentes de todos os pares e os eventos dos extratos do banco
     envolvidos."""
@@ -203,7 +262,7 @@ def contar_justificadas(
 
     # Sem filtro por chave: a página pode ter chaves divergentes demais para o
     # limite de 65535 parâmetros por statement do psycopg 3. Os eventos de
-    # chaves que não estão na página são ignorados no cálculo abaixo.
+    # chaves que não estão nos pares são ignorados abaixo.
     bancos = {banco for banco, _ in chaves_por_par}
     eventos = db.scalars(
         select(DecisaoLinha)
@@ -217,12 +276,46 @@ def contar_justificadas(
     for evento in eventos:
         por_banco_e_chave[(evento.extrato_banco_id, evento.chave)].append(evento)
 
-    contagem: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
-    for (banco, sistema), lista in chaves_por_par.items():
-        contagem[(banco, sistema)] = sum(
-            1
-            for chave in lista
-            if (vigente := decisao_vigente(por_banco_e_chave.get((banco, chave), [])))
-            and vigente.tipo == "justificada"
+    return {
+        (banco, sistema): [
+            (chave, decisao_vigente(por_banco_e_chave.get((banco, chave), []))) for chave in lista
+        ]
+        for (banco, sistema), lista in chaves_por_par.items()
+    }
+
+
+@dataclass(frozen=True)
+class ContagemJustificativas:
+    aprovadas: int
+    aguardando_aprovacao: int
+
+
+def contar_justificativas(
+    db: Session,
+    empresa_id: uuid.UUID,
+    pares: set[tuple[uuid.UUID, uuid.UUID]],
+) -> dict[tuple[uuid.UUID, uuid.UUID], ContagemJustificativas]:
+    """Linhas divergentes de cada par com justificativa aprovada e com
+    justificativa aguardando aprovação. Duas consultas (`_vigentes_das_linhas`)."""
+    return {
+        par: ContagemJustificativas(
+            aprovadas=sum(1 for _, vigente in linhas if justificativa_aprovada(vigente)),
+            aguardando_aprovacao=sum(1 for _, vigente in linhas if aguardando_aprovacao(vigente)),
         )
-    return contagem
+        for par, linhas in _vigentes_das_linhas(db, empresa_id, pares).items()
+    }
+
+
+def justificativas_aguardando(
+    db: Session,
+    empresa_id: uuid.UUID,
+    pares: set[tuple[uuid.UUID, uuid.UUID]],
+) -> dict[tuple[uuid.UUID, str], DecisaoEmVigor]:
+    """As linhas divergentes dos pares com justificativa aguardando aprovação,
+    por `(extrato_banco_id, chave)`: o que a aprovação em lote processa."""
+    return {
+        (banco, chave): vigente
+        for (banco, _), linhas in _vigentes_das_linhas(db, empresa_id, pares).items()
+        for chave, vigente in linhas
+        if aguardando_aprovacao(vigente)
+    }

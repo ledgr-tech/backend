@@ -6,10 +6,12 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
+from app.models.usuario import PAPEIS_SEM_ADMIN
 
 
 class Convite(Base, TimestampMixin):
-    """Convite para entrar numa empresa que já existe (issue #69, ADR-015).
+    """Convite para entrar numa conta que já existe (issue #69, ADR-015; da
+    conta, e não mais da empresa, desde a issue #133, ADR-019).
 
     Não reaproveita `tokens_email`: lá o token pertence a um usuário que já
     existe (`usuario_id` NOT NULL), e o convidado ainda não tem conta.
@@ -20,9 +22,13 @@ class Convite(Base, TimestampMixin):
 
     Pendente = `usado_em` e `cancelado_em` nulos e `expira_em` no futuro.
     `cancelado_em` marca tanto o cancelamento pelo administrador quanto o
-    convite substituído por outro para o mesmo e-mail na mesma empresa. As
+    convite substituído por outro para o mesmo e-mail na mesma conta. As
     três datas são `timestamptz`, comparadas com o `now()` do Postgres. O
-    índice (`empresa_id`, `criado_em`) serve à contagem de envios por hora.
+    índice (`conta_id`, `criado_em`) serve à contagem de envios por hora.
+
+    `papel` (issue #133, ADR-019) é o papel que o convidado recebe no aceite:
+    'gestor' ou 'analista', nunca 'admin' (o admin só muda por transferência).
+    Os convites anteriores à #133 receberam 'gestor' na migração.
 
     `convidado_por_id` vira NULL se o usuário for apagado (o mesmo padrão de
     `fechamentos.fechado_por_id`); remover pela rota não apaga a linha.
@@ -34,14 +40,19 @@ class Convite(Base, TimestampMixin):
             "usado_em IS NULL OR cancelado_em IS NULL",
             name="ck_convites_usado_ou_cancelado",
         ),
-        Index("ix_convites_empresa_id_criado_em", "empresa_id", "criado_em"),
+        CheckConstraint(
+            "papel IN (" + ", ".join(f"'{papel}'" for papel in PAPEIS_SEM_ADMIN) + ")",
+            name="ck_convites_papel_valido",
+        ),
+        Index("ix_convites_conta_id_criado_em", "conta_id", "criado_em"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    empresa_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("empresas.id"), nullable=False
+    conta_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contas.id"), nullable=False
     )
     email: Mapped[str] = mapped_column(String, nullable=False)
+    papel: Mapped[str] = mapped_column(String, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     convidado_por_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("usuarios.id", ondelete="SET NULL"), nullable=True

@@ -53,7 +53,7 @@ def test_defaults_da_issue_87():
     pode ter valores próprios para estas variáveis. ~US$ 11/mês no pior caso,
     abaixo do teto de US$ 15 do projeto na OpenAI."""
     campos = Settings.model_fields
-    assert campos["llm_limite_diario_empresa"].default == 300
+    assert campos["llm_limite_diario_conta"].default == 300
     assert campos["llm_limite_diario_global"].default == 1500
     assert campos["llm_modo_descricao"].default == "termos"
 

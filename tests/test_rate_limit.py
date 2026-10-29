@@ -9,16 +9,20 @@ a chave.
 """
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
+from conftest import SECRET_TESTE
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from app.core.auth import CABECALHO_EMPRESA
 from app.core.config import settings
 from app.core.rate_limit import (
     CABECALHO_IP_CLIENTE,
     CABECALHO_SEGREDO_PROXY,
-    chave_por_empresa,
+    chave_por_conta,
     chave_por_usuario,
     ip_do_cliente,
 )
@@ -111,18 +115,36 @@ def test_ip_repassado_aceita_ipv6():
 # --- chaves por token -----------------------------------------------------------
 
 
-def test_chave_por_empresa_usa_o_empresa_id_do_token(gerar_token):
-    empresa_id = uuid.uuid4()
-    request = _request({"Authorization": f"Bearer {gerar_token(empresa_id)}"})
+def test_chave_por_conta_usa_o_conta_id_do_token(gerar_token):
+    conta_id = uuid.uuid4()
+    request = _request({"Authorization": f"Bearer {gerar_token(conta_id)}"})
 
-    assert chave_por_empresa(request) == f"empresa:{empresa_id}"
+    assert chave_por_conta(request) == f"conta:{conta_id}"
 
 
-def test_chave_por_empresa_com_token_forjado_cai_no_ip(gerar_token):
+def test_chave_por_conta_aceita_o_claim_legado_empresa_id(gerar_token):
+    """Token de antes da issue #133: o `empresa_id` é o id da conta."""
+    conta_id = uuid.uuid4()
+    token = gerar_token(conta_id, claim="empresa_id")
+    request = _request({"Authorization": f"Bearer {token}"})
+
+    assert chave_por_conta(request) == f"conta:{conta_id}"
+
+
+def test_chave_por_conta_com_os_dois_claims_divergentes_cai_no_ip(gerar_token):
+    claims = {"sub": str(uuid.uuid4()), "conta_id": str(uuid.uuid4())}
+    claims |= {"empresa_id": str(uuid.uuid4()), "exp": datetime.now(UTC) + timedelta(hours=1)}
+    token = jwt.encode(claims, SECRET_TESTE, algorithm="HS256")
+    request = _request({"Authorization": f"Bearer {token}"}, host="10.0.0.1")
+
+    assert chave_por_conta(request) == "ip:10.0.0.1"
+
+
+def test_chave_por_conta_com_token_forjado_cai_no_ip(gerar_token):
     token = gerar_token(uuid.uuid4(), secret="outro-secret-com-pelo-menos-32-bytes-de-tamanho")
     request = _request({"Authorization": f"Bearer {token}"}, host="10.0.0.1")
 
-    assert chave_por_empresa(request) == "ip:10.0.0.1"
+    assert chave_por_conta(request) == "ip:10.0.0.1"
 
 
 def test_chave_por_usuario_sem_token_usa_o_ip_do_cliente():
@@ -163,24 +185,44 @@ def test_login_sem_segredo_todos_atras_do_front_dividem_o_limite(db_session):
     assert _login({**vercel, **_do_front("198.51.100.8", "errado")}) == 429
 
 
-def _upload(token: str, ip: str) -> int:
+def _upload(token: str, ip: str, empresa_id: uuid.UUID | None = None) -> int:
+    cabecalhos = {"Authorization": f"Bearer {token}", "X-Forwarded-For": ip}
+    if empresa_id is not None:
+        cabecalhos[CABECALHO_EMPRESA] = str(empresa_id)
     return client.post(
         "/extratos/upload",
-        headers={"Authorization": f"Bearer {token}", "X-Forwarded-For": ip},
+        headers=cabecalhos,
         files={"arquivo": ("extrato.pdf", b"x", "application/pdf")},
         data={"origem": "banco"},
     ).status_code
 
 
-def test_upload_limita_por_empresa_e_nao_por_ip(criar_usuario, gerar_token):
+def test_upload_limita_por_conta_e_nao_por_ip(criar_usuario, gerar_token):
     usuario_a, usuario_b = criar_usuario(com_senha=False), criar_usuario(com_senha=False)
-    empresa_a = gerar_token(usuario_a.empresa_id, usuario_id=usuario_a.id)
-    empresa_b = gerar_token(usuario_b.empresa_id, usuario_id=usuario_b.id)
+    conta_a = gerar_token(usuario_a.conta_id, usuario_id=usuario_a.id)
+    conta_b = gerar_token(usuario_b.conta_id, usuario_id=usuario_b.id)
 
     # extensão inválida: 400 sem gravar nada, mas conta no limite
-    codigos_a = [_upload(empresa_a, f"198.51.100.{n}") for n in range(11)]
+    codigos_a = [_upload(conta_a, f"198.51.100.{n}") for n in range(11)]
 
     assert codigos_a[:10] == [400] * 10
     assert codigos_a[10] == 429
-    # mesmo IP da última chamada da empresa A
-    assert _upload(empresa_b, "198.51.100.10") == 400
+    # mesmo IP da última chamada da conta A
+    assert _upload(conta_b, "198.51.100.10") == 400
+
+
+def test_upload_trocar_de_empresa_nao_multiplica_o_limite(
+    criar_empresa, criar_usuario, gerar_token
+):
+    """Issue #133: o limite é da conta, não da empresa ativa."""
+    primeira = criar_empresa()
+    segunda = criar_empresa(conta_id=primeira.conta_id)
+    usuario = criar_usuario(com_senha=False, conta_id=primeira.conta_id)
+    token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
+
+    codigos = [
+        _upload(token, "198.51.100.7", primeira.id if n % 2 else segunda.id) for n in range(11)
+    ]
+
+    assert codigos[:10] == [400] * 10
+    assert codigos[10] == 429

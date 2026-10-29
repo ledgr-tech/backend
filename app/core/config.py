@@ -5,7 +5,7 @@ Ver .env.example para a lista completa de variáveis esperadas.
 
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, PositiveInt, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,8 +31,44 @@ class Settings(BaseSettings):
     # entrada e 300 de saída no Luna (US$ 0,10 e US$ 0,50 por milhão), uns
     # US$ 0,00025. 1.500 por dia durante 30 dias dá uns US$ 11, abaixo do teto
     # de US$ 15/mês do projeto na OpenAI: o limite do backend bate antes.
-    llm_limite_diario_empresa: int = 300
+    #
+    # Desde a issue #140, o limite diário é por CONTA (todas as empresas
+    # clientes dela somadas): LLM_LIMITE_DIARIO_CONTA. LLM_LIMITE_DIARIO_EMPRESA
+    # continua aceito como nome antigo da mesma variável, para a configuração
+    # antiga no Railway seguir valendo; com as duas, vale a nova. O clique e a
+    # geração automática gastam os mesmos limites.
+    llm_limite_diario_conta: int = Field(
+        default=300,
+        validation_alias=AliasChoices("llm_limite_diario_conta", "llm_limite_diario_empresa"),
+    )
     llm_limite_diario_global: int = 1500
+    # Geração automática ao conciliar (issue #140, adendo do ADR-011): só gera
+    # com LLM_HABILITADO também ligado. Desligada em produção até os textos
+    # novos de Privacidade e Termos (front #190 e #197), que hoje prometem que
+    # nada vai para a OpenAI sem a pessoa clicar.
+    explicacao_automatica_habilitada: bool = False
+    # Quantas explicações novas uma conciliação gera, as de maior valor
+    # primeiro (cache hit não conta), e quantas chamadas ao provedor rodam ao
+    # mesmo tempo. Com concorrência, o limite diário pode passar por no máximo
+    # `llm_concorrencia_automatica` explicações.
+    llm_teto_por_conciliacao: PositiveInt = 100
+    llm_concorrencia_automatica: PositiveInt = 4
+
+    # Assistente da Central de ajuda (issue #137, ADR-020): só responde com
+    # esta flag e com LLM_HABILITADO ligadas. O conteúdo é o JSON que o front
+    # publica no build (`ajuda_conteudo_url`; em produção,
+    # https://ledgrfinance.com.br/ajuda/conteudo.json), guardado em memória
+    # por 10 minutos. A Central inteira vai no contexto enquanto o texto
+    # serializado couber em `assistente_maximo_conteudo_caracteres`. Os limites
+    # diários são separados dos das explicações. Custo: uns US$ 0,001 por
+    # pergunta (a Central inteira na entrada), uns US$ 7 por mês no pior caso
+    # do limite global.
+    assistente_habilitado: bool = False
+    ajuda_conteudo_url: str = ""
+    assistente_maximo_conteudo_caracteres: PositiveInt = 60000
+    assistente_limite_diario_conta: PositiveInt = 100
+    assistente_limite_diario_global: PositiveInt = 300
+    assistente_max_tokens_saida: PositiveInt = 500
     # O que a descrição do lançamento leva ao provedor (issue #87, ADR-011):
     # "termos" (padrão) deixa só termos bancários e marcadores, o resto vira
     # [TEXTO]; "mascarada" manda a descrição com a máscara de CPF, CNPJ etc.,
@@ -86,6 +122,32 @@ class Settings(BaseSettings):
     # quem termina o teste não tem como pagar.
     plano_bloqueio_habilitado: bool = False
 
+    # Aprovação de justificativas (issue #132): ligada, toda justificativa nasce
+    # aguardando aprovação de admin ou gestor, e o mês não fecha com pendente.
+    # Falsa por padrão até o front aprovar: desligada, o backend grava a
+    # aprovação junto com a justificativa, em nome de quem justificou, e nada
+    # fica aguardando (app/api/conciliacoes.py). Ligar não muda o que já foi
+    # gravado: o que foi aprovado com ela desligada continua aprovado.
+    aprovacao_justificativas_habilitada: bool = False
+
+    # Link público do relatório do fechamento (issue #165, ADR-024). Desligada,
+    # criar link e consultar o relatório público dão 404; listar e revogar
+    # continuam, para limpar links se ela for desligada depois de ligada. Liga
+    # quando a Política de privacidade citar o compartilhamento.
+    link_publico_habilitado: bool = False
+
+    # Limites por plano (issue #133, ADR-019): quantas empresas clientes e
+    # quantos usuários (ativos mais convites pendentes) a conta pode ter.
+    # Inteiros positivos e opcionais: sem valor, não há limite. Os valores
+    # ainda não foram decididos, e até o gateway ninguém os configura. A regra
+    # mora em app/core/plano.py.
+    limite_empresas_essencial: PositiveInt | None = None
+    limite_empresas_padrao: PositiveInt | None = None
+    limite_empresas_avancado: PositiveInt | None = None
+    limite_usuarios_essencial: PositiveInt | None = None
+    limite_usuarios_padrao: PositiveInt | None = None
+    limite_usuarios_avancado: PositiveInt | None = None
+
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
     # boot com o motivo, em vez de deixar a API no ar sem log.
@@ -96,10 +158,53 @@ class Settings(BaseSettings):
     # as rotas e parâmetros da API e não serve a ninguém fora do time.
     api_docs_habilitado: bool = True
 
+    # Conexão MCP (issue #136, ADR-022): o Ledgr como servidor de autorização
+    # OAuth do ChatGPT e do Claude do cliente. Desligada, /.well-known/oauth-*,
+    # /oauth/*, /conexoes-mcp/* e /mcp respondem 404. Ligada sem
+    # `mcp_url_publica` ou `oauth_issuer`, respondem 503 (o boot não cai).
+    # `mcp_url_publica` é a URL canônica do servidor MCP, sem barra no fim (o
+    # `resource` dos tokens: trocá-la derruba as conexões); `oauth_issuer`, a
+    # base do servidor de autorização. `oauth_redirects_permitidos` são os
+    # redirect_uris que o registro aceita, separados por vírgula; vazio vale
+    # `REDIRECTS_PERMITIDOS_PADRAO` (app/services/oauth/redirects.py).
+    mcp_habilitado: bool = False
+    mcp_url_publica: str = ""
+    oauth_issuer: str = ""
+    oauth_redirects_permitidos: str = ""
+
+    # Arquivo original do extrato (issue #139, ADR-023): ligada, as contas do
+    # plano avançado guardam o arquivo de cada extrato enviado, cifrado pelo
+    # backend, no bucket próprio do R2, e o admin e o gestor baixam o original.
+    # Desligada em produção até o retorno da consultoria jurídica e o texto da
+    # Política de privacidade, que hoje diz que o arquivo não é guardado. Ligada
+    # sem as cinco variáveis abaixo (ou com a chave inválida), nada é guardado e
+    # o download responde 503; o boot não cai. `arquivo_original_chave` é a
+    # chave do AES-256-GCM, 32 bytes em base64: perdê-la é perder os arquivos.
+    arquivo_original_habilitado: bool = False
+    arquivo_original_r2_endpoint: str = ""
+    arquivo_original_r2_bucket: str = ""
+    arquivo_original_r2_access_key_id: str = ""
+    arquivo_original_r2_secret_access_key: str = ""
+    arquivo_original_chave: str = ""
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalizar_log_level(cls, valor: object) -> object:
         return (valor.strip().upper() or "INFO") if isinstance(valor, str) else valor
+
+    @field_validator(
+        "limite_empresas_essencial",
+        "limite_empresas_padrao",
+        "limite_empresas_avancado",
+        "limite_usuarios_essencial",
+        "limite_usuarios_padrao",
+        "limite_usuarios_avancado",
+        mode="before",
+    )
+    @classmethod
+    def _limite_vazio_e_sem_limite(cls, valor: object) -> object:
+        # `LIMITE_EMPRESAS_PADRAO=` no .env é o mesmo que não ter a variável.
+        return None if isinstance(valor, str) and not valor.strip() else valor
 
     @field_validator("llm_modo_descricao", mode="before")
     @classmethod

@@ -6,7 +6,7 @@ Mesmo esquema de banco descartável de tests/test_migracao_execucoes_conciliacao
 import uuid
 
 import pytest
-from conftest import alembic_cli
+from conftest import REVISAO_ANTES_DAS_CONTAS, alembic_cli
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -43,7 +43,7 @@ def test_upgrade_cria_e_downgrade_remove_tabela_e_indice(url_banco_descartavel):
 
 @pytest.fixture
 def banco_migrado(url_banco_descartavel):
-    alembic_cli(url_banco_descartavel, "upgrade", "head")
+    alembic_cli(url_banco_descartavel, "upgrade", REVISAO_ANTES_DAS_CONTAS)
     engine = create_engine(url_banco_descartavel)
     ids = {k: uuid.uuid4() for k in ("empresa", "usuario", "banco", "sistema")}
     with engine.begin() as conn:

@@ -4,12 +4,13 @@ A página `/aceitar-convite` do front lê o token do fragmento do link e chama
 as duas rotas pelo corpo, nunca pela URL. Rate limit por IP igual ao do
 `/register` (`LIMITE_CONVITE`).
 
-`POST /convites/consultar` devolve o e-mail convidado, a razão social e a
-validade, para a página mostrar quem está sendo convidado e para onde. Não
+`POST /convites/consultar` devolve o e-mail convidado, a razão social da
+conta, o papel e a validade, para a página mostrar quem está sendo convidado e para onde. Não
 consome o convite.
 
-`POST /convites/aceitar` cria o usuário (não administrador) na empresa do
-convite, com o e-mail do convite, e marca o convite como usado. Responde como
+`POST /convites/aceitar` cria o usuário na conta do convite (issue #133), com
+o e-mail e o papel do convite, e marca o convite como usado. O limite de
+usuários do plano não barra o aceite: o convite pendente já ocupava a vaga. Responde como
 o `/register` (`UsuarioResponse`), e o front faz o login em seguida. Não manda
 boas-vindas: quem convidou já avisou.
 
@@ -18,6 +19,9 @@ boas-vindas: quem convidou já avisou.
 tocar no banco (app/core/google.py), e o e-mail do Google tem de ser o do
 convite. Cria o usuário sem senha, com o `google_sub`, e responde com
 `LoginResponse`, porque já é o login.
+
+Conta inativa (issue #156, ADR-025): o aceite dá 403 `conta_inativa`, porque
+criaria um usuário na conta; a consulta segue.
 
 Token inexistente, expirado, usado ou cancelado: 400 nas três, nunca 401 (o
 frontend trata todo 401 como sessão expirada). Se o e-mail ganhou conta entre
@@ -48,13 +52,15 @@ from app.api.auth import (
     UsuarioResponse,
     nome_da_conta,
     resposta_de_login,
+    resposta_de_usuario,
     usuario_pelo_google_sub,
 )
-from app.core import senha
+from app.core import conta_inativa, senha
 from app.core.database import get_db
 from app.core.google import identidade_ou_erro_http
 from app.core.rate_limit import LIMITE_CONVITE, limiter
-from app.models import Empresa, Usuario
+from app.models import Conta, Usuario
+from app.models.usuario import PapelSemAdmin
 from app.services.convites import convite_pendente_pelo_token
 
 logger = logging.getLogger(__name__)
@@ -71,6 +77,7 @@ class ConsultaConviteRequest(BaseModel):
 class ConsultaConviteResponse(BaseModel):
     email: str
     razao_social: str
+    papel: PapelSemAdmin
     expira_em: datetime
 
 
@@ -113,9 +120,12 @@ def consultar(
     if convite is None:
         logger.info("convite_consulta resultado=token_invalido")
         raise _convite_invalido()
-    razao_social = db.scalar(select(Empresa.razao_social).where(Empresa.id == convite.empresa_id))
+    razao_social = db.scalar(select(Conta.razao_social).where(Conta.id == convite.conta_id))
     return ConsultaConviteResponse(
-        email=convite.email, razao_social=razao_social, expira_em=convite.expira_em
+        email=convite.email,
+        razao_social=razao_social,
+        papel=convite.papel,
+        expira_em=convite.expira_em,
     )
 
 
@@ -130,6 +140,9 @@ def aceitar(
     if convite is None:
         logger.info("convite_aceite resultado=token_invalido")
         raise _convite_invalido()
+    if conta_inativa.conta_esta_inativa(db, convite.conta_id):
+        logger.info("convite_aceite resultado=conta_inativa")
+        raise conta_inativa.ContaInativaError
 
     email_em_uso = HTTPException(
         status_code=http_status.HTTP_409_CONFLICT, detail="E-mail já cadastrado."
@@ -140,17 +153,15 @@ def aceitar(
 
     usuario = Usuario(
         id=uuid.uuid4(),
-        empresa_id=convite.empresa_id,
+        conta_id=convite.conta_id,
         nome=dados.nome,
         email=convite.email,
         senha_hash=senha.gerar_hash(dados.senha),
-        administrador=False,
+        papel=convite.papel,
     )
     db.add(usuario)
     convite.usado_em = func.now()
-    resposta = UsuarioResponse(
-        id=usuario.id, empresa_id=usuario.empresa_id, nome=usuario.nome, email=usuario.email
-    )
+    resposta = resposta_de_usuario(usuario)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -180,6 +191,9 @@ def aceitar_com_google(
     if convite is None:
         logger.info("convite_aceite_google resultado=token_invalido")
         raise _convite_invalido()
+    if conta_inativa.conta_esta_inativa(db, convite.conta_id):
+        logger.info("convite_aceite_google resultado=conta_inativa")
+        raise conta_inativa.ContaInativaError
     if identidade.email != convite.email:
         logger.info("convite_aceite_google resultado=email_diferente")
         raise HTTPException(
@@ -203,12 +217,12 @@ def aceitar_com_google(
 
     usuario = Usuario(
         id=uuid.uuid4(),
-        empresa_id=convite.empresa_id,
+        conta_id=convite.conta_id,
         nome=nome,
         email=convite.email,
         senha_hash=None,
         google_sub=identidade.sub,
-        administrador=False,
+        papel=convite.papel,
     )
     db.add(usuario)
     convite.usado_em = func.now()

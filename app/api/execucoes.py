@@ -2,8 +2,9 @@
 conciliação por empresa — data, contagens e percentual de acerto de cada
 rodada de `POST /conciliacoes` (app/api/conciliacoes.py), não só a última.
 
-Exige JWT (app/core/auth.py, ADR-003): sempre filtra por `empresa_id` do
-token, nunca recebe esse id por parâmetro. Query params: `limit` (1 a 100,
+Exige JWT (app/core/auth.py, ADR-003): sempre filtra pela empresa ativa
+(cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a issue
+#133), nunca recebe esse id por parâmetro. Query params: `limit` (1 a 100,
 default 20), `offset` (>= 0) e `extrato_banco_id` (opcional, issue #82).
 Ordem: `criado_em` desc, `id` desc (mais recente primeiro, desempate
 estável pra paginar). Empresa sem nenhuma execução devolve 200 com lista
@@ -50,7 +51,11 @@ de cada par, então não há como saber o que estava justificado naquela época.
 Fica FORA de `total`, que continua a soma das sete categorias (não é coluna,
 o CHECK da tabela não muda). Custo: duas consultas a mais por página, não
 por item — as linhas divergentes dos pares atuais da página e os eventos dos
-extratos do banco envolvidos (`contar_justificadas`).
+extratos do banco envolvidos (`contar_justificativas`).
+
+Desde a issue #132, `justificadas` conta só as justificativas APROVADAS, e
+`contagens.aguardando_aprovacao` conta as que aguardam aprovação, com a mesma
+regra (0 nas execuções com `atual: false`). Também fica fora de `total`.
 
 Nunca loga descrição, valor nem nome de arquivo (mesma regra de
 app/services/matching.py).
@@ -67,10 +72,11 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.core.auth import obter_empresa_id_autenticada
+from app.core.auth import obter_empresa_id_ativa
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
-from app.services.decisoes import contar_justificadas
+from app.models.extrato import STATUS_RASCUNHO
+from app.services.decisoes import contar_justificativas
 from app.services.execucoes import calcular_percentual_acerto
 
 router = APIRouter(prefix="/execucoes", tags=["execucoes"])
@@ -97,6 +103,18 @@ class ContagensResponse(BaseModel):
     divergente_valor: int
     divergente_data: int
     justificadas: int
+    aguardando_aprovacao: int
+
+
+def _contagem_de_justificativas(justificativas: dict, linha) -> dict[str, int]:
+    """Aprovadas e aguardando aprovação do par, só na execução atual."""
+    contagem = justificativas.get((linha.extrato_banco_id, linha.extrato_sistema_id))
+    if linha.rn != 1 or contagem is None:
+        return {"justificadas": 0, "aguardando_aprovacao": 0}
+    return {
+        "justificadas": contagem.aprovadas,
+        "aguardando_aprovacao": contagem.aguardando_aprovacao,
+    }
 
 
 class ItemExecucaoResponse(BaseModel):
@@ -130,7 +148,7 @@ def _extrato_nao_encontrado() -> HTTPException:
 
 @router.get("", response_model=ExecucaoListaResponse)
 def listar_execucoes(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -138,7 +156,7 @@ def listar_execucoes(
 ) -> ExecucaoListaResponse:
     if extrato_banco_id is not None:
         extrato = db.get(Extrato, extrato_banco_id)
-        if extrato is None or extrato.empresa_id != empresa_id:
+        if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
             raise _extrato_nao_encontrado()
 
     extrato_banco = aliased(Extrato)
@@ -190,7 +208,7 @@ def listar_execucoes(
     )
     linhas = db.execute(consulta).all()
     total = db.scalar(select(func.count()).select_from(ExecucaoConciliacao).where(*filtros))
-    justificadas = contar_justificadas(
+    justificativas = contar_justificativas(
         db,
         empresa_id,
         {(linha.extrato_banco_id, linha.extrato_sistema_id) for linha in linhas if linha.rn == 1},
@@ -207,11 +225,7 @@ def listar_execucoes(
             tolerancia_dias=linha.tolerancia_dias,
             contagens=ContagensResponse(
                 **{categoria: getattr(linha, categoria) for categoria in CATEGORIAS_CONTAGEM},
-                justificadas=(
-                    justificadas.get((linha.extrato_banco_id, linha.extrato_sistema_id), 0)
-                    if linha.rn == 1
-                    else 0
-                ),
+                **_contagem_de_justificativas(justificativas, linha),
             ),
             percentual_acerto=calcular_percentual_acerto(
                 linha.match_exato, linha.match_tolerancia, linha.total

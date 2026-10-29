@@ -302,6 +302,7 @@ def test_token_de_outra_finalidade_nao_redefine(db_session, criar_usuario):
             finalidade="troca_email",
             token_hash=_hash(token),
             expira_em=db_session.scalar(text("SELECT now() + interval '30 minutes'")),
+            email_novo="novo@teste.com",  # obrigatório na troca de e-mail (issue #149)
         )
     )
     db_session.commit()

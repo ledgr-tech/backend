@@ -17,8 +17,11 @@ from app.services.ia.base import (
     CandidatoContexto,
     ContextoDivergencia,
     LancamentoContexto,
+    MensagemHistorico,
+    PerguntaAjuda,
     ProvedorDeIA,
     ProvedorIAIndisponivel,
+    RespostaAjuda,
     RespostaIA,
 )
 from app.services.ia.openai_provider import ProvedorOpenAI
@@ -30,9 +33,12 @@ __all__ = [
     "CandidatoContexto",
     "ContextoDivergencia",
     "LancamentoContexto",
+    "MensagemHistorico",
+    "PerguntaAjuda",
     "ProvedorDeIA",
     "ProvedorIAIndisponivel",
     "ProvedorOpenAI",
+    "RespostaAjuda",
     "RespostaIA",
     "obter_provedor",
 ]
@@ -60,4 +66,5 @@ def obter_provedor(settings: "Settings | None" = None) -> ProvedorDeIA | None:
         timeout_segundos=config.llm_timeout_segundos,
         max_tokens_saida=config.llm_max_tokens_saida,
         modo_descricao=config.llm_modo_descricao,
+        max_tokens_ajuda=config.assistente_max_tokens_saida,
     )

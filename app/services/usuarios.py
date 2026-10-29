@@ -10,7 +10,12 @@ usuário removido:
   é endereço de entrega, e o e-mail original fica livre para outro cadastro
   ou para um convite novo (que cria outro usuário: não há reativação);
 - tem os links pendentes de `tokens_email` invalidados;
-- tem as sessões encerradas (issue #75).
+- tem as sessões encerradas (issue #75);
+- perde as conexões MCP que criou (issue #136): o ChatGPT ou o Claude que ela
+  conectou para de ler na hora;
+- perde as empresas favoritas (issue #157). O `ON DELETE CASCADE` de
+  `empresas_favoritas` só age quando a linha do usuário sai (o script de
+  exclusão), e a remoção não apaga a linha.
 
 Toda rota autenticada recusa o removido com 401, já no token que ele tinha
 (app/core/auth.py), e o `/login` responde como senha errada.
@@ -18,12 +23,13 @@ Toda rota autenticada recusa o removido com 401, já no token que ele tinha
 A mesma função serve para o próprio usuário desativar a conta (issue #68).
 """
 
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlalchemy.orm import Session
 
 from app.core.auth import encerrar_sessoes
-from app.models import TokenEmail, Usuario
+from app.models import EmpresaFavorita, TokenEmail, Usuario
 from app.models.usuario import DOMINIO_EMAIL_REMOVIDO
+from app.services.conexoes_mcp import revogar_conexoes_do_criador
 
 
 def email_de_removido(usuario: Usuario) -> str:
@@ -33,7 +39,7 @@ def email_de_removido(usuario: Usuario) -> str:
 def remover_usuario(db: Session, usuario: Usuario) -> None:
     """Aplica a remoção na sessão, sem commit: quem chama decide a transação
     (e deve ter carregado o usuário com `FOR UPDATE`). Não confere permissão
-    nem se é o administrador; isso é regra de quem chama."""
+    nem se é o admin da conta; isso é regra de quem chama."""
     usuario.removido_em = func.now()
     usuario.email = email_de_removido(usuario)
     usuario.senha_hash = None
@@ -44,3 +50,5 @@ def remover_usuario(db: Session, usuario: Usuario) -> None:
         .where(TokenEmail.usuario_id == usuario.id, TokenEmail.usado_em.is_(None))
         .values(usado_em=func.now())
     )
+    revogar_conexoes_do_criador(db, usuario.id)
+    db.execute(delete(EmpresaFavorita).where(EmpresaFavorita.usuario_id == usuario.id))

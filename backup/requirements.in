@@ -1,0 +1,12 @@
+# Dependências da imagem do serviço de backup (issue #103, ADR-018), separadas
+# do requirements.txt da API: a imagem não instala a API. O requirements.txt ao
+# lado é gerado por pip-compile em Python 3.13; não edite o .txt à mão.
+#
+# A linha -c prende o httpx e o boto3 (que a API também usa desde a issue #139)
+# na versão da API. Depois de mudar o requirements.txt da API, gere este de novo.
+#
+#   cd backup && pip-compile --strip-extras requirements.in
+-c ../requirements.txt
+
+boto3
+httpx

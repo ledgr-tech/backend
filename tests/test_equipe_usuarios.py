@@ -1,6 +1,7 @@
 """Testes de `GET` e `DELETE /empresa/usuarios` (issue #69, ADR-015) e do
 usuário removido: sem login, 401 nas rotas que carregam o usuário, histórico
-preservado e e-mail liberado.
+preservado e e-mail liberado. Desde a issue #133, usuários são da conta, cada
+um com o `papel`, e só o admin remove.
 """
 
 import hashlib
@@ -8,11 +9,11 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from conftest import SENHA_USUARIO_TESTE
+from conftest import SENHA_USUARIO_TESTE, apagar_contas_por_cnpj, empresa_unica
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.models import Configuracao, DecisaoLinha, Empresa, Fechamento, TokenEmail, Usuario
+from app.models import DecisaoLinha, Fechamento, TokenEmail, Usuario
 from app.services.usuarios import email_de_removido
 from main import app
 
@@ -24,7 +25,7 @@ USUARIO_NAO_ENCONTRADO = {"detail": "Usuário não encontrado."}
 @pytest.fixture
 def cabecalho_de(gerar_token):
     def _cabecalho(usuario) -> dict[str, str]:
-        token = gerar_token(usuario.empresa_id, usuario_id=usuario.id)
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id)
         return {"Authorization": f"Bearer {token}"}
 
     return _cabecalho
@@ -32,9 +33,9 @@ def cabecalho_de(gerar_token):
 
 @pytest.fixture
 def equipe(db_session, criar_usuario):
-    """Administrador e um convidado na mesma empresa."""
+    """Admin e um convidado (gestor) na mesma conta."""
     admin = criar_usuario(nome="Ana Administradora")
-    convidado = criar_usuario(empresa_id=admin.empresa_id, nome="Bruno Convidado")
+    convidado = criar_usuario(conta_id=admin.conta_id, nome="Bruno Convidado")
     return admin, convidado
 
 
@@ -50,22 +51,26 @@ def _recarregar(db_session, usuario: Usuario) -> Usuario:
 # --- listagem ------------------------------------------------------------------
 
 
-def test_qualquer_usuario_lista_os_ativos_da_propria_empresa(
+def test_qualquer_usuario_lista_os_ativos_da_propria_conta(
     db_session, equipe, criar_usuario, cabecalho_de
 ):
     admin, convidado = equipe
-    criar_usuario()  # outra empresa
+    analista = criar_usuario(conta_id=admin.conta_id, nome="Carla Analista", papel="analista")
+    criar_usuario()  # outra conta
 
-    for quem in (admin, convidado):
+    for quem in (admin, convidado, analista):
         response = client.get("/empresa/usuarios", headers=cabecalho_de(quem))
 
         assert response.status_code == 200
         itens = response.json()["itens"]
-        assert [(u["id"], u["nome"], u["email"], u["administrador"]) for u in itens] == [
-            (str(admin.id), admin.nome, admin.email, True),
-            (str(convidado.id), convidado.nome, convidado.email, False),
+        assert [
+            (u["id"], u["nome"], u["email"], u["papel"], u["administrador"]) for u in itens
+        ] == [
+            (str(admin.id), admin.nome, admin.email, "admin", True),
+            (str(convidado.id), convidado.nome, convidado.email, "gestor", False),
+            (str(analista.id), analista.nome, analista.email, "analista", False),
         ]
-        assert set(itens[0]) == {"id", "nome", "email", "administrador", "criado_em"}
+        assert set(itens[0]) == {"id", "nome", "email", "papel", "administrador", "criado_em"}
         assert itens[0]["criado_em"].endswith(("Z", "+00:00"))
 
 
@@ -97,7 +102,7 @@ def test_remover_marca_o_usuario_e_libera_o_email(db_session, equipe, cabecalho_
 
 def test_remover_conta_do_google(db_session, criar_usuario, cabecalho_de):
     admin = criar_usuario()
-    do_google = criar_usuario(com_senha=False, empresa_id=admin.empresa_id)
+    do_google = criar_usuario(com_senha=False, conta_id=admin.conta_id)
 
     assert _remover(cabecalho_de(admin), do_google.id).status_code == 204
     assert _recarregar(db_session, do_google).google_sub is None
@@ -107,10 +112,11 @@ def test_remocao_mantem_decisoes_e_fechamentos_do_usuario(
     db_session, equipe, cabecalho_de, criar_extrato_da_empresa
 ):
     admin, convidado = equipe
-    banco = criar_extrato_da_empresa(admin.empresa_id, "banco")
-    sistema = criar_extrato_da_empresa(admin.empresa_id, "sistema")
+    empresa_id = empresa_unica(db_session, admin.conta_id)
+    banco = criar_extrato_da_empresa(empresa_id, "banco")
+    sistema = criar_extrato_da_empresa(empresa_id, "sistema")
     decisao = DecisaoLinha(
-        empresa_id=admin.empresa_id,
+        empresa_id=empresa_id,
         extrato_banco_id=banco.id,
         chave="c" * 64,
         tipo="conferida",
@@ -120,7 +126,7 @@ def test_remocao_mantem_decisoes_e_fechamentos_do_usuario(
         extrato_sistema_id=sistema.id,
     )
     fechamento = Fechamento(
-        empresa_id=admin.empresa_id,
+        empresa_id=empresa_id,
         competencia="2026-09",
         resumo={},
         fechado_por_id=convidado.id,
@@ -163,29 +169,32 @@ def test_administrador_nao_pode_ser_removido(db_session, equipe, cabecalho_de):
     response = _remover(cabecalho_de(admin), admin.id)
 
     assert response.status_code == 409
-    assert response.json() == {"detail": "O administrador da empresa não pode ser removido."}
+    assert response.json() == {"detail": "O admin da conta não pode ser removido."}
     assert _recarregar(db_session, admin).removido_em is None
 
 
-def test_quem_nao_e_administrador_recebe_403_ao_remover(
-    db_session, equipe, criar_usuario, cabecalho_de
+@pytest.mark.parametrize("papel", ["gestor", "analista"])
+def test_quem_nao_e_admin_recebe_403_ao_remover(
+    db_session, equipe, criar_usuario, cabecalho_de, papel
 ):
     admin, convidado = equipe
-    outro = criar_usuario(empresa_id=admin.empresa_id)
+    quem = criar_usuario(conta_id=admin.conta_id, papel=papel)
+    outro = criar_usuario(conta_id=admin.conta_id, papel="analista")
 
     for alvo in (outro, admin, convidado):
-        response = _remover(cabecalho_de(convidado), alvo.id)
+        response = _remover(cabecalho_de(quem), alvo.id)
         assert response.status_code == 403
+        assert response.json() == {"detail": "Só o admin da conta pode fazer isso."}
 
     assert _recarregar(db_session, outro).removido_em is None
 
 
-def test_remover_usuario_de_outra_empresa_e_404_como_inexistente(
+def test_remover_usuario_de_outra_conta_e_404_como_inexistente(
     db_session, equipe, criar_usuario, cabecalho_de
 ):
     admin, _ = equipe
     admin_b = criar_usuario()
-    convidado_b = criar_usuario(empresa_id=admin_b.empresa_id)
+    convidado_b = criar_usuario(conta_id=admin_b.conta_id)
 
     de_outra = _remover(cabecalho_de(admin), convidado_b.id)
     inexistente = _remover(cabecalho_de(admin), uuid.uuid4())
@@ -222,8 +231,8 @@ def test_removido_nao_entra_e_recebe_a_resposta_de_senha_errada(db_session, equi
 
 def test_removido_recebe_401_nas_rotas_que_carregam_o_usuario(db_session, equipe, cabecalho_de):
     admin, convidado = equipe
-    # O JWT já emitido continua assinado. As rotas que só leem o `empresa_id`
-    # também recusam o removido desde a #75 (tests/test_revogacao_sessao.py).
+    # O JWT já emitido continua assinado. As rotas por empresa também recusam
+    # o removido desde a #75 (tests/test_revogacao_sessao.py).
     cabecalho = cabecalho_de(convidado)
     assert client.get("/me", headers=cabecalho).status_code == 200
 
@@ -241,21 +250,15 @@ def test_removido_recebe_401_nas_rotas_que_carregam_o_usuario(db_session, equipe
 
 @pytest.fixture
 def limpar_cadastro(db_session):
-    """Apaga a empresa e o usuário que um `/register` do teste criou."""
+    """Apaga a conta, a empresa e o usuário que um `/register` do teste criou."""
     cnpjs: list[str] = []
     yield cnpjs.append
     db_session.rollback()
-    for cnpj in cnpjs:
-        empresa_id = db_session.scalar(select(Empresa.id).where(Empresa.cnpj == cnpj))
-        if empresa_id is None:
-            continue
-        db_session.query(Usuario).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(Configuracao).filter_by(empresa_id=empresa_id).delete()
-        db_session.query(Empresa).filter_by(id=empresa_id).delete()
+    apagar_contas_por_cnpj(db_session, cnpjs)
     db_session.commit()
 
 
-def test_email_do_removido_pode_criar_outra_empresa(
+def test_email_do_removido_pode_criar_outra_conta(
     db_session, equipe, cabecalho_de, gerar_cnpj, limpar_cadastro
 ):
     admin, convidado = equipe

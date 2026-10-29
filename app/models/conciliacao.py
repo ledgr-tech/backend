@@ -35,6 +35,15 @@ class Conciliacao(Base, TimestampMixin):
     valor do outro lado, data não bate) e `sem_correspondencia` (nenhum dos
     anteriores). Ver docstring de app/services/matching.py.
 
+    `explicacao_chave` (issue #140, ADR-011) é a chave, em
+    `explicacoes_divergencia`, da explicação da IA desta linha: preenchida
+    pela geração automática ao conciliar e pelo `POST /explicacoes` quando ele
+    gera ou acha no cache um texto do modelo. Nula enquanto não há texto. É
+    por ela que `GET /conciliacoes/{id}` devolve a explicação, num join com o
+    cache pela empresa da linha. Como as linhas do par são recriadas a cada
+    rodada (ADR-007), a ligação some junto e a geração da rodada nova a refaz
+    (o texto continua no cache, e o mesmo contexto não é pago de novo).
+
     Sem UniqueConstraint de propósito: a idempotência de reexecutar a
     conciliação do mesmo par de extratos é responsabilidade do motor (#16).
     """
@@ -79,3 +88,4 @@ class Conciliacao(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String, nullable=False)
     regra_aplicada: Mapped[str | None] = mapped_column(String, nullable=True)
     score_confianca: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    explicacao_chave: Mapped[str | None] = mapped_column(String(64), nullable=True)

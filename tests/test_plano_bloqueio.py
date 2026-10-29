@@ -11,6 +11,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
+from conftest import empresa_unica
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from test_plano import SITUACOES, _definir_situacao
@@ -26,11 +27,11 @@ client = TestClient(app)
 def conta(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancamentos, gerar_token):
     """Administrador com uma empresa, e fábricas de extrato e de conciliação."""
     administrador = criar_usuario()
-    token = gerar_token(administrador.empresa_id, usuario_id=administrador.id)
+    token = gerar_token(administrador.conta_id, usuario_id=administrador.id)
     headers = {"Authorization": f"Bearer {token}"}
 
     def extrato(origem, itens=(("10.00", "a"), ("20.00", "b"))):
-        novo = criar_extrato_da_empresa(administrador.empresa_id, origem)
+        novo = criar_extrato_da_empresa(empresa_unica(db_session, administrador.conta_id), origem)
         inserir_lancamentos(novo, list(itens))
         return novo
 
@@ -42,10 +43,10 @@ def conta(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancament
         )
 
     def situacao(nome):
-        _definir_situacao(db_session, administrador.empresa_id, nome)
+        _definir_situacao(db_session, administrador.conta_id, nome)
 
     return SimpleNamespace(
-        empresa_id=administrador.empresa_id,
+        empresa_id=empresa_unica(db_session, administrador.conta_id),
         headers=headers,
         extrato=extrato,
         conciliar=conciliar,

@@ -51,7 +51,13 @@ MODO_MASCARADA: ModoDescricao = "mascarada"
 
 _TAMANHO_MAXIMO = 120
 
-_PADRAO_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Repetições limitadas aos tamanhos máximos do RFC (parte local 64, domínio
+# 255, rótulo 63): com `+`, uma sequência longa sem `@` (a pergunta do
+# assistente, que vem do usuário) era varrida até o fim a partir de cada
+# posição, em tempo quadrático (CodeQL py/polynomial-redos). Limitado, o custo
+# é linear. Parte local maior que 64 tem só os últimos 64 caracteres
+# mascarados.
+_PADRAO_EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,63}")
 
 _PADRAO_CNPJ_PONTUADO = re.compile(r"(?<!\d)\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}(?!\d)")
 _PADRAO_CNPJ_CRU = re.compile(r"(?<!\d)\d{14}(?!\d)")
@@ -88,14 +94,21 @@ def mascarar_descricao(texto: str) -> str:
     """Mascara e-mail, CNPJ, CPF, telefone e sequências longas de dígitos
     (nesta ordem, ver docstring do módulo) e trunca o resultado em 120
     caracteres. Determinística e idempotente; texto vazio devolve vazio."""
+    return mascarar_texto(texto)[:_TAMANHO_MAXIMO]
+
+
+def mascarar_texto(texto: str) -> str:
+    """A mesma máscara de `mascarar_descricao`, sem truncar: a pergunta e o
+    histórico do assistente da Central de ajuda (issue #137), que podem ter
+    até 1.000 caracteres. É o modo "mascarada": o filtro de termos apagaria
+    a pergunta."""
     mascarado = _PADRAO_EMAIL.sub("[EMAIL]", texto)
     mascarado = _PADRAO_CNPJ_PONTUADO.sub("[CNPJ]", mascarado)
     mascarado = _PADRAO_CNPJ_CRU.sub("[CNPJ]", mascarado)
     mascarado = _PADRAO_CPF_PONTUADO.sub("[CPF]", mascarado)
     mascarado = _PADRAO_CPF_CRU.sub("[CPF]", mascarado)
     mascarado = _PADRAO_TELEFONE.sub("[TELEFONE]", mascarado)
-    mascarado = _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, mascarado)
-    return mascarado[:_TAMANHO_MAXIMO]
+    return _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, mascarado)
 
 
 # Termos bancários e de operação que podem chegar ao provedor no modo

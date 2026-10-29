@@ -443,6 +443,7 @@ def test_get_extrato_sem_conciliacao_devolve_lista_vazia(
         "saldo_final": None,
         "saldo_data": None,
         "total": 0,
+        "aguardando_aprovacao": 0,
         "limit": 100,
         "offset": 0,
         "itens": [],
@@ -597,9 +598,12 @@ def test_get_emite_poucos_selects_e_nao_cresce_com_o_tamanho_da_pagina(
 
     pequena, cheia = selects_da_chamada(5), selects_da_chamada(30)
 
-    # usuário do token (issue #75, uma busca por chave primária), validação do
-    # extrato, query dos itens (com join) e contagem: sem N+1
-    assert pequena <= 5 and cheia <= 5
+    # usuário do token (issue #75, uma busca por chave primária), empresa ativa
+    # (issue #133, outra busca por chave primária), validação do extrato, query
+    # dos itens (com join) e contagem; e, desde a issue #132, a rodada atual,
+    # as linhas divergentes dela e os eventos, para `aguardando_aprovacao`:
+    # sem N+1
+    assert pequena <= 9 and cheia <= 9
     assert pequena == cheia
 
 

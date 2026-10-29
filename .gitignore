@@ -14,3 +14,7 @@ tests/fixtures/gerados/
 # (scripts/ensaio_restore.py) roda sobre um arquivo gerado à mão e guardado
 # fora do repositório. Dump nunca entra no git.
 *.dump
+
+# Backup baixado do R2 para o ensaio (issue #103): criptografado ou não, é
+# cópia do banco de produção e nunca entra no git.
+*.dump.age

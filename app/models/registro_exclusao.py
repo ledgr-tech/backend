@@ -9,14 +9,19 @@ from app.models.base import Base
 
 
 class RegistroExclusao(Base):
-    """Registro de cada exclusão dos dados de uma empresa (issue #68, ADR-017),
+    """Registro de cada exclusão dos dados de uma conta (issue #68, ADR-017),
     gravado por scripts/excluir_empresa.py na mesma transação da exclusão.
 
     É a prova de que o pedido foi atendido, sem guardar nada do que foi
     apagado: nem razão social, nem nome, nem e-mail. `empresa_id` fica sem FK,
-    porque a empresa deixou de existir. `cnpj_sha256` é o sha256 hex dos 14
-    dígitos, para responder depois "a empresa deste CNPJ foi excluída?" sem
-    guardar o CNPJ. `contagens` é o número de linhas apagadas por tabela.
+    porque o tenant deixou de existir. Desde a issue #133 (ADR-019), o script
+    exclui a conta inteira, e `empresa_id` guarda o id da CONTA (o nome da
+    coluna ficou; nas exclusões anteriores, o id da empresa é o mesmo da conta
+    que a migração criou dela). `cnpj_sha256` é o sha256 hex do CNPJ da conta,
+    para responder depois "a conta deste CNPJ foi excluída?" sem guardar o
+    CNPJ. `contagens` é o número de linhas apagadas por tabela, inclusive
+    `empresas` e `contas`, e, quando o R2 estava configurado, o de arquivos
+    originais apagados no bucket, em `arquivos_originais_r2` (issue #139).
     `executado_por` é o texto digitado por quem rodou o script.
 
     Sem `TimestampMixin`: a linha nunca é alterada, e `executado_em` é o único

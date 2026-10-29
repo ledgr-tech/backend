@@ -2,8 +2,10 @@
 
 `GET /empresa/configuracoes` lê e `PUT /empresa/configuracoes` altera a
 tolerância de data que o motor de matching aplica (ADR-008). Sempre pela
-empresa do token, nunca por parâmetro. Conta única no MVP: não há papéis nem
-403, qualquer usuário da empresa altera (decisão de 05/10).
+empresa ativa (cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token
+desde a issue #133), nunca por parâmetro: a configuração continua 1:1 por
+empresa cliente. Sem 403: qualquer usuário da conta altera, qualquer que seja
+o papel (decisão de 05/10, mantida no ADR-019).
 
 Só a tolerância em DIAS é exposta (decisão de 05/10): tolerância de valor e
 semelhança mínima contrariam a ADR-006 e a ADR-008, e
@@ -37,9 +39,9 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_empresa_id_autenticada, obter_usuario_autenticado
+from app.core.auth import EmpresaAtiva, obter_empresa_ativa, obter_empresa_id_ativa
 from app.core.database import get_db
-from app.models import Configuracao, Usuario
+from app.models import Configuracao
 
 router = APIRouter(prefix="/empresa", tags=["empresa"])
 
@@ -86,7 +88,7 @@ def _configuracao_da_empresa(db: Session, empresa_id: uuid.UUID) -> Configuracao
 
 @router.get("/configuracoes", response_model=ConfiguracoesResponse)
 def obter_configuracoes(
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_autenticada)],
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ConfiguracoesResponse:
     return _resposta(_configuracao_da_empresa(db, empresa_id))
@@ -95,10 +97,10 @@ def obter_configuracoes(
 @router.put("/configuracoes", response_model=ConfiguracoesResponse)
 def alterar_configuracoes(
     corpo: ConfiguracoesRequest,
-    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ConfiguracoesResponse:
-    empresa_id = usuario.empresa_id
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     alteracao = {
         "tolerancia_dias_default": corpo.tolerancia_dias,
         "atualizado_por_id": usuario.id,

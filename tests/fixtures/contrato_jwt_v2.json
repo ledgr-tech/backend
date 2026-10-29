@@ -1,0 +1,23 @@
+{
+  "versao": 2,
+  "descricao": "Vetor do contrato JWT entre frontend (NextAuth, lib/token.ts) e backend (app/core/auth.py). Issue #71, ADR-005. Versão 2: claim auth_time (issue #75).",
+  "gerado_com": "cópia de leitura do assinarToken de lib/token.ts do frontend (develop 4ce98e0), com auth_time acrescentado como descrito na nota de integração da #75 e o relógio fixo em instante_utc. Ainda não veio do código do front: o teste do front confirma quando a mudança entrar lá",
+  "segredo": "segredo-somente-para-o-vetor-de-contrato-jwt",
+  "instante_utc": "2026-10-07T12:00:00Z",
+  "claims_entrada": {
+    "usuarioId": "11111111-1111-4111-8111-111111111111",
+    "empresaId": "22222222-2222-4222-8222-222222222222",
+    "email": "contrato@ledgr.test",
+    "authTime": 1791374400
+  },
+  "token": "eyJhbGciOiJIUzI1NiJ9.eyJlbXByZXNhX2lkIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiZW1haWwiOiJjb250cmF0b0BsZWRnci50ZXN0IiwiYXV0aF90aW1lIjoxNzkxMzc0NDAwLCJzdWIiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpYXQiOjE3OTEzNzQ0MDAsImV4cCI6MTc5MTk3OTIwMH0.__wc1P2QDa7nlleTajL_fiTvBE2lhr5TFWatdutWreM",
+  "header": { "alg": "HS256" },
+  "payload": {
+    "empresa_id": "22222222-2222-4222-8222-222222222222",
+    "email": "contrato@ledgr.test",
+    "auth_time": 1791374400,
+    "sub": "11111111-1111-4111-8111-111111111111",
+    "iat": 1791374400,
+    "exp": 1791979200
+  }
+}

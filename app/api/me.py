@@ -1,12 +1,42 @@
 """Rotas da própria conta de quem está logado (issue #66, ADR-012).
 
-`GET /me` devolve os dados da conta pro cabeçalho do front (issue #81): nome
-da empresa, CNPJ e os métodos de login. Desde a issue #69, também
-`administrador`: sem papéis (ADR-015), só quem cadastrou a empresa é
-administrador, e é ele quem convida e remove usuários. Desde a issue #122,
-também `plano`, `teste_termina_em` (em UTC) e `situacao` da empresa, para
-todos os usuários dela, convidados inclusive: a mesma conta do
-`POST /empresa/plano` (app/api/plano.py) e do bloqueio do `POST /conciliacoes`.
+`GET /me` devolve os dados da conta pro cabeçalho do front (issue #81) e os
+métodos de login. Desde a issue #133 (ADR-019), a conta é o tenant: vêm
+`conta_id`, o `papel` do usuário ('admin', 'gestor' ou 'analista'), a razão
+social e o CNPJ da conta, e `empresas`, as empresas clientes da conta (id,
+razão social e CNPJ), ordenadas pela razão social, para o seletor da empresa
+ativa. Ignora o cabeçalho `X-Ledgr-Empresa`. `plano`, `teste_termina_em` (em
+UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
+mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
+`POST /conciliacoes`.
+
+`preferencias` (issue #147) traz o que a pessoa dispensou no primeiro uso:
+`tutoriais_dispensados` (telas de `TELAS_DO_TUTORIAL`) e
+`roteiro_dispensado`. São do usuário, não da empresa nem da conta, e vêm de
+colunas da própria linha dele, sem consulta a mais. Usuário novo vem com a
+lista vazia e `false`.
+
+`PATCH /me/preferencias` muda essas preferências, para todos os papéis e
+sem olhar a empresa ativa. Os dois campos são opcionais: o que vier
+substitui o valor guardado, o que não vier fica como está, e o corpo vazio
+devolve o estado atual sem mudar nada. Tela fora da lista, `null` ou lista
+com mais itens do que o total de telas dá 422 no formato do FastAPI; os
+repetidos saem, na ordem da primeira ocorrência. A resposta é o estado
+guardado depois da mudança. Rate limit por usuário, como as outras rotas.
+
+`limites` (issue #133) traz, para empresas e usuários, quanto a conta usa e o
+máximo do plano (`null` sem limite), com a mesma conta do 402 do
+`POST /empresas` e do `POST /empresa/convites`: usuários são os ativos mais os
+convites pendentes. O front mostra os avisos de limite com isso.
+
+`guarda_arquivo_original` (issue #139, ADR-023) diz se o upload desta conta
+guarda o arquivo original agora: flag `ARQUIVO_ORIGINAL_HABILITADO` ligada, R2
+e chave configurados e conta no plano avançado. O front avisa no upload com
+isso. É a mesma regra do upload (app/services/arquivo_original.py).
+
+Obsoletos, mantidos até o front migrar: `empresa_id`, igual a `conta_id` (o
+valor que o front grava no token, que o backend lê como id da conta), e
+`administrador`, igual a `papel == "admin"` (issue #69, ADR-015).
 
 `POST /me/senha` troca a senha na hora, com a senha atual e a nova (mesma
 regra do cadastro). As regras vêm da issue:
@@ -38,8 +68,10 @@ exclusão dos dados da empresa não tem rota: é processo interno, a pedido
   recente, com `auth_time` de no máximo `LOGIN_RECENTE_SEGUNDOS` atrás
   (app/core/auth.py, mesmo relógio da #75). Senão, 409: o front pede o
   Google de novo e repete.
-- Administrador com outro usuário ativo na empresa: 409. Sozinho, pode
-  desativar; a empresa fica sem acesso, e os dados só saem pelo script.
+- Admin com outro usuário ativo na conta: 409, sugerindo a transferência do
+  papel (`POST /empresa/admin/transferencia`, issue #133), que é o caminho
+  para o admin sair com a equipe ficando. Sozinho, pode desativar; a conta
+  fica sem acesso, e os dados só saem pelo script.
 - Rate limit por usuário, como a troca de senha.
 
 A desativação é `remover_usuario` (app/services/usuarios.py): a linha fica
@@ -57,7 +89,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -73,24 +105,33 @@ from app.core.auth import (
     obter_usuario_autenticado,
 )
 from app.core.database import get_db
-from app.core.plano import Situacao
+from app.core.plano import Situacao, limite_da_conta
 from app.core.rate_limit import (
     LIMITE_CONSULTA_ME_POR_USUARIO,
     LIMITE_DESATIVACAO_CONTA_POR_USUARIO,
+    LIMITE_PREFERENCIAS_POR_USUARIO,
     LIMITE_TROCA_SENHA_POR_USUARIO,
     chave_por_usuario,
     limiter,
 )
-from app.models import Convite, Usuario
+from app.models import Convite, Empresa, Usuario
+from app.models.usuario import TELAS_DO_TUTORIAL, Papel, TelaDoTutorial
+from app.services.arquivo_original import (
+    ArquivoOriginal,
+    conta_guarda_o_original,
+    obter_arquivo_original,
+)
 from app.services.convites import condicoes_pendente
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
 from app.services.email.mensagens import mensagem_conta_desativada
+from app.services.plano import empresas_usadas, usuarios_usados
 from app.services.usuarios import remover_usuario
 
 __all__ = [
     "LIMITE_CONSULTA_ME_POR_USUARIO",
     "LIMITE_DESATIVACAO_CONTA_POR_USUARIO",
+    "LIMITE_PREFERENCIAS_POR_USUARIO",
     "LIMITE_TROCA_SENHA_POR_USUARIO",
     "router",
 ]
@@ -99,19 +140,69 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/me", tags=["conta"])
 
+# A confirmação da desativação. A senha incorreta é a mesma resposta na
+# transferência do admin (app/api/equipe.py).
+SENHA_INCORRETA = "Senha atual incorreta."
+CONFIRMAR_COM_O_GOOGLE = "Entre de novo com o Google para confirmar a desativação."
+
+
+class EmpresaDaConta(BaseModel):
+    id: uuid.UUID
+    razao_social: str
+    cnpj: str
+
+
+class LimiteEmpresas(BaseModel):
+    usadas: int
+    maximo: int | None
+
+
+class LimiteUsuarios(BaseModel):
+    usados: int
+    maximo: int | None
+
+
+class Limites(BaseModel):
+    empresas: LimiteEmpresas
+    usuarios: LimiteUsuarios
+
+
+class Preferencias(BaseModel):
+    tutoriais_dispensados: list[TelaDoTutorial]
+    roteiro_dispensado: bool
+
+
+def _preferencias(usuario: Usuario) -> Preferencias:
+    return Preferencias(
+        tutoriais_dispensados=usuario.tutoriais_dispensados,
+        roteiro_dispensado=usuario.roteiro_dispensado,
+    )
+
 
 class MeResponse(BaseModel):
     id: uuid.UUID
-    empresa_id: uuid.UUID
+    conta_id: uuid.UUID
+    empresa_id: uuid.UUID = Field(
+        description="Obsoleto: igual a `conta_id` (issue #133). Use `conta_id`.",
+        json_schema_extra={"deprecated": True},
+    )
     nome: str
     email: str
+    papel: Papel
+    administrador: bool = Field(
+        description='Obsoleto: igual a `papel == "admin"` (issue #133). Use `papel`.',
+        json_schema_extra={"deprecated": True},
+    )
     razao_social: str
     cnpj: str
-    administrador: bool
+    empresas: list[EmpresaDaConta]
     metodos_login: list[str]
     plano: str | None
     teste_termina_em: datetime | None
     situacao: Situacao
+    limites: Limites
+    preferencias: Preferencias
+    guarda_arquivo_original: bool
 
 
 def _metodos_login(usuario: Usuario) -> list[str]:
@@ -128,19 +219,79 @@ def _metodos_login(usuario: Usuario) -> list[str]:
 def obter_dados_da_conta(
     request: Request,
     usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+    servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
 ) -> MeResponse:
-    empresa = usuario.empresa  # única consulta extra; a dependency já carregou o usuário
+    conta = usuario.conta  # a dependency já carregou o usuário
+    empresas = db.scalars(
+        select(Empresa)
+        .where(Empresa.conta_id == conta.id)
+        .order_by(Empresa.razao_social, Empresa.id)
+    )
     return MeResponse(
         id=usuario.id,
-        empresa_id=usuario.empresa_id,
+        conta_id=conta.id,
+        empresa_id=conta.id,
         nome=usuario.nome,
         email=usuario.email,
-        razao_social=empresa.razao_social,
-        cnpj=empresa.cnpj,
-        administrador=usuario.administrador,
+        papel=usuario.papel,
+        administrador=usuario.papel == "admin",
+        razao_social=conta.razao_social,
+        cnpj=conta.cnpj,
+        empresas=[
+            EmpresaDaConta(id=empresa.id, razao_social=empresa.razao_social, cnpj=empresa.cnpj)
+            for empresa in empresas
+        ],
         metodos_login=_metodos_login(usuario),
-        **resposta_do_plano(empresa).model_dump(),
+        **resposta_do_plano(conta).model_dump(),
+        limites=Limites(
+            empresas=LimiteEmpresas(
+                usadas=empresas_usadas(db, conta.id),
+                maximo=limite_da_conta(conta, "empresas"),
+            ),
+            usuarios=LimiteUsuarios(
+                usados=usuarios_usados(db, conta.id),
+                maximo=limite_da_conta(conta, "usuarios"),
+            ),
+        ),
+        preferencias=_preferencias(usuario),
+        guarda_arquivo_original=conta_guarda_o_original(conta, servico),
     )
+
+
+class PreferenciasRequest(BaseModel):
+    """Os campos ausentes ficam como estão. Sem `| None`: `null` explícito é
+    422, e só o que veio no corpo (`model_fields_set`) é gravado."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tutoriais_dispensados: list[TelaDoTutorial] = Field(
+        default=None, max_length=len(TELAS_DO_TUTORIAL)
+    )
+    roteiro_dispensado: bool = None
+
+    @field_validator("tutoriais_dispensados")
+    @classmethod
+    def _sem_repetidos(cls, telas: list[str]) -> list[str]:
+        return list(dict.fromkeys(telas))
+
+
+@router.patch("/preferencias", response_model=Preferencias)
+@limiter.limit(LIMITE_PREFERENCIAS_POR_USUARIO, key_func=chave_por_usuario)
+def salvar_preferencias(
+    request: Request,
+    dados: PreferenciasRequest,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Preferencias:
+    campos = dados.model_fields_set
+    if "tutoriais_dispensados" in campos:
+        usuario.tutoriais_dispensados = dados.tutoriais_dispensados
+    if "roteiro_dispensado" in campos:
+        usuario.roteiro_dispensado = dados.roteiro_dispensado
+    resposta = _preferencias(usuario)  # antes do commit, que expira o objeto
+    db.commit()
+    return resposta
 
 
 class TrocaSenhaRequest(BaseModel):
@@ -194,7 +345,7 @@ def desativar_conta(
 ) -> None:
     usuario = sessao.usuario
     # FOR UPDATE: duas desativações, ou a desativação e a remoção pelo
-    # administrador, não passam as duas.
+    # admin, não passam as duas.
     db.refresh(usuario, with_for_update=True)
     if usuario.removido_em is not None:
         raise HTTPException(
@@ -209,13 +360,13 @@ def desativar_conta(
             logger.info("desativacao_conta resultado=senha_incorreta")
             raise HTTPException(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
-                detail="Senha atual incorreta.",
+                detail=SENHA_INCORRETA,
             )
     elif not login_recente(sessao.auth_time):
         logger.info("desativacao_conta resultado=login_antigo")
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
-            detail="Entre de novo com o Google para confirmar a desativação.",
+            detail=CONFIRMAR_COM_O_GOOGLE,
         )
 
     # Antes de contar os outros usuários: o UPDATE trava os convites
@@ -227,9 +378,10 @@ def desativar_conta(
         .where(Convite.convidado_por_id == usuario.id, *condicoes_pendente())
         .values(cancelado_em=func.now())
     )
-    if usuario.administrador and db.scalar(
+    admin = usuario.papel == "admin"
+    if admin and db.scalar(
         select(func.count()).where(
-            Usuario.empresa_id == usuario.empresa_id,
+            Usuario.conta_id == usuario.conta_id,
             Usuario.removido_em.is_(None),
             Usuario.id != usuario.id,
         )
@@ -238,14 +390,14 @@ def desativar_conta(
         logger.info("desativacao_conta resultado=administrador_com_usuarios")
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
-            detail="Remova os outros usuários da empresa antes de desativar a sua conta.",
+            detail="Transfira o papel de admin antes de desativar a sua conta.",
         )
 
     # Antes da remoção, que troca o e-mail, e do commit, que expira o objeto.
     mensagem = mensagem_conta_desativada(
         para=usuario.email,
         nome=usuario.nome,
-        razao_social_sem_acesso=usuario.empresa.razao_social if usuario.administrador else None,
+        razao_social_sem_acesso=usuario.conta.razao_social if admin else None,
         chave_idempotencia=f"conta_desativada/{usuario.id}",
     )
     remover_usuario(db, usuario)
