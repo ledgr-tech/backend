@@ -2,9 +2,11 @@
 banco, sem rede.
 """
 
+import time
+
 import pytest
 
-from app.services.ia.mascaramento import mascarar_descricao
+from app.services.ia.mascaramento import mascarar_descricao, mascarar_texto
 
 # cada tipo, na ordem da docstring do módulo
 
@@ -35,6 +37,21 @@ def test_mascara_email():
         mascarar_descricao("contato joao.silva@empresa.com.br obrigado")
         == "contato [EMAIL] obrigado"
     )
+
+
+def test_mascara_email_com_parte_local_no_tamanho_maximo():
+    parte_local = "a" * 64
+    assert mascarar_texto(f"de {parte_local}@empresa.com.br") == "de [EMAIL]"
+
+
+@pytest.mark.parametrize("caractere", ["%", "a", ".", "@a", "a@a."])
+def test_email_sem_backtracking_quadratico(caractere):
+    # CodeQL py/polynomial-redos: com `+` sem limite, 50 mil "%" levavam uns 2 s
+    # (quadrático); com as repetições limitadas, milissegundos.
+    texto = caractere * 50_000
+    inicio = time.perf_counter()
+    mascarar_texto(texto)
+    assert time.perf_counter() - inicio < 0.5
 
 
 @pytest.mark.parametrize(

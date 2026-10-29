@@ -51,7 +51,13 @@ MODO_MASCARADA: ModoDescricao = "mascarada"
 
 _TAMANHO_MAXIMO = 120
 
-_PADRAO_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Repetições limitadas aos tamanhos máximos do RFC (parte local 64, domínio
+# 255, rótulo 63): com `+`, uma sequência longa sem `@` (a pergunta do
+# assistente, que vem do usuário) era varrida até o fim a partir de cada
+# posição, em tempo quadrático (CodeQL py/polynomial-redos). Limitado, o custo
+# é linear. Parte local maior que 64 tem só os últimos 64 caracteres
+# mascarados.
+_PADRAO_EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,63}")
 
 _PADRAO_CNPJ_PONTUADO = re.compile(r"(?<!\d)\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}(?!\d)")
 _PADRAO_CNPJ_CRU = re.compile(r"(?<!\d)\d{14}(?!\d)")
