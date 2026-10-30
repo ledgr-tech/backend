@@ -495,6 +495,57 @@ def test_falha_que_chega_depois_do_pagamento_nao_desfaz_o_pagamento(db_session, 
     assert (pagamento.status, pagamento.valor_centavos) == ("paga", 29900)
 
 
+def _total_de_pagamentos(db_session, conta_id) -> int:
+    db_session.expire_all()
+    return db_session.scalar(
+        select(func.count())
+        .select_from(PagamentoStripe)
+        .where(PagamentoStripe.conta_id == conta_id)
+    )
+
+
+def test_fatura_zerada_nao_vira_pagamento(db_session, conta, caplog):
+    """Ao assinar durante o teste, a Stripe cria uma fatura de R$ 0 e manda `invoice.paid`."""
+    caplog.set_level(logging.INFO, logger="app")
+    evento = _evento("invoice.paid", _fatura(conta, amount_paid=0, amount_due=0))
+
+    resposta = _enviar(evento)
+
+    assert (resposta.status_code, resposta.json()) == (200, {"resultado": "fatura_zerada"})
+    assert _total_de_pagamentos(db_session, conta.id) == 0
+    assert _pagamento(db_session) is None
+    assert f"pagamento resultado=fatura_zerada conta_id={conta.id}" in caplog.text
+    # O evento fica registrado e processado.
+    gravado = _evento_gravado(db_session, evento["id"])
+    assert (gravado.tipo, gravado.processado_em is not None) == ("invoice.paid", True)
+
+
+def test_fatura_zerada_reenviada_continua_duplicada(db_session, conta):
+    evento = _evento("invoice.paid", _fatura(conta, amount_paid=0, amount_due=0))
+
+    primeira = _enviar(evento)
+    segunda = _enviar(evento)
+
+    assert primeira.json() == {"resultado": "fatura_zerada"}
+    assert segunda.json() == {"resultado": "duplicado"}
+    assert _total_de_pagamentos(db_session, conta.id) == 0
+
+
+def test_fatura_zerada_sem_os_campos_de_valor_tambem_nao_grava(db_session, conta):
+    fatura = _fatura(conta)
+    del fatura["amount_paid"], fatura["amount_due"]
+
+    assert _enviar(_evento("invoice.paid", fatura)).json() == {"resultado": "fatura_zerada"}
+    assert _total_de_pagamentos(db_session, conta.id) == 0
+
+
+def test_fatura_com_valor_continua_criando_o_pagamento(db_session, conta):
+    resposta = _enviar(_evento("invoice.paid", _fatura(conta, fatura_id="in_com_valor")))
+
+    assert resposta.json() == {"resultado": "paga"}
+    assert _pagamento(db_session, "in_com_valor").valor_centavos == 29900
+
+
 def test_fatura_sem_periodo_nas_linhas_usa_o_da_fatura(db_session, conta):
     _enviar(_evento("invoice.paid", _fatura(conta, lines={"data": []})))
 

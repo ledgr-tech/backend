@@ -12,7 +12,8 @@ que não é do Ledgr, ou sem conta, é ignorada e logada.
 
 Os pagamentos (uma linha por fatura) vêm do payload da fatura: só campos
 estáveis entre versões da API. Uma fatura `paga` não volta a `falhou` se o
-evento da falha chegar depois.
+evento da falha chegar depois. Fatura de valor zero (a que a Stripe cria ao
+assinar durante o teste) não é pagamento e não grava nada.
 
 Cada função trava a linha da conta, para dois eventos da mesma conta chegando
 juntos não se atropelarem. Quem chama faz o commit. Logs só com categoria e
@@ -201,12 +202,16 @@ def _conta_id_da_fatura(fatura: dict) -> uuid.UUID | None:
 
 def registrar_pagamento(db: Session, fatura: dict, status: str, ocorrido_em: datetime) -> str:
     """Upsert em `pagamentos_stripe` (uma linha por fatura). `status` é `paga`
-    ou `falhou`."""
+    ou `falhou`. Fatura zerada (`amount_due` e `amount_paid` iguais a 0) não
+    grava nada."""
     fatura_id = fatura.get("id")
     conta = _conta_travada(db, _conta_id_da_fatura(fatura), _id(fatura.get("customer")))
     if conta is None or not fatura_id:
         logger.warning("pagamento resultado=sem_conta")
         return "sem_conta"
+    if not fatura.get("amount_due") and not fatura.get("amount_paid"):
+        logger.info("pagamento resultado=fatura_zerada conta_id=%s", conta.id)
+        return "fatura_zerada"
     valor = fatura.get("amount_paid") if status == "paga" else fatura.get("amount_due")
     inicio, fim = _periodo_da_fatura(fatura)
     pagamento = db.scalar(
