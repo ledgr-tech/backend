@@ -4,13 +4,16 @@ import math
 import re
 import time
 import uuid
+from datetime import UTC, datetime
 
 import bcrypt
 import pytest
 from conftest import _gerar_cnpj_alfanumerico, apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 
+from app.core import auth
 from app.core.cnpj import normalizar
+from app.core.plano import DURACAO_TESTE
 from app.models import Conta, Usuario
 from main import app
 
@@ -83,6 +86,29 @@ def test_cadastro_cria_conta_empresa_configuracao_e_admin(db_session, cadastro, 
     assert (empresa.cnpj, empresa.razao_social) == (d, "Empresa de teste")
     assert empresa.id != conta.id
     assert empresa.configuracao is not None
+
+
+def test_cadastro_comeca_o_teste_de_14_dias_sem_plano(
+    db_session, cadastro, gerar_token, monkeypatch
+):
+    """Issues #166 e #167: o teste começa no cadastro, sem plano e sem cartão."""
+    instante = datetime.now(UTC)
+    monkeypatch.setattr(auth, "_agora", lambda: instante)
+
+    corpo = _registrar(cadastro()).json()
+
+    conta = db_session.get(Conta, uuid.UUID(corpo["conta_id"]))
+    assert conta.plano is None
+    assert conta.teste_termina_em == instante + DURACAO_TESTE
+    assert conta.assinatura_ativa is False
+    assert conta.stripe_customer_id is None
+    assert conta.assinatura_stripe is None
+    token = gerar_token(
+        conta.id, usuario_id=corpo["id"], auth_time=math.floor(instante.timestamp())
+    )
+    me = client.get("/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert (me["plano"], me["situacao"], me["assinatura"]) == (None, "teste", None)
+    assert datetime.fromisoformat(me["teste_termina_em"]) == instante + DURACAO_TESTE
 
 
 def test_cadastro_aceita_cnpj_alfanumerico_e_grava_em_maiusculas(db_session, cadastro):

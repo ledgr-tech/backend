@@ -11,13 +11,16 @@ import logging
 import math
 import time
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from conftest import apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 
+from app.core import auth
 from app.core.config import settings
 from app.core.database import engine
+from app.core.plano import DURACAO_TESTE
 from app.models import Configuracao, Conta, Usuario
 from app.services.usuarios import remover_usuario
 from main import app
@@ -270,6 +273,25 @@ def test_cadastro_google_cria_empresa_e_administrador_sem_senha(
 
     # Daí em diante, o login pelo Google acha a conta.
     assert _login_google(corpo["id_token"]).json()["id"] == resposta["id"]
+
+
+def test_cadastro_google_comeca_o_teste_de_14_dias_sem_plano(
+    db_session, cadastro_google, gerar_token, monkeypatch
+):
+    """Issues #166 e #167: o mesmo teste do `/register`, sem plano e sem cartão."""
+    instante = datetime.now(UTC)
+    monkeypatch.setattr(auth, "_agora", lambda: instante)
+
+    resposta = client.post("/register/google", json=cadastro_google()).json()
+
+    conta = db_session.get(Conta, uuid.UUID(resposta["conta_id"]))
+    assert conta.plano is None
+    assert conta.teste_termina_em == instante + DURACAO_TESTE
+    token = gerar_token(
+        conta.id, usuario_id=resposta["id"], auth_time=math.floor(instante.timestamp())
+    )
+    me = client.get("/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert (me["plano"], me["situacao"], me["assinatura"]) == (None, "teste", None)
 
 
 def test_cadastro_google_usa_o_nome_do_corpo(db_session, cadastro_google):

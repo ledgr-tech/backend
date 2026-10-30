@@ -55,6 +55,12 @@ def _definir_situacao(db_session, conta_id, situacao: str) -> None:
     db_session.commit()
 
 
+def _definir_teste(db_session, conta_id, fim: datetime) -> None:
+    """O teste que o cadastro começa (issues #166 e #167), sem passar por ele."""
+    db_session.get(Conta, conta_id).teste_termina_em = fim
+    db_session.commit()
+
+
 def _me(headers):
     resposta = client.get("/me", headers=headers)
     assert resposta.status_code == 200, resposta.text
@@ -131,9 +137,10 @@ def test_me_devolve_a_situacao_para_o_administrador_e_o_convidado(
 # --- POST /empresa/plano ---------------------------------------------------------
 
 
-def test_primeira_escolha_comeca_o_teste_de_14_dias(
+def test_escolha_so_grava_a_preferencia_e_nao_inicia_o_teste(
     db_session, criar_usuario, cabecalho, monkeypatch, caplog
 ):
+    """Rota obsoleta (issues #166 e #167): o teste começa no cadastro."""
     caplog.set_level(logging.INFO, logger="app")
     _congelar(monkeypatch, T0)
     administrador = criar_usuario()
@@ -141,21 +148,26 @@ def test_primeira_escolha_comeca_o_teste_de_14_dias(
     resposta = _escolher(cabecalho(administrador), "essencial")
 
     assert resposta.status_code == 200
-    fim = T0 + DURACAO_TESTE
     assert resposta.json() == {
         "plano": "essencial",
-        "teste_termina_em": fim.isoformat().replace("+00:00", "Z"),
-        "situacao": "teste",
+        "teste_termina_em": None,
+        "situacao": "sem_plano",
     }
     empresa = _empresa(db_session, administrador.conta_id)
-    assert (empresa.plano, empresa.teste_termina_em) == ("essencial", fim)
-    assert _me(cabecalho(administrador))["situacao"] == "teste"
-    assert "escolha_plano resultado=teste_iniciado" in caplog.text
+    assert (empresa.plano, empresa.teste_termina_em) == ("essencial", None)
+    assert "escolha_plano resultado=plano_gravado" in caplog.text
+
+
+def test_rota_de_escolha_esta_marcada_como_obsoleta_no_openapi():
+    operacao = app.openapi()["paths"]["/empresa/plano"]["post"]
+
+    assert operacao["deprecated"] is True
 
 
 def test_trocar_de_plano_nao_muda_o_fim_do_teste(db_session, criar_usuario, cabecalho, monkeypatch):
     _congelar(monkeypatch, T0)
     administrador = criar_usuario()
+    _definir_teste(db_session, administrador.conta_id, T0 + DURACAO_TESTE)
     _escolher(cabecalho(administrador), "essencial")
 
     _congelar(monkeypatch, T0 + timedelta(days=5))
@@ -187,6 +199,7 @@ def test_mesmo_plano_de_novo_nao_muda_nada(
     caplog.set_level(logging.INFO, logger="app")
     _congelar(monkeypatch, T0)
     administrador = criar_usuario()
+    _definir_teste(db_session, administrador.conta_id, T0 + DURACAO_TESTE)
     primeira = _escolher(cabecalho(administrador), "padrao").json()
     antes = _empresa(db_session, administrador.conta_id).atualizado_em
 
@@ -253,8 +266,8 @@ def test_teste_vira_encerrado_no_instante_de_teste_termina_em(
 ):
     _congelar(monkeypatch, T0)
     administrador = criar_usuario()
-    _escolher(cabecalho(administrador), "padrao")
     fim = T0 + DURACAO_TESTE
+    _definir_teste(db_session, administrador.conta_id, fim)
 
     _congelar(monkeypatch, fim - timedelta(microseconds=1))
     assert _me(cabecalho(administrador))["situacao"] == "teste"
