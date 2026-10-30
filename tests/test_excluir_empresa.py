@@ -10,7 +10,7 @@ fixas.
 import hashlib
 import json
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from app.core import senha
 from app.core.config import settings
 from app.models import (
+    AssinaturaStripe,
     Base,
     ChaveApi,
     ClienteOAuth,
@@ -41,6 +42,7 @@ from app.models import (
     LinhaInvalida,
     LinkRelatorio,
     OperadorLedgr,
+    PagamentoStripe,
     PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
@@ -296,6 +298,25 @@ def _povoar(
     )
     db_session.add(evento)
     linhas += [operador, evento]
+    # Cobrança pela Stripe (issues #166 e #167): assinatura já encerrada (a
+    # em andamento barra a exclusão) e um pagamento.
+    assinatura = AssinaturaStripe(
+        conta_id=conta.id,
+        stripe_subscription_id=f"sub_{uuid.uuid4().hex}",
+        status="canceled",
+        plano="padrao",
+        periodo="mensal",
+    )
+    pagamento = PagamentoStripe(
+        stripe_invoice_id=f"in_{uuid.uuid4().hex}",
+        conta_id=conta.id,
+        valor_centavos=9900,
+        moeda="brl",
+        status="paga",
+        ocorrido_em=datetime.now(UTC),
+    )
+    db_session.add_all([assinatura, pagamento])
+    linhas += [assinatura, pagamento]
     db_session.commit()
     return (
         [(Conta, conta.id)]
@@ -605,6 +626,24 @@ def test_id_de_empresa_cliente_nao_e_aceito_como_conta(db_session, conta_povoada
 
     assert codigo == 1
     assert "não encontrada" in capsys.readouterr().out
+    assert len(_existentes(db_session, linhas)) == len(linhas)
+
+
+@pytest.mark.parametrize("status", ["active", "trialing", "past_due", "incomplete"])
+def test_conta_com_assinatura_em_andamento_na_stripe_nao_e_excluida(
+    db_session, conta_povoada, capsys, status
+):
+    """Apagar a conta não cancela a cobrança na Stripe (issues #166 e #167)."""
+    conta, linhas = conta_povoada()
+    db_session.query(AssinaturaStripe).filter_by(conta_id=conta.id).update({"status": status})
+    db_session.commit()
+    perguntar = _Respostas()
+
+    codigo = script.main(["--conta-id", str(conta.id), "--executar"], perguntar=perguntar)
+
+    assert codigo == 1
+    assert "assinatura em andamento na Stripe" in capsys.readouterr().out
+    assert perguntar.perguntas == []
     assert len(_existentes(db_session, linhas)) == len(linhas)
 
 

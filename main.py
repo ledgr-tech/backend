@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from slowapi.errors import RateLimitExceeded
 
 from app.api.admin import router as admin_router
+from app.api.assinatura import router as assinatura_router
 from app.api.assistente import router as assistente_router
 from app.api.auth import router as auth_router
 from app.api.chaves_api import router as chaves_api_router
@@ -28,6 +29,7 @@ from app.api.me import router as me_router
 from app.api.oauth import router as oauth_router
 from app.api.plano import router as plano_router
 from app.api.senha import router as senha_router
+from app.api.stripe_webhook import router as stripe_webhook_router
 from app.api.troca_email import router as troca_email_router
 from app.api.v1 import router as v1_router
 from app.core import conta_inativa
@@ -78,6 +80,8 @@ app.include_router(empresa_router)
 app.include_router(empresas_router)
 app.include_router(equipe_router)
 app.include_router(plano_router)
+app.include_router(assinatura_router)
+app.include_router(stripe_webhook_router)
 app.include_router(convites_router)
 app.include_router(extratos_router)
 app.include_router(importacoes_ia_router)

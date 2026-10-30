@@ -15,8 +15,8 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
 
 - `GET /admin/contas`: busca (razão social sem acento, CNPJ com ou sem
   máscara, e-mail do admin), filtro por `situacao` (`sem_plano`, `teste`,
-  `teste_encerrado` e `ativo` entre as contas não inativas; `inativa`, as
-  inativas), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
+  `teste_encerrado`, `ativo`, `pagamento_pendente` e `assinatura_encerrada`
+  entre as contas não inativas; `inativa`, as inativas), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
   o fim mais próximo primeiro, sem teste no fim), `limit` e `offset`.
 - `GET /admin/contas/{conta_id}`: o item, o admin (nome e e-mail, o contato
   comercial), a inativação, o último login, o uso e os últimos eventos.
@@ -26,7 +26,8 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
 
 O uso são só contagens: empresas, usuários ativos, convites pendentes,
 conciliações no total, extratos do banco conciliados pela primeira vez em
-cada um dos últimos 3 meses (a unidade de cobrança da #122, mês em UTC),
+cada um dos últimos 3 meses (a unidade de cobrança da #122; mês civil de São
+Paulo, o da franquia das issues #166 e #167),
 chaves de API, conexões MCP e links públicos ativos. Nunca lançamento,
 descrição, justificativa, nome de arquivo nem dado das empresas clientes.
 
@@ -57,6 +58,7 @@ from app.core.rate_limit import (
 )
 from app.models import (
     AcessoAdmin,
+    AssinaturaStripe,
     ChaveApi,
     ConexaoMcp,
     Conta,
@@ -70,6 +72,7 @@ from app.models import (
     Usuario,
 )
 from app.services.convites import condicoes_pendente
+from app.services.plano import FUSO_DA_FRANQUIA
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +87,15 @@ SO_OPERADOR = "Acesso restrito à equipe do Ledgr."
 LOGIN_ANTIGO = "Entre de novo para usar o painel."
 CONTA_NAO_ENCONTRADA = "Conta não encontrada."
 
-SituacaoDoFiltro = Literal["sem_plano", "teste", "teste_encerrado", "ativo", "inativa"]
+SituacaoDoFiltro = Literal[
+    "sem_plano",
+    "teste",
+    "teste_encerrado",
+    "ativo",
+    "pagamento_pendente",
+    "assinatura_encerrada",
+    "inativa",
+]
 Ordem = Literal["criada_em", "teste_termina_em"]
 
 
@@ -243,9 +254,17 @@ class PilotoRequest(MotivoRequest):
 
 def _situacao(agora: datetime):
     """A situação comercial em SQL, pela mesma regra de `situacao_da_conta`."""
+    status = (
+        select(AssinaturaStripe.status)
+        .where(AssinaturaStripe.conta_id == Conta.id)
+        .scalar_subquery()
+    )
     return case(
         (Conta.assinatura_ativa, "ativo"),
-        (Conta.plano.is_(None), "sem_plano"),
+        (status.in_(plano.STATUS_ATIVOS), "ativo"),
+        (status.in_(plano.STATUS_PAGAMENTO_PENDENTE), "pagamento_pendente"),
+        (status.in_(plano.STATUS_ENCERRADOS), "assinatura_encerrada"),
+        (Conta.teste_termina_em.is_(None), "sem_plano"),
         (Conta.teste_termina_em > agora, "teste"),
         else_="teste_encerrado",
     )
@@ -295,7 +314,8 @@ def _item(conta: Conta, situacao: str) -> dict:
 
 
 def _meses(agora: datetime) -> list[str]:
-    ano, mes = agora.year, agora.month
+    local = agora.astimezone(FUSO_DA_FRANQUIA)
+    ano, mes = local.year, local.month
     meses = []
     for _ in range(MESES_DE_USO):
         meses.append(f"{ano:04d}-{mes:02d}")
@@ -318,7 +338,7 @@ def _uso(db: Session, conta_id: uuid.UUID, agora: datetime) -> UsoResponse:
         .group_by(ExecucaoConciliacao.extrato_banco_id)
         .subquery()
     )
-    mes = func.to_char(primeiras.c.primeira, "YYYY-MM")
+    mes = func.to_char(func.timezone(FUSO_DA_FRANQUIA.key, primeiras.c.primeira), "YYYY-MM")
     meses = _meses(agora)
     por_mes = dict(db.execute(select(mes, func.count()).where(mes.in_(meses)).group_by(mes)).all())
     return UsoResponse(

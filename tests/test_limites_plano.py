@@ -292,4 +292,5 @@ def test_limites_no_me_para_todos_os_papeis(db_session, equipe, limites):
         assert _limites_do_me(headers[quem]) == {
             "empresas": {"usadas": 1, "maximo": 2},
             "usuarios": {"usados": 3, "maximo": 10},
+            "conciliacoes": {"usadas": 0, "maximo": None},
         }

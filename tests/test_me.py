@@ -66,10 +66,13 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "plano": None,
         "teste_termina_em": None,
         "situacao": "sem_plano",
+        # Ainda não assinou pela Stripe (issues #166 e #167).
+        "assinatura": None,
         # Sem limite configurado (issue #133): só o uso.
         "limites": {
             "empresas": {"usadas": 1, "maximo": None},
             "usuarios": {"usados": 1, "maximo": None},
+            "conciliacoes": {"usadas": 0, "maximo": None},
         },
         # Usuário novo, nada dispensado (issue #147).
         "preferencias": {"tutoriais_dispensados": [], "roteiro_dispensado": False},

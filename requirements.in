@@ -40,3 +40,7 @@ rapidfuzz
 # API S3 do Cloudflare R2, para o arquivo original do extrato no plano avançado
 # (issue #139, ADR-023). O serviço de backup tem o próprio, em backup/.
 boto3
+# Stripe (issues #166 e #167): cobrança por assinatura. Versão fixada, porque a
+# biblioteca traz a versão da API da Stripe junto (app/services/stripe/cliente.py
+# fixa a mesma): subir de major é decisão, com a versão da API revista.
+stripe==16.1.0
