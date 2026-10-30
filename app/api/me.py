@@ -8,7 +8,12 @@ razão social e CNPJ), ordenadas pela razão social, para o seletor da empresa
 ativa. Ignora o cabeçalho `X-Ledgr-Empresa`. `plano`, `teste_termina_em` (em
 UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
 mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
-`POST /conciliacoes`.
+`POST /conciliacoes`. Desde as issues #166 e #167 (ADR-026), `plano` é só a
+preferência gravada em `contas.plano`; o plano de quem assina está em
+`assinatura.plano`, e `situacao` ganhou `pagamento_pendente` e
+`assinatura_encerrada`. `assinatura` é `null` enquanto a conta não assinou
+pela Stripe; senão traz `status` (o da Stripe), `plano`, `periodo`,
+`periodo_atual_fim` (em UTC) e `cancelar_no_fim_do_periodo`.
 
 `preferencias` (issue #147) traz o que a pessoa dispensou no primeiro uso:
 `tutoriais_dispensados` (telas de `TELAS_DO_TUTORIAL`) e
@@ -24,10 +29,13 @@ com mais itens do que o total de telas dá 422 no formato do FastAPI; os
 repetidos saem, na ordem da primeira ocorrência. A resposta é o estado
 guardado depois da mudança. Rate limit por usuário, como as outras rotas.
 
-`limites` (issue #133) traz, para empresas e usuários, quanto a conta usa e o
-máximo do plano (`null` sem limite), com a mesma conta do 402 do
-`POST /empresas` e do `POST /empresa/convites`: usuários são os ativos mais os
-convites pendentes. O front mostra os avisos de limite com isso.
+`limites` (issue #133) traz, para empresas, usuários e conciliações, quanto a
+conta usa e o máximo do plano (`null` sem limite), com a mesma conta do 402 do
+`POST /empresas`, do `POST /empresa/convites` e do `POST /conciliacoes`:
+usuários são os ativos mais os convites pendentes; `conciliacoes` são as
+primeiras conciliações de extrato do banco no mês civil de São Paulo, de todas
+as empresas da conta (a franquia do plano, issues #166 e #167). O front mostra
+os avisos de limite com isso.
 
 `guarda_arquivo_original` (issue #139, ADR-023) diz se o upload desta conta
 guarda o arquivo original agora: flag `ARQUIVO_ORIGINAL_HABILITADO` ligada, R2
@@ -84,7 +92,7 @@ resultado categorizado.
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -125,7 +133,7 @@ from app.services.convites import condicoes_pendente
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
 from app.services.email.mensagens import mensagem_conta_desativada
-from app.services.plano import empresas_usadas, usuarios_usados
+from app.services.plano import conciliacoes_no_mes, empresas_usadas, usuarios_usados
 from app.services.usuarios import remover_usuario
 
 __all__ = [
@@ -162,9 +170,37 @@ class LimiteUsuarios(BaseModel):
     maximo: int | None
 
 
+class LimiteConciliacoes(BaseModel):
+    usadas: int
+    maximo: int | None
+
+
 class Limites(BaseModel):
     empresas: LimiteEmpresas
     usuarios: LimiteUsuarios
+    conciliacoes: LimiteConciliacoes
+
+
+class AssinaturaDaConta(BaseModel):
+    status: str
+    plano: str
+    periodo: str
+    periodo_atual_fim: datetime | None
+    cancelar_no_fim_do_periodo: bool
+
+
+def _assinatura(conta) -> AssinaturaDaConta | None:
+    assinatura = conta.assinatura_stripe
+    if assinatura is None:
+        return None
+    fim = assinatura.periodo_atual_fim
+    return AssinaturaDaConta(
+        status=assinatura.status,
+        plano=assinatura.plano,
+        periodo=assinatura.periodo,
+        periodo_atual_fim=fim.astimezone(UTC) if fim is not None else None,
+        cancelar_no_fim_do_periodo=assinatura.cancelar_no_fim_do_periodo,
+    )
 
 
 class Preferencias(BaseModel):
@@ -200,6 +236,7 @@ class MeResponse(BaseModel):
     plano: str | None
     teste_termina_em: datetime | None
     situacao: Situacao
+    assinatura: AssinaturaDaConta | None
     limites: Limites
     preferencias: Preferencias
     guarda_arquivo_original: bool
@@ -244,6 +281,7 @@ def obter_dados_da_conta(
         ],
         metodos_login=_metodos_login(usuario),
         **resposta_do_plano(conta).model_dump(),
+        assinatura=_assinatura(conta),
         limites=Limites(
             empresas=LimiteEmpresas(
                 usadas=empresas_usadas(db, conta.id),
@@ -252,6 +290,10 @@ def obter_dados_da_conta(
             usuarios=LimiteUsuarios(
                 usados=usuarios_usados(db, conta.id),
                 maximo=limite_da_conta(conta, "usuarios"),
+            ),
+            conciliacoes=LimiteConciliacoes(
+                usadas=conciliacoes_no_mes(db, conta.id),
+                maximo=limite_da_conta(conta, "conciliacoes"),
             ),
         ),
         preferencias=_preferencias(usuario),

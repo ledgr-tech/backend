@@ -7,8 +7,9 @@ Daí em diante:
   exportações;
 - toda escrita dá 403 `{"detail": MENSAGEM, "codigo": "conta_inativa"}`,
   menos as de `LIBERADAS`: as da própria pessoa (senha, e-mail, preferências,
-  favoritos, desativar a própria conta) e as quatro revogações (chave de
-  API, conexão MCP, link público e usuário), que só reduzem acesso;
+  favoritos, desativar a própria conta), as quatro revogações (chave de
+  API, conexão MCP, link público e usuário), que só reduzem acesso, e o
+  checkout da assinatura (issues #166 e #167);
 - a API pública (`/v1`), o MCP e o `/oauth/token` param, e os links
   públicos dão o 404 dos inválidos;
 - a geração automática de explicações para antes da próxima linha.
@@ -47,6 +48,9 @@ LIBERADAS = frozenset(
         ("DELETE", "/me"),
         ("PUT", "/empresas/{empresa_id}/favorita"),
         ("DELETE", "/empresas/{empresa_id}/favorita"),
+        # Assinar é como a conta inativa volta a pagar (issues #166 e #167); o
+        # webhook, sem JWT, não passa por aqui.
+        ("POST", "/assinatura/checkout"),
         # Revogações: só reduzem acesso. Bloqueadas, uma chave vazada voltaria
         # a valer na reativação.
         ("DELETE", "/chaves-api/{chave_id}"),

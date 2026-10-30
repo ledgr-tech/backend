@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, String, false
+from sqlalchemy import Boolean, CheckConstraint, DateTime, String, UniqueConstraint, false
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -23,11 +23,15 @@ class Conta(Base, TimestampMixin):
     indisponível e nas contas cadastradas antes da #119.
 
     Plano e teste (issue #122, regra em app/core/plano.py), vindos de
-    `empresas` na #133: `plano` é o escolhido pelo admin (nulo até a primeira
-    escolha), `teste_termina_em` é a primeira escolha mais 14 dias e não muda
-    quando o plano é trocado, e `assinatura_ativa` marca a conta que paga
-    (hoje, pelo script scripts/ativar_empresa.py). O CHECK garante que plano e
-    fim do teste vêm juntos. A situação é calculada, nunca gravada.
+    `empresas` na #133: `teste_termina_em` é o cadastro mais 14 dias (issues
+    #166 e #167: o teste começa no cadastro, sem plano e sem cartão) e não muda
+    quando o plano é trocado; `plano` é só a preferência gravada pelo
+    `POST /empresa/plano` (obsoleto), e o plano de quem assina vem da
+    assinatura; `assinatura_ativa` marca o piloto, que não paga (pelo
+    scripts/ativar_empresa.py e pelo `/admin`). A cobrança é a
+    `assinatura_stripe`, mantida só pelo webhook, e `stripe_customer_id` é o
+    cliente da conta na Stripe, criado no primeiro checkout. A situação é
+    calculada, nunca gravada.
 
     As contas que existiam antes da #133 têm o mesmo id da empresa de que
     vieram: o JWT já emitido leva esse id no claim `empresa_id`, que passou a
@@ -41,13 +45,10 @@ class Conta(Base, TimestampMixin):
 
     __tablename__ = "contas"
     __table_args__ = (
+        UniqueConstraint("stripe_customer_id", name="uq_contas_stripe_customer_id"),
         CheckConstraint(
             "plano IN (" + ", ".join(f"'{plano}'" for plano in PLANOS) + ")",
             name="ck_contas_plano_valido",
-        ),
-        CheckConstraint(
-            "(plano IS NULL) = (teste_termina_em IS NULL)",
-            name="ck_contas_plano_e_fim_do_teste_juntos",
         ),
         CheckConstraint(
             "(inativada_em IS NULL) = (motivo_inativacao IS NULL)",
@@ -65,6 +66,7 @@ class Conta(Base, TimestampMixin):
     teste_termina_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    stripe_customer_id: Mapped[str | None] = mapped_column(String, nullable=True)
     assinatura_ativa: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
@@ -73,3 +75,6 @@ class Conta(Base, TimestampMixin):
 
     empresas: Mapped[list["Empresa"]] = relationship(back_populates="conta")  # noqa: F821
     usuarios: Mapped[list["Usuario"]] = relationship(back_populates="conta")  # noqa: F821
+    assinatura_stripe: Mapped["AssinaturaStripe | None"] = relationship(  # noqa: F821
+        back_populates="conta", uselist=False
+    )
