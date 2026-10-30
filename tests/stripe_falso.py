@@ -53,11 +53,16 @@ class StripeFalso:
     def price_list(self, **params):
         self._registrar("Price.list", params)
         chaves = params.get("lookup_keys") or []
-        achados = [
-            objeto(preco)
-            for preco in self.precos.values()
-            if preco["lookup_key"] in chaves and (not params.get("active") or preco["active"])
-        ]
+        if len(chaves) > 10:
+            raise stripe.InvalidRequestError("Máximo de 10 lookup_keys", param="lookup_keys")
+        expandir_produto = "data.product" in (params.get("expand") or [])
+        achados = []
+        for preco in self.precos.values():
+            if preco["lookup_key"] not in chaves or (params.get("active") and not preco["active"]):
+                continue
+            if expandir_produto and preco.get("product") in self.produtos:
+                preco = {**preco, "product": self.produtos[preco["product"]]}
+            achados.append(objeto(preco))
         return SimpleNamespace(data=achados[: params.get("limit", 10)])
 
     def price_create(self, **params):

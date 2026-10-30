@@ -174,6 +174,10 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     monkeypatch.setattr(settings, "stripe_secret_key", "")
     monkeypatch.setattr(settings, "stripe_webhook_secret", "")
     monkeypatch.setattr(settings, "stripe_modo_live", False)
+    # O cache dos preços públicos (GET /assinatura/precos) é por processo.
+    from app.services.assinatura import precos as precos_publicos
+
+    precos_publicos.limpar_cache()
     for plano in ("essencial", "padrao", "avancado"):
         monkeypatch.setattr(settings, f"limite_conciliacoes_{plano}", None)
     for variavel in (

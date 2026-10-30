@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 API_VERSION = "2026-10-28.endive"
 TIMEOUT_SEGUNDOS = 15
 TENTATIVAS_DE_REDE = 2
+# Limite da Stripe: o `Price.list` aceita até 10 `lookup_keys` por chamada.
+LOOKUP_KEYS_POR_CHAMADA = 10
 
 MENSAGEM_INDISPONIVEL = "A cobrança não está disponível no momento."
 MENSAGEM_FALHA_NA_STRIPE = "Não foi possível falar com a Stripe agora. Tente de novo em instantes."
@@ -90,6 +92,23 @@ def buscar_preco(chave: str, lookup: str) -> dict | None:
     """O preço ativo da `lookup_key`, ou `None` se o catálogo não o tem."""
     lista = stripe.Price.list(lookup_keys=[lookup], active=True, limit=1, **_opcoes(chave))
     return lista.data[0].to_dict() if lista.data else None
+
+
+def listar_precos(chave: str, lookups: list[str]) -> list[dict]:
+    """Os preços ativos das `lookup_keys`, com o produto expandido (uma chamada
+    por até 10 chaves, e não uma por produto). A chave que o catálogo não tem
+    simplesmente não volta."""
+    precos: list[dict] = []
+    for inicio in range(0, len(lookups), LOOKUP_KEYS_POR_CHAMADA):
+        lista = stripe.Price.list(
+            lookup_keys=lookups[inicio : inicio + LOOKUP_KEYS_POR_CHAMADA],
+            active=True,
+            limit=100,
+            expand=["data.product"],
+            **_opcoes(chave),
+        )
+        precos.extend(preco.to_dict() for preco in lista.data)
+    return precos
 
 
 def _cnpj_formatado(cnpj: str) -> str:

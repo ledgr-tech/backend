@@ -20,6 +20,13 @@ toda: ignora `X-Ledgr-Empresa`. Corpo `{plano, periodo}`; valor fora de
   sobrava do teste se perde. O front avisa antes de redirecionar.
 - Só cartão de crédito. O backend não recebe nem guarda dado de cartão.
 
+`GET /assinatura/precos` é pública (sem JWT, ignora `X-Ledgr-Empresa`): preço é
+informação pública, e a landing pode usá-la. Devolve a lista de preços do
+catálogo da Stripe, ordenada por plano e período, com cache de 10 minutos
+(app/services/assinatura/precos.py); a tela de planos lê os preços daqui, nunca
+de valor fixo no front. Rate limit por IP. 503 com a cobrança desligada, 502 se
+a Stripe falha sem nada em cache. O backend não guarda preço: só repassa.
+
 Nada aqui libera acesso: a situação da conta só muda quando o webhook
 (app/api/stripe_webhook.py) confirma. A rota fica liberada para a conta inativa
 (app/core/conta_inativa.py). Logs só com o resultado e ids internos.
@@ -40,9 +47,14 @@ from app.core import plano as regra
 from app.core.auth import obter_admin_autenticado
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
-from app.core.rate_limit import LIMITE_CHECKOUT_POR_CONTA, chave_por_conta, limiter
+from app.core.rate_limit import (
+    LIMITE_CHECKOUT_POR_CONTA,
+    LIMITE_PRECOS_POR_IP,
+    chave_por_conta,
+    limiter,
+)
 from app.models import Usuario
-from app.services.assinatura import stripe_api
+from app.services.assinatura import precos, stripe_api
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +81,16 @@ class CheckoutRequest(BaseModel):
 
 class CheckoutResponse(BaseModel):
     url: str
+
+
+class PrecoResponse(BaseModel):
+    plano: regra.Plano
+    periodo: regra.Periodo
+    valor_centavos: int
+    moeda: str
+    intervalo: str | None
+    quantidade_de_intervalos: int | None
+    nome_do_produto: str | None
 
 
 def _urls_de_retorno() -> tuple[str, str]:
@@ -154,3 +176,9 @@ def iniciar_checkout(
         trial_end is not None,
     )
     return CheckoutResponse(url=url)
+
+
+@router.get("/precos", response_model=list[PrecoResponse])
+@limiter.limit(LIMITE_PRECOS_POR_IP)
+def listar_precos(request: Request) -> list[dict]:
+    return precos.precos_publicos()
