@@ -8,9 +8,10 @@ razão social e CNPJ), ordenadas pela razão social, para o seletor da empresa
 ativa. Ignora o cabeçalho `X-Ledgr-Empresa`. `plano`, `teste_termina_em` (em
 UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
 mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
-`POST /conciliacoes`. Desde as issues #166 e #167 (ADR-026), `plano` é só a
-preferência gravada em `contas.plano`; o plano de quem assina está em
-`assinatura.plano`, e `situacao` ganhou `pagamento_pendente` e
+`POST /conciliacoes`. Desde as issues #166 e #167 (ADR-026), `plano` é o da
+assinatura quando a conta tem uma (qualquer status: `situacao` diz se
+encerrou), senão a preferência gravada em `contas.plano`, senão `null` (nunca o
+essencial dos limites); e `situacao` ganhou `pagamento_pendente` e
 `assinatura_encerrada`. `assinatura` é `null` enquanto a conta não assinou
 pela Stripe; senão traz `status` (o da Stripe), `plano`, `periodo`,
 `periodo_atual_fim` (em UTC) e `cancelar_no_fim_do_periodo`.

@@ -20,6 +20,7 @@ from app.core.plano import (
     guarda_arquivo_original,
     limite_da_conta,
     plano_efetivo,
+    plano_vigente,
     situacao_da_conta,
 )
 from app.models import AssinaturaStripe, Conta
@@ -235,6 +236,14 @@ def test_o_plano_efetivo_e_o_da_assinatura_depois_o_escolhido_depois_o_essencial
     ) == ("avancado")
     assert plano_efetivo(_conta(plano="padrao")) == "padrao"
     assert plano_efetivo(_conta()) == PLANO_DOS_LIMITES_SEM_PLANO == "essencial"
+
+
+def test_o_plano_vigente_nao_cai_no_essencial():
+    assert plano_vigente(
+        _conta(assinatura=_assinatura("canceled", "avancado"), plano="padrao")
+    ) == ("avancado")
+    assert plano_vigente(_conta(plano="padrao")) == "padrao"
+    assert plano_vigente(_conta()) is None
 
 
 def test_o_limite_de_conciliacoes_segue_o_plano_efetivo(monkeypatch):

@@ -98,14 +98,20 @@ def agora() -> datetime:
     return auth._agora()
 
 
-def plano_efetivo(conta: _ComPlano) -> Plano:
-    """O plano que vale para limites e para o arquivo original: o da assinatura
-    da Stripe quando ela existe (qualquer status); senão o escolhido em
-    `contas.plano`; senão o de entrada."""
+def plano_vigente(conta: _ComPlano) -> str | None:
+    """O plano que a conta tem: o da assinatura da Stripe quando ela existe
+    (qualquer status; a situação é que diz se encerrou); senão o escolhido em
+    `contas.plano`; senão `None`. É o `plano` do `GET /me`."""
     assinatura = getattr(conta, "assinatura_stripe", None)
     if assinatura is not None:
         return assinatura.plano
-    return conta.plano or PLANO_DOS_LIMITES_SEM_PLANO
+    return conta.plano
+
+
+def plano_efetivo(conta: _ComPlano) -> Plano:
+    """O plano que vale para limites e para o arquivo original: o vigente
+    (`plano_vigente`) ou, sem nenhum, o de entrada."""
+    return plano_vigente(conta) or PLANO_DOS_LIMITES_SEM_PLANO
 
 
 def limite_da_conta(

@@ -26,9 +26,9 @@ class Conta(Base, TimestampMixin):
     `empresas` na #133: `teste_termina_em` é o cadastro mais 14 dias (issues
     #166 e #167: o teste começa no cadastro, sem plano e sem cartão) e não muda
     quando o plano é trocado; `plano` é só a preferência gravada pelo
-    `POST /empresa/plano` (obsoleto), e o plano de quem assina vem da
-    assinatura; `assinatura_ativa` marca o piloto, que não paga (pelo
-    scripts/ativar_empresa.py e pelo `/admin`). A cobrança é a
+    `POST /empresa/plano` (obsoleto): o plano que vale é o da assinatura
+    quando ela existe (`plano_vigente`); `assinatura_ativa` marca o piloto, que
+    não paga (pelo scripts/ativar_empresa.py e pelo `/admin`). A cobrança é a
     `assinatura_stripe`, mantida só pelo webhook, e `stripe_customer_id` é o
     cliente da conta na Stripe, criado no primeiro checkout. A situação é
     calculada, nunca gravada.

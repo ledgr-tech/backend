@@ -410,3 +410,77 @@ def test_escolha_de_plano_no_teste_nao_mexe_no_fim_do_teste(db_session, admin, c
     assert resposta.json()["situacao"] == "teste"
     conta = _conta(db_session, admin.conta_id)
     assert (conta.plano, conta.teste_termina_em) == ("avancado", FIM_DO_TESTE)
+
+
+# --- `plano` do GET /me e do POST /empresa/plano: o plano que vale ---------------------------------
+
+
+def _assinar_plano(db_session, conta_id, status: str, plano: str) -> None:
+    db_session.add(
+        AssinaturaStripe(
+            conta_id=conta_id,
+            stripe_subscription_id=f"sub_{uuid.uuid4().hex}",
+            status=status,
+            plano=plano,
+            periodo="mensal",
+        )
+    )
+    db_session.commit()
+
+
+def _plano_do_me(cabecalho, usuario):
+    return client.get("/me", headers=cabecalho(usuario)).json()["plano"]
+
+
+def test_me_traz_o_plano_da_assinatura_e_nao_a_preferencia(db_session, admin, cabecalho):
+    db_session.get(Conta, admin.conta_id).plano = "essencial"
+    db_session.commit()
+    _assinar_plano(db_session, admin.conta_id, "active", "avancado")
+
+    me = client.get("/me", headers=cabecalho(admin)).json()
+
+    assert me["plano"] == "avancado"
+    assert me["assinatura"]["plano"] == "avancado"
+
+
+def test_me_sem_assinatura_traz_a_preferencia(db_session, admin, cabecalho):
+    db_session.get(Conta, admin.conta_id).plano = "padrao"
+    db_session.commit()
+
+    assert _plano_do_me(cabecalho, admin) == "padrao"
+
+
+def test_me_sem_assinatura_e_sem_preferencia_traz_null_e_nao_o_essencial(
+    db_session, admin, cabecalho, monkeypatch
+):
+    monkeypatch.setattr(settings, "limite_conciliacoes_essencial", 5)
+
+    me = client.get("/me", headers=cabecalho(admin)).json()
+
+    assert me["plano"] is None
+    # Os limites seguem usando o essencial como plano de entrada.
+    assert me["limites"]["conciliacoes"]["maximo"] == 5
+
+
+@pytest.mark.parametrize("status", ["canceled", "unpaid", "incomplete_expired", "past_due"])
+def test_me_com_assinatura_encerrada_ainda_traz_o_plano_dela(db_session, admin, cabecalho, status):
+    db_session.get(Conta, admin.conta_id).plano = "essencial"
+    db_session.commit()
+    _assinar_plano(db_session, admin.conta_id, status, "padrao")
+
+    me = client.get("/me", headers=cabecalho(admin)).json()
+
+    assert me["plano"] == "padrao"
+    assert me["situacao"] in ("assinatura_encerrada", "pagamento_pendente")
+
+
+def test_resposta_do_post_empresa_plano_tambem_traz_o_plano_vigente(db_session, admin, cabecalho):
+    _assinar_plano(db_session, admin.conta_id, "canceled", "avancado")
+
+    resposta = client.post("/empresa/plano", headers=cabecalho(admin), json={"plano": "essencial"})
+
+    assert resposta.status_code == 200
+    # A preferência foi gravada, mas o plano que vale segue sendo o da assinatura.
+    assert resposta.json()["plano"] == "avancado"
+    assert resposta.json()["situacao"] == "assinatura_encerrada"
+    assert _conta(db_session, admin.conta_id).plano == "essencial"

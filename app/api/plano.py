@@ -54,10 +54,12 @@ class PlanoResponse(BaseModel):
 
 def resposta_do_plano(conta: Conta, instante: datetime | None = None) -> PlanoResponse:
     """Plano, fim do teste (em UTC) e situação da conta: o trecho do
-    `GET /me` e a resposta do `POST /empresa/plano`."""
+    `GET /me` e a resposta do `POST /empresa/plano`. O `plano` é o da
+    assinatura quando a conta tem uma (qualquer status), senão o escolhido
+    em `contas.plano`, senão `null`."""
     fim = conta.teste_termina_em
     return PlanoResponse(
-        plano=conta.plano,
+        plano=regra.plano_vigente(conta),
         teste_termina_em=fim.astimezone(UTC) if fim is not None else None,
         situacao=regra.situacao_da_conta(conta, instante),
     )
