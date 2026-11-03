@@ -60,7 +60,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core import bloqueio_login, senha
+from app.core import bloqueio_login, plano, senha
 from app.core.auth import instante_do_login, normalizar_email
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
@@ -280,10 +280,16 @@ def nova_conta(
 ) -> tuple[Conta, Empresa, Configuracao]:
     """A conta, a primeira empresa cliente dela, com o mesmo CNPJ e a mesma
     razão social, e a configuração dessa empresa (issue #133). A consulta na
-    Receita vale para as duas."""
+    Receita vale para as duas. O cadastro (pelo e-mail e pelo Google) começa o
+    teste de 14 dias, sem plano e sem cartão (issues #166 e #167, ADR-026): o
+    plano é escolhido no checkout."""
     verificado_em = cnpj_verificado_em(receita)
     conta = Conta(
-        id=uuid.uuid4(), razao_social=razao_social, cnpj=cnpj, cnpj_verificado_em=verificado_em
+        id=uuid.uuid4(),
+        razao_social=razao_social,
+        cnpj=cnpj,
+        cnpj_verificado_em=verificado_em,
+        teste_termina_em=plano.agora() + plano.DURACAO_TESTE,
     )
     empresa = Empresa(
         id=uuid.uuid4(),

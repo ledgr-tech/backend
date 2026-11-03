@@ -67,7 +67,9 @@ from sqlalchemy.orm import Session
 from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.config import settings
+from app.core.plano import STATUS_EM_ANDAMENTO
 from app.models import (
+    AssinaturaStripe,
     Base,
     ChaveApi,
     CodigoOAuth,
@@ -88,6 +90,7 @@ from app.models import (
     LinhaInvalida,
     LinkRelatorio,
     OperadorLedgr,
+    PagamentoStripe,
     PedidoAutorizacaoOAuth,
     RegistroExclusao,
     TokenEmail,
@@ -129,7 +132,10 @@ def _da_conta(coluna_empresa_id):
 # `tokens_oauth` e `codigos_oauth`, pela conexão MCP (issue #136);
 # `empresas_favoritas`, pelo `conta_id` dela (issue #157), antes de usuários e
 # empresas; `links_relatorio` (issue #165), antes dos fechamentos;
-# `eventos_conta` e `operadores_ledgr` (issue #156), antes dos usuários. O
+# `eventos_conta` e `operadores_ledgr` (issue #156), antes dos usuários;
+# `assinaturas_stripe` e `pagamentos_stripe` (issues #166 e #167), antes da
+# conta. Apagar a conta não cancela nada na Stripe: o script recusa a conta com
+# assinatura em andamento. O
 # `acessos_admin` fica: não tem FK nem `conta_id`, é o registro de quem do
 # Ledgr consultou a conta. Os `clientes_oauth` ficam: não são de nenhuma conta.
 # tests/test_excluir_empresa.py confere a ordem e que nenhuma tabela ligada à
@@ -154,6 +160,8 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
     (Configuracao, _da_conta(Configuracao.empresa_id)),
     (EmpresaFavorita, lambda c: EmpresaFavorita.conta_id == c),
     (EventoConta, lambda c: EventoConta.conta_id == c),
+    (PagamentoStripe, lambda c: PagamentoStripe.conta_id == c),
+    (AssinaturaStripe, lambda c: AssinaturaStripe.conta_id == c),
     (OperadorLedgr, lambda c: OperadorLedgr.usuario_id.in_(_usuarios_da_conta(c))),
     (Usuario, lambda c: Usuario.conta_id == c),
     (Empresa, lambda c: Empresa.conta_id == c),
@@ -171,6 +179,12 @@ CHAVE_CONTAGEM_ARQUIVOS = "arquivos_originais_r2"
 SEM_VARIAVEIS_DO_R2 = (
     "Sem as variáveis ARQUIVO_ORIGINAL_R2_* no ambiente, os arquivos originais ficariam "
     "no R2. Nada foi apagado."
+)
+
+
+MOTIVO_ASSINATURA_EM_ANDAMENTO = (
+    "A conta tem assinatura em andamento na Stripe, e apagá-la não cancela a cobrança. "
+    "Cancele a assinatura na Stripe e espere o webhook encerrá-la. Nada foi apagado."
 )
 
 
@@ -334,6 +348,10 @@ def main(
                 print(f"Conta {args.conta_id} não encontrada em {destino.host}/{destino.database}.")
                 return 1
             razao_social, cnpj = conta.razao_social, conta.cnpj
+            assinatura = conta.assinatura_stripe
+            if assinatura is not None and assinatura.status in STATUS_EM_ANDAMENTO:
+                print(MOTIVO_ASSINATURA_EM_ANDAMENTO)
+                return 1
             usuarios_ativos = db.scalar(
                 select(func.count()).where(
                     Usuario.conta_id == conta.id, Usuario.removido_em.is_(None)

@@ -7,6 +7,7 @@ import secrets
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from conftest import SENHA_USUARIO_TESTE, cabecalhos, empresa_unica
@@ -376,7 +377,8 @@ def test_detalhe_com_o_contato_e_o_uso(
 ):
     o = operador()
     c = cliente("Escritório Uso Ltda", email="contato.uso@escritorio.com.br")
-    agora = datetime.now(UTC)
+    # O mês é o civil de São Paulo, o da franquia (issues #166 e #167).
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
     mes_atual, neste_mes = _mes(agora, 0)
     mes_passado, no_mes_passado = _mes(agora, 1)
     _, ha_quatro_meses = _mes(agora, 4)

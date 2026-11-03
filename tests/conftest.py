@@ -55,6 +55,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
 from app.models import (
+    AssinaturaStripe,
     ChaveApi,
     CodigoOAuth,
     Conciliacao,
@@ -73,6 +74,7 @@ from app.models import (
     LinhaInvalida,
     LinkRelatorio,
     OperadorLedgr,
+    PagamentoStripe,
     PedidoAutorizacaoOAuth,
     TokenOAuth,
     UsoAssistente,
@@ -165,6 +167,19 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # produção; nenhum teste fala com o R2 de verdade. Quem testa usa a
     # fixture `arquivo_original`, com o armazenamento em memória.
     monkeypatch.setattr(settings, "arquivo_original_habilitado", False)
+    # Cobrança pela Stripe (issues #166 e #167): desligada e sem chaves, como
+    # em produção até a homologação; nenhum teste fala com a Stripe de verdade.
+    # Quem testa usa a fixture `stripe_falso`.
+    monkeypatch.setattr(settings, "stripe_habilitado", False)
+    monkeypatch.setattr(settings, "stripe_secret_key", "")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "")
+    monkeypatch.setattr(settings, "stripe_modo_live", False)
+    # O cache dos preços públicos (GET /assinatura/precos) é por processo.
+    from app.services.assinatura import precos as precos_publicos
+
+    precos_publicos.limpar_cache()
+    for plano in ("essencial", "padrao", "avancado"):
+        monkeypatch.setattr(settings, f"limite_conciliacoes_{plano}", None)
     for variavel in (
         "arquivo_original_r2_endpoint",
         "arquivo_original_r2_bucket",
@@ -544,6 +559,9 @@ def criar_conta(db_session):
         db_session.query(PedidoAutorizacaoOAuth).filter_by(conta_id=conta_id).delete()
         # Painel administrativo (issue #156).
         db_session.query(EventoConta).filter_by(conta_id=conta_id).delete()
+        # Cobrança pela Stripe (issues #166 e #167).
+        db_session.query(PagamentoStripe).filter_by(conta_id=conta_id).delete()
+        db_session.query(AssinaturaStripe).filter_by(conta_id=conta_id).delete()
         db_session.query(OperadorLedgr).filter(
             OperadorLedgr.usuario_id.in_(select(Usuario.id).where(Usuario.conta_id == conta_id))
         ).delete(synchronize_session=False)
@@ -648,6 +666,24 @@ def provedor(monkeypatch):
     monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
     yield falso
     app.dependency_overrides.pop(obter_provedor_email_dependencia, None)
+
+
+SEGREDO_WEBHOOK_TESTE = "whsec_segredo_de_teste"
+
+
+@pytest.fixture
+def stripe_falso(monkeypatch):
+    """A Stripe em memória (tests/stripe_falso.py), com a cobrança ligada, uma
+    chave de teste, o segredo do webhook e o FRONTEND_URL fixados."""
+    from stripe_falso import StripeFalso
+
+    falso = StripeFalso()
+    falso.instalar(monkeypatch)
+    monkeypatch.setattr(settings, "stripe_habilitado", True)
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_falsa")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SEGREDO_WEBHOOK_TESTE)
+    monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
+    return falso
 
 
 CHAVE_CIFRA_TESTE = bytes(range(32))
