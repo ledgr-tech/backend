@@ -4,7 +4,7 @@ Sempre que um model novo for criado, importar aqui também.
 """
 
 from app.models.admin import AcessoAdmin, EventoConta, OperadorLedgr
-from app.models.assinatura import AssinaturaStripe, EventoStripe, PagamentoStripe
+from app.models.assinatura import AssinaturaStripe, CupomEnviado, EventoStripe, PagamentoStripe
 from app.models.assistente import PerguntaSemResposta, UsoAssistente
 from app.models.base import Base
 from app.models.chave_api import ChaveApi
@@ -45,6 +45,7 @@ __all__ = [
     "Configuracao",
     "Conta",
     "Convite",
+    "CupomEnviado",
     "DecisaoLinha",
     "Empresa",
     "EmpresaFavorita",

@@ -78,6 +78,7 @@ from app.models import (
     Configuracao,
     Conta,
     Convite,
+    CupomEnviado,
     DecisaoLinha,
     Empresa,
     EmpresaFavorita,
@@ -132,7 +133,8 @@ def _da_conta(coluna_empresa_id):
 # `tokens_oauth` e `codigos_oauth`, pela conexão MCP (issue #136);
 # `empresas_favoritas`, pelo `conta_id` dela (issue #157), antes de usuários e
 # empresas; `links_relatorio` (issue #165), antes dos fechamentos;
-# `eventos_conta` e `operadores_ledgr` (issue #156), antes dos usuários;
+# `cupons_enviados` (issue #169), `eventos_conta` e `operadores_ledgr` (issue
+# #156), antes dos usuários;
 # `assinaturas_stripe` e `pagamentos_stripe` (issues #166 e #167), antes da
 # conta. Apagar a conta não cancela nada na Stripe: o script recusa a conta com
 # assinatura em andamento. O
@@ -159,6 +161,7 @@ ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...
     (TokenEmail, lambda c: TokenEmail.usuario_id.in_(_usuarios_da_conta(c))),
     (Configuracao, _da_conta(Configuracao.empresa_id)),
     (EmpresaFavorita, lambda c: EmpresaFavorita.conta_id == c),
+    (CupomEnviado, lambda c: CupomEnviado.conta_id == c),
     (EventoConta, lambda c: EventoConta.conta_id == c),
     (PagamentoStripe, lambda c: PagamentoStripe.conta_id == c),
     (AssinaturaStripe, lambda c: AssinaturaStripe.conta_id == c),

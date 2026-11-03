@@ -30,6 +30,10 @@ from app.core.plano import PERIODOS, PLANOS
 from app.models.base import Base
 
 STATUS_DO_PAGAMENTO = ("paga", "falhou")
+# Quem cancelou a assinatura (issue #169): o cliente, a falta de pagamento, o
+# operador pelo `/admin` ou direto no painel da Stripe.
+ORIGENS_DO_CANCELAMENTO = ("cliente", "falta_de_pagamento", "operador", "painel_stripe")
+FORMAS_DO_CUPOM = ("codigo", "assinatura")
 
 
 def _lista(valores: tuple[str, ...]) -> str:
@@ -52,6 +56,11 @@ class AssinaturaStripe(Base):
         CheckConstraint(
             f"periodo IN ({_lista(PERIODOS)})", name="ck_assinaturas_stripe_periodo_valido"
         ),
+        CheckConstraint(
+            f"origem_cancelamento IS NULL OR origem_cancelamento IN "
+            f"({_lista(ORIGENS_DO_CANCELAMENTO)})",
+            name="ck_assinaturas_stripe_origem_cancelamento",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -69,6 +78,11 @@ class AssinaturaStripe(Base):
         Boolean, nullable=False, default=False, server_default=false()
     )
     cancelada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # O `cancellation_details.reason` da Stripe (`cancellation_requested`,
+    # `payment_failed`, `payment_disputed`) e quem cancelou. Só têm valor com a
+    # assinatura cancelada ou com o cancelamento agendado (issue #169).
+    motivo_cancelamento: Mapped[str | None] = mapped_column(String, nullable=True)
+    origem_cancelamento: Mapped[str | None] = mapped_column(String, nullable=True)
     atualizada_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -116,3 +130,65 @@ class PagamentoStripe(Base):
     periodo_inicio: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     periodo_fim: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ocorrido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CupomEnviado(Base):
+    """Cupom que o operador deu a uma conta pelo `/admin` (issue #169, ADR-025
+    e ADR-026), só de inserção, menos `email_enviado` e `usado_em`.
+
+    O cupom em si mora na Stripe (criado no painel dela). Aqui ficam o nome e o
+    resumo do desconto COPIADOS, para o histórico não depender de o cupom
+    continuar lá. `forma` "codigo": um código promocional só daquela conta, de
+    uso único, com validade (`codigo`, `stripe_promotion_code_id` e `expira_em`
+    preenchidos; `usado_em` vem do webhook do checkout). `forma` "assinatura":
+    o desconto foi aplicado direto na assinatura viva, sem código nem validade;
+    `usado_em` é o instante da aplicação.
+
+    `operador_id` vira `NULL` se o operador for apagado; o nome fica, como em
+    `eventos_conta`. Nada aqui é dado de cartão.
+    """
+
+    __tablename__ = "cupons_enviados"
+    __table_args__ = (
+        UniqueConstraint(
+            "stripe_promotion_code_id", name="uq_cupons_enviados_stripe_promotion_code_id"
+        ),
+        CheckConstraint(f"forma IN ({_lista(FORMAS_DO_CUPOM)})", name="ck_cupons_enviados_forma"),
+        CheckConstraint(
+            "(forma = 'codigo' AND codigo IS NOT NULL AND stripe_promotion_code_id IS NOT NULL "
+            "AND expira_em IS NOT NULL) "
+            "OR (forma = 'assinatura' AND codigo IS NULL AND stripe_promotion_code_id IS NULL "
+            "AND expira_em IS NULL)",
+            name="ck_cupons_enviados_forma_e_codigo",
+        ),
+        Index("ix_cupons_enviados_conta_id_em", "conta_id", "em"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conta_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contas.id"), nullable=False
+    )
+    operador_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "operadores_ledgr.id",
+            name="fk_cupons_enviados_operador_id_operadores_ledgr",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    operador_nome: Mapped[str | None] = mapped_column(String, nullable=True)
+    stripe_coupon_id: Mapped[str] = mapped_column(String, nullable=False)
+    cupom_nome: Mapped[str] = mapped_column(String, nullable=False)
+    desconto: Mapped[str] = mapped_column(String, nullable=False)
+    forma: Mapped[str] = mapped_column(String(10), nullable=False)
+    codigo: Mapped[str | None] = mapped_column(String, nullable=True)
+    stripe_promotion_code_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    expira_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_enviado: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    usado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()")
+    )
