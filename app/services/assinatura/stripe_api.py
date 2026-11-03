@@ -37,10 +37,15 @@ TENTATIVAS_DE_REDE = 2
 # Limite da Stripe: o `Price.list` aceita até 10 `lookup_keys` por chamada.
 LOOKUP_KEYS_POR_CHAMADA = 10
 
-# Vai em `cancellation_details.comment` quando o cancelamento sai do `/admin`
-# (issue #169): é como a sincronização reconhece a origem "operador". Fixo, de
-# propósito: o motivo escrito pelo operador fica só no Ledgr, nunca na Stripe.
+# Vão em `cancellation_details.comment` e dizem quem cancelou (issue #169): é
+# como a sincronização reconhece a origem, já que o `reason` da Stripe não
+# distingue o cliente da equipe. Fixas, de propósito: o motivo escrito pelo
+# operador fica só no Ledgr, nunca na Stripe.
 MARCA_DO_OPERADOR = "ledgr:operador"
+# O cancelamento pelo próprio cliente é o PR 2 da #166 (ainda não existe): quem
+# o implementar DEVE enviar esta marca em `cancellation_details.comment`; sem
+# ela, a origem sai "painel_stripe".
+MARCA_DO_CLIENTE = "ledgr:cliente"
 # Sem 0, O, 1, I e L: o código é ditado e digitado à mão.
 ALFABETO_DO_CODIGO = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 TAMANHO_DO_CODIGO = 8

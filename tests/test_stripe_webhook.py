@@ -20,6 +20,7 @@ from stripe_falso import assinatura_da_stripe
 
 from app.core.config import settings
 from app.models import AssinaturaStripe, Conta, CupomEnviado, EventoStripe, PagamentoStripe
+from app.services.assinatura import stripe_api
 from main import app
 
 client = TestClient(app)
@@ -692,11 +693,38 @@ def test_so_o_webhook_muda_a_situacao_da_conta(
             False,
             ("cancellation_requested", "operador"),
         ),
+        # A marca do cliente (o PR 2 da #166 a enviará) vale como `cliente`.
+        (
+            {"reason": "cancellation_requested", "comment": "ledgr:cliente"},
+            "active",
+            True,
+            ("cancellation_requested", "cliente"),
+        ),
+        (
+            {"reason": "cancellation_requested", "comment": "ledgr:cliente"},
+            "canceled",
+            False,
+            ("cancellation_requested", "cliente"),
+        ),
+        # `cancellation_requested` sem marca não passou pelo Ledgr: só o painel da Stripe.
         (
             {"reason": "cancellation_requested"},
             "active",
             True,
-            ("cancellation_requested", "cliente"),
+            ("cancellation_requested", "painel_stripe"),
+        ),
+        (
+            {"reason": "cancellation_requested", "comment": "pediu pelo telefone"},
+            "canceled",
+            False,
+            ("cancellation_requested", "painel_stripe"),
+        ),
+        # A falha de pagamento vale mesmo com um comentário qualquer, mas perde para a marca.
+        (
+            {"reason": "payment_failed", "comment": "ledgr:operador"},
+            "canceled",
+            False,
+            ("payment_failed", "operador"),
         ),
         ({"reason": "payment_failed"}, "canceled", False, ("payment_failed", "falta_de_pagamento")),
         (
@@ -705,7 +733,7 @@ def test_so_o_webhook_muda_a_situacao_da_conta(
             False,
             ("payment_disputed", "falta_de_pagamento"),
         ),
-        # Cancelada direto na Stripe, sem pedido do cliente nem falha de pagamento.
+        # Sem marca e sem falha de pagamento: o painel da Stripe.
         ({"reason": None, "comment": None}, "canceled", False, (None, "painel_stripe")),
         (
             {"reason": "canceled_by_retention_policy"},
@@ -738,6 +766,14 @@ def test_motivo_e_origem_do_cancelamento_saem_do_cancellation_details(
     assinatura = _assinatura(db_session, conta.id)
     assert (assinatura.motivo_cancelamento, assinatura.origem_cancelamento) == (
         esperado or (None, None)
+    )
+
+
+def test_as_marcas_de_origem_sao_as_combinadas():
+    # O PR 2 da #166 (cancelamento pelo cliente) deve enviar a do cliente.
+    assert (stripe_api.MARCA_DO_OPERADOR, stripe_api.MARCA_DO_CLIENTE) == (
+        "ledgr:operador",
+        "ledgr:cliente",
     )
 
 

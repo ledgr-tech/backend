@@ -12,10 +12,14 @@ que não é do Ledgr, ou sem conta, é ignorada e logada.
 
 O motivo e a origem do cancelamento (issue #169) saem do `cancellation_details`
 da assinatura a cada sincronização, e só valem com ela cancelada ou com o
-cancelamento agendado: a marca do `/admin` no `comment` é "operador"; senão, o
-`reason` diz "cliente" (`cancellation_requested`) ou "falta_de_pagamento"
-(`payment_failed` e `payment_disputed`); sem `reason` (cancelada direto na
-Stripe, sem pedido do cliente), "painel_stripe".
+cancelamento agendado: a marca no `comment` diz `operador` (`ledgr:operador`,
+das ações do `/admin`) ou `cliente` (`ledgr:cliente`, do cancelamento pelo
+próprio cliente, que ainda não existe); `payment_failed` e `payment_disputed`
+são `falta_de_pagamento`; todo o resto é `painel_stripe`.
+
+O `usado_em` do cupom dado pelo `/admin` (issue #169) sai de duas leituras: o
+`checkout.session.completed` e os descontos da assinatura relida da API (a que
+chegar primeiro preenche).
 
 Os pagamentos (uma linha por fatura) vêm do payload da fatura: só campos
 estáveis entre versões da API. Uma fatura `paga` não volta a `falhou` se o
@@ -103,7 +107,13 @@ MOTIVOS_DE_FALTA_DE_PAGAMENTO = frozenset({"payment_failed", "payment_disputed"}
 
 def motivo_e_origem_do_cancelamento(assinatura: dict) -> tuple[str | None, str | None]:
     """O `cancellation_details.reason` e a origem do cancelamento, ou `(None,
-    None)` com a assinatura andando e sem cancelamento agendado."""
+    None)` com a assinatura andando e sem cancelamento agendado.
+
+    A origem não é chute: `operador` e `cliente` só saem das marcas que o
+    próprio Ledgr envia no `comment`; `falta_de_pagamento`, de `payment_failed`
+    e `payment_disputed`; o resto (inclusive um `cancellation_requested` sem
+    marca) é `painel_stripe`, porque só o painel da Stripe cancela sem passar
+    pelo Ledgr."""
     cancelando = assinatura.get("status") == "canceled" or bool(
         assinatura.get("cancel_at_period_end")
     )
@@ -111,12 +121,13 @@ def motivo_e_origem_do_cancelamento(assinatura: dict) -> tuple[str | None, str |
         return None, None
     detalhes = assinatura.get("cancellation_details") or {}
     motivo = detalhes.get("reason") or None
-    if detalhes.get("comment") == stripe_api.MARCA_DO_OPERADOR:
+    comentario = detalhes.get("comment")
+    if comentario == stripe_api.MARCA_DO_OPERADOR:
         origem = "operador"
+    elif comentario == stripe_api.MARCA_DO_CLIENTE:
+        origem = "cliente"
     elif motivo in MOTIVOS_DE_FALTA_DE_PAGAMENTO:
         origem = "falta_de_pagamento"
-    elif motivo == "cancellation_requested":
-        origem = "cliente"
     else:
         origem = "painel_stripe"
     return motivo, origem
