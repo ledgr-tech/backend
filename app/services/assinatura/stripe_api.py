@@ -18,6 +18,8 @@
 """
 
 import logging
+import secrets
+from datetime import datetime
 from typing import Any
 
 import stripe
@@ -34,6 +36,15 @@ TIMEOUT_SEGUNDOS = 15
 TENTATIVAS_DE_REDE = 2
 # Limite da Stripe: o `Price.list` aceita até 10 `lookup_keys` por chamada.
 LOOKUP_KEYS_POR_CHAMADA = 10
+
+# Vai em `cancellation_details.comment` quando o cancelamento sai do `/admin`
+# (issue #169): é como a sincronização reconhece a origem "operador". Fixo, de
+# propósito: o motivo escrito pelo operador fica só no Ledgr, nunca na Stripe.
+MARCA_DO_OPERADOR = "ledgr:operador"
+# Sem 0, O, 1, I e L: o código é ditado e digitado à mão.
+ALFABETO_DO_CODIGO = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+TAMANHO_DO_CODIGO = 8
+CUPONS_POR_CHAMADA = 100
 
 MENSAGEM_INDISPONIVEL = "A cobrança não está disponível no momento."
 MENSAGEM_FALHA_NA_STRIPE = "Não foi possível falar com a Stripe agora. Tente de novo em instantes."
@@ -185,3 +196,102 @@ def evento_do_webhook(corpo: bytes, assinatura: str | None, segredo: str) -> dic
     `stripe.SignatureVerificationError` (assinatura ausente, inválida ou
     antiga); nos dois casos a rota responde 400 sem gravar nada."""
     return stripe.Webhook.construct_event(corpo, assinatura, segredo).to_dict()
+
+
+# --- ações do operador (issue #169) ---------------------------------------------------
+
+
+def cancelar_assinatura_no_fim_do_periodo(chave: str, subscription_id: str) -> None:
+    """`cancel_at_period_end`: a conta segue com acesso até o fim do período já
+    pago. A origem "operador" vai no `cancellation_details.comment`."""
+    stripe.Subscription.modify(
+        subscription_id,
+        cancel_at_period_end=True,
+        cancellation_details={"comment": MARCA_DO_OPERADOR},
+        **_opcoes(chave),
+    )
+
+
+def cancelar_assinatura_agora(chave: str, subscription_id: str) -> None:
+    """Cancela na hora, sem fatura final e sem crédito proporcional: reembolso
+    é decisão do painel da Stripe, nunca desta rota."""
+    stripe.Subscription.cancel(
+        subscription_id,
+        cancellation_details={"comment": MARCA_DO_OPERADOR},
+        invoice_now=False,
+        prorate=False,
+        **_opcoes(chave),
+    )
+
+
+def manter_assinatura(chave: str, subscription_id: str) -> None:
+    """Desfaz o cancelamento agendado. Limpa o comentário da origem, para um
+    cancelamento futuro, de outra origem, não herdar a marca do operador."""
+    stripe.Subscription.modify(
+        subscription_id,
+        cancel_at_period_end=False,
+        cancellation_details={"comment": ""},
+        **_opcoes(chave),
+    )
+
+
+def buscar_cupom(chave: str, cupom_id: str) -> dict | None:
+    """O cupom pelo id, ou `None` se a Stripe não o tem."""
+    try:
+        return stripe.Coupon.retrieve(cupom_id, **_opcoes(chave)).to_dict()
+    except stripe.InvalidRequestError as exc:
+        if getattr(exc, "code", None) != "resource_missing":
+            raise
+        return None
+
+
+def listar_cupons(chave: str) -> list[dict]:
+    """Os cupons da Stripe, até `CUPONS_POR_CHAMADA` (os mais recentes)."""
+    lista = stripe.Coupon.list(limit=CUPONS_POR_CHAMADA, **_opcoes(chave))
+    return [cupom.to_dict() for cupom in lista.data]
+
+
+def codigo_promocional_novo() -> str:
+    sorteio = "".join(secrets.choice(ALFABETO_DO_CODIGO) for _ in range(TAMANHO_DO_CODIGO))
+    return f"LEDGR-{sorteio}"
+
+
+def criar_codigo_promocional(
+    chave: str,
+    *,
+    cupom_id: str,
+    cliente_id: str,
+    expira_em: datetime,
+    conta_id: str,
+    operador_id: str,
+    chave_de_idempotencia: str,
+) -> dict:
+    """Um código promocional do cupom só desse cliente, de uma única
+    resgatada e com validade. Na API fixada o cupom vai em
+    `promotion={"type": "coupon", "coupon": ...}`, e não mais em `coupon`."""
+    return stripe.PromotionCode.create(
+        promotion={"type": "coupon", "coupon": cupom_id},
+        code=codigo_promocional_novo(),
+        customer=cliente_id,
+        max_redemptions=1,
+        expires_at=int(expira_em.timestamp()),
+        metadata={"conta_id": conta_id, "operador_id": operador_id},
+        **_opcoes(chave, idempotency_key=chave_de_idempotencia),
+    ).to_dict()
+
+
+def aplicar_cupom_na_assinatura(
+    chave: str, assinatura: dict, cupom_id: str, chave_de_idempotencia: str
+) -> None:
+    """Põe o cupom nas próximas faturas da assinatura. `discounts` substitui a
+    lista inteira, então os descontos que ela já tem entram de volta (pelo id,
+    com `discount`) e o novo vai junto."""
+    existentes = [
+        {"discount": desconto if isinstance(desconto, str) else desconto["id"]}
+        for desconto in assinatura.get("discounts") or []
+    ]
+    stripe.Subscription.modify(
+        assinatura["id"],
+        discounts=[*existentes, {"coupon": cupom_id}],
+        **_opcoes(chave, idempotency_key=chave_de_idempotencia),
+    )

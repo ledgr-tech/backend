@@ -38,11 +38,12 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
@@ -63,6 +64,7 @@ from app.models import (
     Configuracao,
     Conta,
     Convite,
+    CupomEnviado,
     DecisaoLinha,
     Empresa,
     EventoConta,
@@ -178,6 +180,9 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     from app.services.assinatura import precos as precos_publicos
 
     precos_publicos.limpar_cache()
+    from app.services.assinatura import cupons as cupons_da_stripe
+
+    cupons_da_stripe.limpar_cache()
     for plano in ("essencial", "padrao", "avancado"):
         monkeypatch.setattr(settings, f"limite_conciliacoes_{plano}", None)
     for variavel in (
@@ -558,6 +563,7 @@ def criar_conta(db_session):
         _apagar_conexoes_mcp(db_session, ConexaoMcp.conta_id == conta_id)
         db_session.query(PedidoAutorizacaoOAuth).filter_by(conta_id=conta_id).delete()
         # Painel administrativo (issue #156).
+        db_session.query(CupomEnviado).filter_by(conta_id=conta_id).delete()
         db_session.query(EventoConta).filter_by(conta_id=conta_id).delete()
         # Cobrança pela Stripe (issues #166 e #167).
         db_session.query(PagamentoStripe).filter_by(conta_id=conta_id).delete()
@@ -666,6 +672,58 @@ def provedor(monkeypatch):
     monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
     yield falso
     app.dependency_overrides.pop(obter_provedor_email_dependencia, None)
+
+
+# --- painel administrativo (issues #156 e #169) -----------------------------------
+
+
+@pytest.fixture
+def operador(db_session, criar_usuario, gerar_token):
+    """`operador()` cria um usuário numa conta própria (a do Ledgr) e o inclui
+    como operador; `auth_time` muda a idade do login."""
+
+    def _novo(nome: str = "Olga Operadora", auth_time: int | None = None):
+        usuario = criar_usuario(nome=nome)
+        registro = OperadorLedgr(usuario_id=usuario.id, incluido_por="teste")
+        db_session.add(registro)
+        db_session.commit()
+        extra = {} if auth_time is None else {"auth_time": auth_time}
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, **extra)
+        return SimpleNamespace(usuario=usuario, registro=registro, headers=cabecalhos(token))
+
+    return _novo
+
+
+@pytest.fixture
+def cliente(db_session, criar_usuario, criar_empresa, gerar_token):
+    """`cliente()` cria uma conta cliente com admin, gestor e analista, e uma
+    empresa cliente a mais com dado que o painel nunca pode mostrar."""
+
+    def _nova(razao_social: str = "Escritório Cliente Ltda", email: str | None = None):
+        admin_da_conta = criar_usuario(nome="Ana Admin")
+        conta_id = admin_da_conta.conta_id
+        db_session.execute(
+            update(Conta).where(Conta.id == conta_id).values(razao_social=razao_social)
+        )
+        if email:
+            admin_da_conta.email = email
+        db_session.commit()
+        usuarios = {
+            "admin": admin_da_conta,
+            "gestor": criar_usuario(conta_id=conta_id, nome="Gil Gestor", papel="gestor"),
+            "analista": criar_usuario(conta_id=conta_id, nome="Ada Analista", papel="analista"),
+        }
+        empresa_id = empresa_unica(db_session, conta_id)
+        criar_empresa("Padaria Segredo do Cliente", conta_id=conta_id)
+        headers = {
+            papel: cabecalhos(gerar_token(u.conta_id, usuario_id=u.id), empresa_id)
+            for papel, u in usuarios.items()
+        }
+        return SimpleNamespace(
+            conta_id=conta_id, usuarios=usuarios, empresa_id=empresa_id, headers=headers
+        )
+
+    return _nova
 
 
 SEGREDO_WEBHOOK_TESTE = "whsec_segredo_de_teste"

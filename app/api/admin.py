@@ -19,10 +19,15 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
   entre as contas não inativas; `inativa`, as inativas), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
   o fim mais próximo primeiro, sem teste no fim), `limit` e `offset`.
 - `GET /admin/contas/{conta_id}`: o item, o admin (nome e e-mail, o contato
-  comercial), a inativação, o último login, o uso e os últimos eventos.
+  comercial), a inativação, o último login, o uso, a assinatura (com o motivo e
+  a origem do cancelamento), os últimos 12 pagamentos, os cupons enviados e os
+  últimos eventos.
 - `POST /admin/contas/{conta_id}/inativar` e `/reativar` (`motivo`) e
   `/piloto` (`ativo` e `motivo`): gravam o estado em `contas` e um evento em
   `eventos_conta`. Repetir dá 409.
+
+Pagamentos, cancelamentos, vencimentos e cupons (issue #169) ficam em
+app/api/admin_assinaturas.py, no mesmo prefixo e com a mesma guarda.
 
 O uso são só contagens: empresas, usuários ativos, convites pendentes,
 conciliações no total, extratos do banco conciliados pela primeira vez em
@@ -63,12 +68,14 @@ from app.models import (
     ConexaoMcp,
     Conta,
     Convite,
+    CupomEnviado,
     Empresa,
     EventoConta,
     ExecucaoConciliacao,
     Fechamento,
     LinkRelatorio,
     OperadorLedgr,
+    PagamentoStripe,
     Usuario,
 )
 from app.services.convites import condicoes_pendente
@@ -83,6 +90,8 @@ RETENCAO_ACESSOS = timedelta(days=365)
 LIMPEZA_POR_ACESSO = 500
 MESES_DE_USO = 3
 EVENTOS_NO_DETALHE = 20
+PAGAMENTOS_NO_DETALHE = 12
+CUPONS_NO_DETALHE = 20
 SO_OPERADOR = "Acesso restrito à equipe do Ledgr."
 LOGIN_ANTIGO = "Entre de novo para usar o painel."
 CONTA_NAO_ENCONTRADA = "Conta não encontrada."
@@ -223,11 +232,48 @@ class EventoResponse(BaseModel):
     em: datetime
 
 
+class AssinaturaResponse(BaseModel):
+    status: str
+    plano: str
+    periodo: str
+    periodo_atual_fim: datetime | None
+    cancelar_no_fim_do_periodo: bool
+    cancelada_em: datetime | None
+    motivo_cancelamento: str | None
+    origem_cancelamento: str | None
+
+
+class PagamentoResponse(BaseModel):
+    id: uuid.UUID
+    valor_centavos: int
+    moeda: str
+    status: str
+    periodo_inicio: datetime | None
+    periodo_fim: datetime | None
+    ocorrido_em: datetime
+
+
+class CupomEnviadoResponse(BaseModel):
+    id: uuid.UUID
+    cupom: str
+    desconto: str
+    forma: str
+    codigo: str | None
+    expira_em: datetime | None
+    email_enviado: bool
+    usado_em: datetime | None
+    operador: str | None
+    em: datetime
+
+
 class ContaDetalheResponse(ContaItemResponse):
     admin: AdminDaContaResponse | None
     inativacao: InativacaoResponse | None
     ultimo_login_em: datetime | None
     uso: UsoResponse
+    assinatura: AssinaturaResponse | None
+    pagamentos: list[PagamentoResponse]
+    cupons: list[CupomEnviadoResponse]
     eventos: list[EventoResponse]
 
 
@@ -383,6 +429,49 @@ def _conta(db: Session, conta_id: uuid.UUID, *, travar: bool = False) -> Conta:
     return conta
 
 
+def _assinatura_da_conta(conta: Conta) -> AssinaturaResponse | None:
+    assinatura = conta.assinatura_stripe
+    if assinatura is None:
+        return None
+    return AssinaturaResponse(
+        status=assinatura.status,
+        plano=assinatura.plano,
+        periodo=assinatura.periodo,
+        periodo_atual_fim=assinatura.periodo_atual_fim,
+        cancelar_no_fim_do_periodo=assinatura.cancelar_no_fim_do_periodo,
+        cancelada_em=assinatura.cancelada_em,
+        motivo_cancelamento=assinatura.motivo_cancelamento,
+        origem_cancelamento=assinatura.origem_cancelamento,
+    )
+
+
+def _pagamento(pagamento: PagamentoStripe) -> PagamentoResponse:
+    return PagamentoResponse(
+        id=pagamento.id,
+        valor_centavos=pagamento.valor_centavos,
+        moeda=pagamento.moeda,
+        status=pagamento.status,
+        periodo_inicio=pagamento.periodo_inicio,
+        periodo_fim=pagamento.periodo_fim,
+        ocorrido_em=pagamento.ocorrido_em,
+    )
+
+
+def _cupom_enviado(cupom: CupomEnviado) -> CupomEnviadoResponse:
+    return CupomEnviadoResponse(
+        id=cupom.id,
+        cupom=cupom.cupom_nome,
+        desconto=cupom.desconto,
+        forma=cupom.forma,
+        codigo=cupom.codigo,
+        expira_em=cupom.expira_em,
+        email_enviado=cupom.email_enviado,
+        usado_em=cupom.usado_em,
+        operador=cupom.operador_nome,
+        em=cupom.em,
+    )
+
+
 def _detalhe(db: Session, conta: Conta) -> ContaDetalheResponse:
     agora = plano.agora()
     admin = db.execute(
@@ -408,6 +497,25 @@ def _detalhe(db: Session, conta: Conta) -> ContaDetalheResponse:
             select(func.max(Usuario.ultimo_login_em)).where(Usuario.conta_id == conta.id)
         ),
         uso=_uso(db, conta.id, agora),
+        assinatura=_assinatura_da_conta(conta),
+        pagamentos=[
+            _pagamento(pagamento)
+            for pagamento in db.scalars(
+                select(PagamentoStripe)
+                .where(PagamentoStripe.conta_id == conta.id)
+                .order_by(PagamentoStripe.ocorrido_em.desc(), PagamentoStripe.id.desc())
+                .limit(PAGAMENTOS_NO_DETALHE)
+            )
+        ],
+        cupons=[
+            _cupom_enviado(cupom)
+            for cupom in db.scalars(
+                select(CupomEnviado)
+                .where(CupomEnviado.conta_id == conta.id)
+                .order_by(CupomEnviado.em.desc(), CupomEnviado.id.desc())
+                .limit(CUPONS_NO_DETALHE)
+            )
+        ],
         eventos=[
             EventoResponse(
                 tipo=evento.tipo,

@@ -1,4 +1,4 @@
-"""Textos dos e-mails transacionais (issues #66, #68, #69, #78 e #149, ADR-012).
+"""Textos dos e-mails transacionais (issues #66, #68, #69, #78, #149 e #169, ADR-012).
 
 Cada mensagem sai em texto puro e em HTML simples, sem imagem nem
 rastreamento. Tudo o que vem do usuário (nome, razão social) é escapado no
@@ -334,6 +334,75 @@ def mensagem_troca_email_concluida(
     return MensagemEmail(
         para=para,
         assunto="O e-mail da sua conta Ledgr foi trocado",
+        texto=texto,
+        html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def mensagem_cupom(
+    *,
+    para: str,
+    nome: str,
+    razao_social: str,
+    desconto: str,
+    codigo: str | None,
+    validade: str | None,
+    link_assinatura: str | None,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Desconto dado pela equipe do Ledgr à conta (issue #169). Com `codigo`, o
+    cliente o digita na página de pagamento até a `validade` (já formatada);
+    sem ele, o desconto foi aplicado direto na assinatura e nada precisa ser
+    feito. O código é de uso único e só serve a esta conta."""
+    onde = f" ({link_assinatura})" if link_assinatura else ""
+    if codigo:
+        corpo = (
+            f"A equipe da Ledgr liberou um desconto para a conta da empresa {razao_social}: "
+            f"{desconto}.\n\n"
+            f"Para usar, abra a tela Assinatura{onde}, escolha o plano e, na página de "
+            "pagamento, informe o código:\n\n"
+            f"{codigo}\n\n"
+            f"O código vale até {validade}, só funciona nesta conta e pode ser usado uma vez."
+        )
+        corpo_html = (
+            f"<p>A equipe da Ledgr liberou um desconto para a conta da empresa "
+            f"{escape(razao_social)}: {escape(desconto)}.</p>"
+            "<p>Para usar, abra a tela Assinatura"
+            + (
+                f' (<a href="{escape(link_assinatura, quote=True)}">abrir</a>)'
+                if link_assinatura
+                else ""
+            )
+            + ", escolha o plano e, na página de pagamento, informe o código:</p>"
+            f"<p><strong>{escape(codigo)}</strong></p>"
+            f"<p>O código vale até {escape(validade or '')}, só funciona nesta conta e "
+            "pode ser usado uma vez.</p>"
+        )
+    else:
+        corpo = (
+            f"A equipe da Ledgr aplicou um desconto na assinatura da empresa {razao_social}: "
+            f"{desconto}.\n\n"
+            f"Ele aparece nas próximas faturas, e você não precisa fazer nada. Os detalhes "
+            f"ficam na tela Assinatura{onde}."
+        )
+        corpo_html = (
+            f"<p>A equipe da Ledgr aplicou um desconto na assinatura da empresa "
+            f"{escape(razao_social)}: {escape(desconto)}.</p>"
+            "<p>Ele aparece nas próximas faturas, e você não precisa fazer nada. Os "
+            "detalhes ficam na tela Assinatura"
+            + (
+                f' (<a href="{escape(link_assinatura, quote=True)}">abrir</a>)'
+                if link_assinatura
+                else ""
+            )
+            + ".</p>"
+        )
+    texto = f"Olá, {nome}.\n\n{corpo}\n\nEquipe Ledgr"
+    html = f"<p>Olá, {escape(nome)}.</p>{corpo_html}<p>Equipe Ledgr</p>"
+    return MensagemEmail(
+        para=para,
+        assunto="Um desconto para a sua conta Ledgr",
         texto=texto,
         html=html,
         chave_idempotencia=chave_idempotencia,
