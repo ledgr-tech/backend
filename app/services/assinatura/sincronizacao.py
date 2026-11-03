@@ -180,6 +180,7 @@ def aplicar_assinatura(db: Session, assinatura: dict) -> str:
         assinatura
     )
     atual.atualizada_em = func.now()
+    _marcar_cupons_usados(db, conta, _codigos_da_assinatura(assinatura))
     db.flush()
     logger.info(
         "assinatura resultado=sincronizada conta_id=%s status=%s plano=%s periodo=%s",
@@ -206,6 +207,18 @@ def sincronizar_assinatura(db: Session, subscription_id: str) -> str:
     return aplicar_assinatura(db, assinatura)
 
 
+def _codigos_da_assinatura(assinatura: dict) -> set[str]:
+    """Os ids dos códigos promocionais dos descontos da assinatura. Só os
+    descontos expandidos (`buscar_assinatura` expande `discounts`) trazem o
+    `promotion_code`; um id solto não diz nada."""
+    codigos = (
+        _id(desconto.get("promotion_code"))
+        for desconto in assinatura.get("discounts") or []
+        if isinstance(desconto, dict)
+    )
+    return {codigo for codigo in codigos if codigo}
+
+
 def _codigos_da_sessao(sessao: dict) -> set[str]:
     """Os ids dos códigos promocionais usados na sessão: os `discounts` dela e,
     se a Stripe os trouxer, o detalhamento do total."""
@@ -218,10 +231,12 @@ def _codigos_da_sessao(sessao: dict) -> set[str]:
     return {codigo for codigo in codigos if codigo}
 
 
-def _marcar_cupons_usados(db: Session, conta: Conta, sessao: dict) -> None:
-    """Preenche `usado_em` do cupom de `cupons_enviados` (forma "codigo") cujo
-    código promocional aparece nos descontos da sessão (issue #169)."""
-    codigos = _codigos_da_sessao(sessao)
+def _marcar_cupons_usados(db: Session, conta: Conta, codigos: set[str]) -> None:
+    """Preenche `usado_em` do cupom de `cupons_enviados` (forma "codigo") da
+    conta cujo código promocional está em `codigos` (issue #169). Duas leituras
+    chegam aqui: os descontos da sessão do checkout e os da assinatura
+    sincronizada. A que chegar primeiro preenche; a outra não sobrescreve,
+    porque só olha os que ainda estão sem `usado_em`."""
     if not codigos:
         return
     cupons = db.scalars(
@@ -252,7 +267,7 @@ def concluir_checkout(db: Session, sessao: dict) -> str:
         return "sem_conta"
     _ligar_cliente(conta, cliente_id)
     db.flush()
-    _marcar_cupons_usados(db, conta, sessao)
+    _marcar_cupons_usados(db, conta, _codigos_da_sessao(sessao))
     subscription_id = _id(sessao.get("subscription"))
     if subscription_id is None:
         return "sem_assinatura"

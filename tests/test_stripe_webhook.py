@@ -907,3 +907,124 @@ def test_usado_em_nao_muda_quando_o_evento_chega_de_novo(db_session, conta, stri
 
     assert resposta.json() == {"resultado": "duplicado"}
     assert _usado_em(db_session, cupom.id) == primeiro
+
+
+# --- cupom usado pela assinatura (issue #169) -------------------------------------------------
+
+
+def _desconto(promo: str | None, desconto_id: str = "di_1") -> dict:
+    return {"id": desconto_id, "promotion_code": promo}
+
+
+def test_sincronizar_a_assinatura_expande_os_descontos_para_ler_o_codigo(
+    db_session, conta, stripe_falso
+):
+    _na_stripe(stripe_falso, conta, discounts=[_desconto("promo_1")])
+
+    _enviar(_evento("customer.subscription.created", {"id": "sub_1"}))
+
+    (leitura,) = stripe_falso.chamadas_de("Subscription.retrieve")
+    assert leitura["expand"] == ["discounts"]
+
+
+def test_assinatura_com_o_codigo_do_cupom_nos_descontos_preenche_usado_em(
+    db_session, conta, stripe_falso
+):
+    cupom = _cupom_enviado(db_session, conta)
+    _na_stripe(
+        stripe_falso, conta, discounts=[_desconto("promo_outro", "di_0"), _desconto("promo_1")]
+    )
+
+    resposta = _enviar(_evento("customer.subscription.created", {"id": "sub_1"}))
+
+    assert resposta.status_code == 200
+    assert _usado_em(db_session, cupom.id) is not None
+
+
+def test_descontos_sem_o_codigo_do_cupom_deixam_usado_em_nulo(db_session, conta, stripe_falso):
+    cupom = _cupom_enviado(db_session, conta)
+    na_assinatura = _cupom_enviado(db_session, conta, forma="assinatura")
+    # Desconto sem código (cupom aplicado direto), com outro código, e um id solto.
+    _na_stripe(
+        stripe_falso,
+        conta,
+        discounts=[_desconto(None, "di_1"), _desconto("promo_outro", "di_2"), "di_3"],
+    )
+
+    _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+
+    assert _usado_em(db_session, cupom.id) is None
+    assert _usado_em(db_session, na_assinatura.id) is None
+
+
+def test_codigo_de_cupom_de_outra_conta_e_ignorado_pela_sincronizacao(
+    db_session, criar_empresa, conta, stripe_falso
+):
+    outra = db_session.get(Conta, criar_empresa().conta_id)
+    de_outra = _cupom_enviado(db_session, outra, promo="promo_1")
+    _na_stripe(stripe_falso, conta, discounts=[_desconto("promo_1")])
+
+    _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+
+    assert _usado_em(db_session, de_outra.id) is None
+
+
+def test_checkout_e_assinatura_com_o_mesmo_codigo_nao_duplicam_nem_sobrescrevem(
+    db_session, conta, stripe_falso
+):
+    _na_stripe(stripe_falso, conta, discounts=[_desconto("promo_1")])
+    cupom = _cupom_enviado(db_session, conta)
+
+    # A assinatura chega primeiro e preenche.
+    _enviar(_evento("customer.subscription.created", {"id": "sub_1"}))
+    primeiro = _usado_em(db_session, cupom.id)
+    assert primeiro is not None
+    # O checkout, depois, não sobrescreve.
+    sessao = _checkout(conta, discounts=[{"promotion_code": "promo_1"}])
+    _enviar(_evento("checkout.session.completed", sessao))
+    _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+
+    assert _usado_em(db_session, cupom.id) == primeiro
+
+
+def test_checkout_primeiro_e_assinatura_depois_tambem_nao_sobrescrevem(
+    db_session, conta, stripe_falso
+):
+    _na_stripe(stripe_falso, conta, discounts=[_desconto("promo_1")])
+    cupom = _cupom_enviado(db_session, conta)
+
+    sessao = _checkout(conta, discounts=[{"promotion_code": "promo_1"}])
+    _enviar(_evento("checkout.session.completed", sessao))
+    primeiro = _usado_em(db_session, cupom.id)
+    assert primeiro is not None
+    _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+
+    assert _usado_em(db_session, cupom.id) == primeiro
+
+
+def test_checkout_sem_o_codigo_nos_descontos_e_assinatura_com_ele_preenchem_pela_assinatura(
+    db_session, conta, stripe_falso
+):
+    """O caso que as duas leituras cobrem juntas: a sessão não traz o código, a
+    assinatura relida traz."""
+    _na_stripe(stripe_falso, conta, discounts=[_desconto("promo_1")])
+    cupom = _cupom_enviado(db_session, conta)
+
+    _enviar(_evento("checkout.session.completed", _checkout(conta)))
+
+    assert _usado_em(db_session, cupom.id) is not None
+
+
+def test_assinatura_antiga_nao_marca_cupom_usado(db_session, conta, stripe_falso):
+    """Evento atrasado de uma assinatura encerrada, ignorado pela regra da
+    assinatura antiga, também não conta como uso do código."""
+    _na_stripe(stripe_falso, conta, "sub_nova", status="active")
+    _enviar(_evento("customer.subscription.created", {"id": "sub_nova"}))
+    cupom = _cupom_enviado(db_session, conta)
+    _na_stripe(
+        stripe_falso, conta, "sub_velha", status="canceled", discounts=[_desconto("promo_1")]
+    )
+
+    _enviar(_evento("customer.subscription.deleted", {"id": "sub_velha"}))
+
+    assert _usado_em(db_session, cupom.id) is None

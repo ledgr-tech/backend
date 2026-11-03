@@ -149,7 +149,14 @@ class StripeFalso:
             raise stripe.InvalidRequestError(
                 "No such subscription", param="id", code="resource_missing"
             )
-        return objeto(self.assinaturas[id])
+        assinatura = dict(self.assinaturas[id])
+        # Como a Stripe: `discounts` são ids, e `expand=["discounts"]` os traz
+        # inteiros (com o `promotion_code`).
+        if "discounts" in (params.get("expand") or []):
+            assinatura["discounts"] = [dict(d) for d in assinatura["discounts"]]
+        else:
+            assinatura["discounts"] = [d["id"] for d in assinatura["discounts"]]
+        return objeto(assinatura)
 
     def coupon_retrieve(self, id, **params):
         self._registrar("Coupon.retrieve", {"id": id, **params})
@@ -208,15 +215,22 @@ class StripeFalso:
                 "feedback": detalhes.get("feedback"),
             }
         if "discounts" in params:
-            existentes = set(assinatura.get("discounts") or [])
+            existentes = {d["id"]: d for d in assinatura["discounts"]}
             novos = []
             for desconto in params["discounts"]:
                 if "discount" in desconto:
                     if desconto["discount"] not in existentes:
                         raise stripe.InvalidRequestError("No such discount", param="discounts")
-                    novos.append(desconto["discount"])
+                    novos.append(existentes[desconto["discount"]])
                 elif desconto.get("coupon") in self.cupons:
-                    novos.append(self._id("di"))
+                    novos.append(
+                        {
+                            "id": self._id("di"),
+                            "object": "discount",
+                            "coupon": desconto["coupon"],
+                            "promotion_code": None,
+                        }
+                    )
                 else:
                     raise stripe.InvalidRequestError(
                         "No such coupon", param="discounts[coupon]", code="resource_missing"
@@ -273,7 +287,7 @@ def assinatura_da_stripe(
     cancelada_em: int | None = None,
     metadata: bool = True,
     cancellation_details: dict | None = None,
-    discounts: list[str] | None = None,
+    discounts: list[str | dict] | None = None,
 ) -> dict:
     """A Subscription como a API de 2026-10-28 a devolve: o fim do período fica
     no item, não na assinatura."""
@@ -287,7 +301,15 @@ def assinatura_da_stripe(
         "canceled_at": cancelada_em,
         "cancellation_details": cancellation_details
         or {"reason": None, "comment": None, "feedback": None},
-        "discounts": discounts or [],
+        # Cada desconto como objeto; o `retrieve` os devolve em ids ou inteiros.
+        "discounts": [
+            {
+                "object": "discount",
+                "promotion_code": None,
+                **(d if isinstance(d, dict) else {"id": d}),
+            }
+            for d in discounts or []
+        ],
         "items": {
             "object": "list",
             "data": [

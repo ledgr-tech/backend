@@ -192,7 +192,12 @@ def criar_sessao_de_checkout(
 
 
 def buscar_assinatura(chave: str, subscription_id: str) -> dict:
-    return stripe.Subscription.retrieve(subscription_id, **_opcoes(chave)).to_dict()
+    """A Subscription, com `discounts` expandido: sem isso, a lista só traz os
+    ids, e o código promocional (`promotion_code`) de cada desconto fica de
+    fora."""
+    return stripe.Subscription.retrieve(
+        subscription_id, expand=["discounts"], **_opcoes(chave)
+    ).to_dict()
 
 
 def evento_do_webhook(corpo: bytes, assinatura: str | None, segredo: str) -> dict:
