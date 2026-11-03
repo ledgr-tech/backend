@@ -19,7 +19,7 @@ from sqlalchemy import delete, func, select
 from stripe_falso import assinatura_da_stripe
 
 from app.core.config import settings
-from app.models import AssinaturaStripe, Conta, EventoStripe, PagamentoStripe
+from app.models import AssinaturaStripe, Conta, CupomEnviado, EventoStripe, PagamentoStripe
 from main import app
 
 client = TestClient(app)
@@ -668,3 +668,206 @@ def test_so_o_webhook_muda_a_situacao_da_conta(
         .replace("+00:00", "Z"),
         "cancelar_no_fim_do_periodo": True,
     }
+
+
+# --- motivo e origem do cancelamento (issue #169) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("detalhes", "status", "agendado", "esperado"),
+    [
+        # Sem cancelamento, nada: mesmo com sobra de detalhes de antes.
+        ({"reason": "cancellation_requested", "comment": "ledgr:operador"}, "active", False, None),
+        ({"reason": None, "comment": None}, "active", False, None),
+        # A marca do `/admin` vale mais que o `reason`.
+        (
+            {"reason": "cancellation_requested", "comment": "ledgr:operador"},
+            "active",
+            True,
+            ("cancellation_requested", "operador"),
+        ),
+        (
+            {"reason": "cancellation_requested", "comment": "ledgr:operador"},
+            "canceled",
+            False,
+            ("cancellation_requested", "operador"),
+        ),
+        (
+            {"reason": "cancellation_requested"},
+            "active",
+            True,
+            ("cancellation_requested", "cliente"),
+        ),
+        ({"reason": "payment_failed"}, "canceled", False, ("payment_failed", "falta_de_pagamento")),
+        (
+            {"reason": "payment_disputed"},
+            "canceled",
+            False,
+            ("payment_disputed", "falta_de_pagamento"),
+        ),
+        # Cancelada direto na Stripe, sem pedido do cliente nem falha de pagamento.
+        ({"reason": None, "comment": None}, "canceled", False, (None, "painel_stripe")),
+        (
+            {"reason": "canceled_by_retention_policy"},
+            "canceled",
+            False,
+            (
+                "canceled_by_retention_policy",
+                "painel_stripe",
+            ),
+        ),
+        (None, "canceled", False, (None, "painel_stripe")),
+    ],
+)
+def test_motivo_e_origem_do_cancelamento_saem_do_cancellation_details(
+    db_session, conta, stripe_falso, detalhes, status, agendado, esperado
+):
+    _na_stripe(
+        stripe_falso,
+        conta,
+        status=status,
+        cancelar_no_fim=agendado,
+        cancellation_details=detalhes,
+    )
+    if detalhes is None:
+        stripe_falso.assinaturas["sub_1"]["cancellation_details"] = None
+
+    resposta = _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+
+    assert resposta.status_code == 200
+    assinatura = _assinatura(db_session, conta.id)
+    assert (assinatura.motivo_cancelamento, assinatura.origem_cancelamento) == (
+        esperado or (None, None)
+    )
+
+
+def test_desfazer_o_cancelamento_limpa_motivo_e_origem(db_session, conta, stripe_falso):
+    _na_stripe(
+        stripe_falso,
+        conta,
+        cancelar_no_fim=True,
+        cancellation_details={"reason": "cancellation_requested", "comment": "ledgr:operador"},
+    )
+    _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+    assert _assinatura(db_session, conta.id).origem_cancelamento == "operador"
+
+    stripe_falso.assinaturas["sub_1"]["cancel_at_period_end"] = False
+    _enviar(_evento("customer.subscription.updated", {"id": "sub_1"}))
+
+    assinatura = _assinatura(db_session, conta.id)
+    assert (assinatura.motivo_cancelamento, assinatura.origem_cancelamento) == (None, None)
+
+
+# --- cupom usado no checkout (issue #169) -----------------------------------------------------
+
+
+def _cupom_enviado(db_session, conta, *, promo="promo_1", forma="codigo", **campos) -> CupomEnviado:
+    cupom = CupomEnviado(
+        conta_id=conta.id,
+        stripe_coupon_id="cupom_20",
+        cupom_nome="Vinte por cento",
+        desconto="20% por 3 meses",
+        forma=forma,
+        codigo=f"LEDGR-{promo.upper()}" if forma == "codigo" else None,
+        stripe_promotion_code_id=promo if forma == "codigo" else None,
+        expira_em=datetime(2027, 1, 1, tzinfo=UTC) if forma == "codigo" else None,
+        **campos,
+    )
+    db_session.add(cupom)
+    db_session.commit()
+    return cupom
+
+
+def _checkout(conta, **campos) -> dict:
+    return {
+        "id": "cs_test_1",
+        "mode": "subscription",
+        "client_reference_id": str(conta.id),
+        "customer": conta.stripe_customer_id,
+        "subscription": "sub_1",
+        **campos,
+    }
+
+
+def _usado_em(db_session, cupom_id):
+    db_session.expire_all()
+    return db_session.get(CupomEnviado, cupom_id).usado_em
+
+
+@pytest.mark.parametrize(
+    "descontos",
+    [
+        {"discounts": [{"coupon": None, "promotion_code": "promo_1"}]},
+        {"discounts": [{"promotion_code": {"id": "promo_1", "object": "promotion_code"}}]},
+        {
+            "total_details": {
+                "breakdown": {
+                    "discounts": [{"amount": 100, "discount": {"promotion_code": "promo_1"}}]
+                }
+            }
+        },
+    ],
+)
+def test_checkout_com_o_codigo_do_cupom_preenche_usado_em(
+    db_session, conta, stripe_falso, descontos
+):
+    _na_stripe(stripe_falso, conta, status="active")
+    cupom = _cupom_enviado(db_session, conta)
+    assert _usado_em(db_session, cupom.id) is None
+
+    resposta = _enviar(_evento("checkout.session.completed", _checkout(conta, **descontos)))
+
+    assert resposta.status_code == 200
+    assert _usado_em(db_session, cupom.id) is not None
+    assert _assinatura(db_session, conta.id).status == "active"
+
+
+def test_so_o_cupom_cujo_codigo_esta_nos_descontos_e_marcado(
+    db_session, criar_empresa, conta, stripe_falso
+):
+    _na_stripe(stripe_falso, conta, status="active")
+    usado = _cupom_enviado(db_session, conta, promo="promo_1")
+    outro = _cupom_enviado(db_session, conta, promo="promo_2")
+    na_assinatura = _cupom_enviado(db_session, conta, forma="assinatura")
+    outra_conta = db_session.get(Conta, criar_empresa().conta_id)
+    de_outra_conta = _cupom_enviado(db_session, outra_conta, promo="promo_1x")
+
+    sessao = _checkout(conta, discounts=[{"promotion_code": "promo_1"}])
+    _enviar(_evento("checkout.session.completed", sessao))
+
+    assert _usado_em(db_session, usado.id) is not None
+    for nao in (outro, de_outra_conta):
+        assert _usado_em(db_session, nao.id) is None
+    assert _usado_em(db_session, na_assinatura.id) is None
+
+
+def test_checkout_sem_desconto_ou_com_outro_codigo_deixa_usado_em_nulo(
+    db_session, conta, stripe_falso
+):
+    _na_stripe(stripe_falso, conta, status="active")
+    cupom = _cupom_enviado(db_session, conta)
+
+    _enviar(_evento("checkout.session.completed", _checkout(conta)))
+    _enviar(
+        _evento(
+            "checkout.session.completed",
+            _checkout(conta, discounts=[{"promotion_code": "promo_de_outro"}]),
+        )
+    )
+
+    assert _usado_em(db_session, cupom.id) is None
+
+
+def test_usado_em_nao_muda_quando_o_evento_chega_de_novo(db_session, conta, stripe_falso):
+    _na_stripe(stripe_falso, conta, status="active")
+    cupom = _cupom_enviado(db_session, conta)
+    evento = _evento(
+        "checkout.session.completed", _checkout(conta, discounts=[{"promotion_code": "promo_1"}])
+    )
+    _enviar(evento)
+    primeiro = _usado_em(db_session, cupom.id)
+
+    resposta = _enviar(evento)
+
+    assert resposta.json() == {"resultado": "duplicado"}
+    assert _usado_em(db_session, cupom.id) == primeiro

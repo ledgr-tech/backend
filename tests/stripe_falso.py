@@ -1,4 +1,4 @@
-"""A Stripe em memória para os testes (issues #166 e #167): troca, por
+"""A Stripe em memória para os testes (issues #166, #167 e #169): troca, por
 funções que gravam as chamadas, os métodos da biblioteca `stripe` que o app e o
 script do catálogo usam. Nenhum teste fala com a Stripe de verdade.
 
@@ -6,9 +6,15 @@ As chamadas ficam em `chamadas` como `(nome, parametros)`, para os testes
 conferirem o que foi enviado (inclusive `idempotency_key`, `api_key` e
 `stripe_version`). `assinaturas` é o que `Subscription.retrieve` devolve,
 indexado pelo id: o teste põe ali o estado da assinatura "na Stripe".
+
+Para o painel `/admin` (issue #169): `cupons` (o que há no painel da Stripe),
+`codigos` (os códigos promocionais criados), e `Subscription.modify` e `.cancel`
+mexem no estado em `assinaturas`, como a Stripe real: o cancelamento agendado e
+o imediato gravam `cancellation_details`, e `discounts` guarda os descontos.
 """
 
 import itertools
+import time
 from types import SimpleNamespace
 
 import stripe
@@ -26,6 +32,8 @@ class StripeFalso:
         self.clientes: dict[str, dict] = {}
         self.sessoes: dict[str, dict] = {}
         self.assinaturas: dict[str, dict] = {}
+        self.cupons: dict[str, dict] = {}
+        self.codigos: dict[str, dict] = {}
         # Com isto, o Customer.create com tax id é recusado (CNPJ no formato novo).
         self.recusar_tax_id = False
         # Com isto, toda chamada levanta um erro da Stripe.
@@ -143,6 +151,96 @@ class StripeFalso:
             )
         return objeto(self.assinaturas[id])
 
+    def coupon_retrieve(self, id, **params):
+        self._registrar("Coupon.retrieve", {"id": id, **params})
+        if id not in self.cupons:
+            raise stripe.InvalidRequestError("No such coupon", param="id", code="resource_missing")
+        return objeto(self.cupons[id])
+
+    def coupon_list(self, **params):
+        self._registrar("Coupon.list", params)
+        return SimpleNamespace(
+            data=[objeto(c) for c in self.cupons.values()][: params.get("limit", 10)]
+        )
+
+    def promotion_code_create(self, **params):
+        self._registrar("PromotionCode.create", params)
+        # Na versão fixada o cupom vai em `promotion`, e `coupon` não existe mais.
+        if "coupon" in params:
+            raise stripe.InvalidRequestError("Received unknown parameter: coupon", param="coupon")
+        promocao = params.get("promotion") or {}
+        if promocao.get("type") != "coupon" or promocao.get("coupon") not in self.cupons:
+            raise stripe.InvalidRequestError(
+                "No such coupon", param="promotion[coupon]", code="resource_missing"
+            )
+        codigo = {
+            "id": self._id("promo"),
+            "object": "promotion_code",
+            "active": True,
+            "code": params["code"],
+            "customer": params.get("customer"),
+            "expires_at": params.get("expires_at"),
+            "max_redemptions": params.get("max_redemptions"),
+            "metadata": params.get("metadata", {}),
+            "promotion": {"type": "coupon", "coupon": promocao["coupon"]},
+            "times_redeemed": 0,
+        }
+        self.codigos[codigo["id"]] = codigo
+        return objeto(codigo)
+
+    def subscription_modify(self, id, **params):
+        self._registrar("Subscription.modify", {"id": id, **params})
+        if id not in self.assinaturas:
+            raise stripe.InvalidRequestError(
+                "No such subscription", param="id", code="resource_missing"
+            )
+        assinatura = self.assinaturas[id]
+        if "cancel_at_period_end" in params:
+            assinatura["cancel_at_period_end"] = params["cancel_at_period_end"]
+            # A Stripe grava `canceled_at` já ao agendar, e o limpa ao desfazer.
+            assinatura["canceled_at"] = int(time.time()) if params["cancel_at_period_end"] else None
+        if "cancellation_details" in params:
+            comentario = params["cancellation_details"].get("comment") or None
+            detalhes = assinatura.get("cancellation_details") or {}
+            assinatura["cancellation_details"] = {
+                "reason": "cancellation_requested" if assinatura["cancel_at_period_end"] else None,
+                "comment": comentario,
+                "feedback": detalhes.get("feedback"),
+            }
+        if "discounts" in params:
+            existentes = set(assinatura.get("discounts") or [])
+            novos = []
+            for desconto in params["discounts"]:
+                if "discount" in desconto:
+                    if desconto["discount"] not in existentes:
+                        raise stripe.InvalidRequestError("No such discount", param="discounts")
+                    novos.append(desconto["discount"])
+                elif desconto.get("coupon") in self.cupons:
+                    novos.append(self._id("di"))
+                else:
+                    raise stripe.InvalidRequestError(
+                        "No such coupon", param="discounts[coupon]", code="resource_missing"
+                    )
+            assinatura["discounts"] = novos
+        return objeto(assinatura)
+
+    def subscription_cancel(self, id, **params):
+        self._registrar("Subscription.cancel", {"id": id, **params})
+        if id not in self.assinaturas:
+            raise stripe.InvalidRequestError(
+                "No such subscription", param="id", code="resource_missing"
+            )
+        assinatura = self.assinaturas[id]
+        assinatura["status"] = "canceled"
+        assinatura["canceled_at"] = int(time.time())
+        detalhes = params.get("cancellation_details") or {}
+        assinatura["cancellation_details"] = {
+            "reason": "cancellation_requested",
+            "comment": detalhes.get("comment") or None,
+            "feedback": None,
+        }
+        return objeto(assinatura)
+
     def instalar(self, monkeypatch) -> None:
         for classe, nome, funcao in (
             (stripe.Price, "list", self.price_list),
@@ -154,6 +252,11 @@ class StripeFalso:
             (stripe.Customer, "create", self.customer_create),
             (stripe.checkout.Session, "create", self.session_create),
             (stripe.Subscription, "retrieve", self.subscription_retrieve),
+            (stripe.Subscription, "modify", self.subscription_modify),
+            (stripe.Subscription, "cancel", self.subscription_cancel),
+            (stripe.Coupon, "retrieve", self.coupon_retrieve),
+            (stripe.Coupon, "list", self.coupon_list),
+            (stripe.PromotionCode, "create", self.promotion_code_create),
         ):
             monkeypatch.setattr(classe, nome, staticmethod(funcao))
 
@@ -169,6 +272,8 @@ def assinatura_da_stripe(
     cancelar_no_fim: bool = False,
     cancelada_em: int | None = None,
     metadata: bool = True,
+    cancellation_details: dict | None = None,
+    discounts: list[str] | None = None,
 ) -> dict:
     """A Subscription como a API de 2026-10-28 a devolve: o fim do período fica
     no item, não na assinatura."""
@@ -180,6 +285,9 @@ def assinatura_da_stripe(
         "metadata": {"conta_id": str(conta_id)} if metadata else {},
         "cancel_at_period_end": cancelar_no_fim,
         "canceled_at": cancelada_em,
+        "cancellation_details": cancellation_details
+        or {"reason": None, "comment": None, "feedback": None},
+        "discounts": discounts or [],
         "items": {
             "object": "list",
             "data": [
@@ -190,4 +298,30 @@ def assinatura_da_stripe(
                 }
             ],
         },
+    }
+
+
+def cupom_da_stripe(
+    cupom_id: str = "cupom_20",
+    *,
+    nome: str | None = "Vinte por cento",
+    percent_off: float | None = 20,
+    amount_off: int | None = None,
+    duration: str = "repeating",
+    duration_in_months: int | None = 3,
+    valido: bool = True,
+    redeem_by: int | None = None,
+) -> dict:
+    """O Coupon como a API devolve."""
+    return {
+        "id": cupom_id,
+        "object": "coupon",
+        "name": nome,
+        "percent_off": percent_off,
+        "amount_off": amount_off,
+        "currency": "brl" if amount_off is not None else None,
+        "duration": duration,
+        "duration_in_months": duration_in_months if duration == "repeating" else None,
+        "valid": valido,
+        "redeem_by": redeem_by,
     }
