@@ -11,7 +11,17 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base
 
 RESULTADOS_DE_ACESSO = ("permitido", "nao_operador", "login_antigo")
-TIPOS_DE_EVENTO_DA_CONTA = ("inativada", "reativada", "piloto_ligado", "piloto_desligado")
+TIPOS_DE_EVENTO_DA_CONTA = (
+    "inativada",
+    "reativada",
+    "piloto_ligado",
+    "piloto_desligado",
+    # Issue #169: ações do operador sobre a assinatura e cupons.
+    "assinatura_cancelada",
+    "cancelamento_agendado",
+    "cancelamento_desfeito",
+    "cupom_enviado",
+)
 ORIGENS_DE_EVENTO = ("painel", "script")
 
 
@@ -91,8 +101,9 @@ class AcessoAdmin(Base):
 
 
 class EventoConta(Base):
-    """Inativação, reativação e piloto ativo de uma conta (issue #156,
-    ADR-025), só de inserção. O estado atual fica em `contas`
+    """Inativação, reativação, piloto ativo e, desde a issue #169, cancelamento
+    da assinatura (na hora ou agendado), cancelamento desfeito e cupom enviado
+    de uma conta (ADR-025), só de inserção. O estado atual fica em `contas`
     (`inativada_em`, `assinatura_ativa`); aqui, quem fez, quando e por quê.
 
     `operador_id` é nulo quando veio do script (`origem` "script"). O nome do
@@ -113,7 +124,7 @@ class EventoConta(Base):
     conta_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("contas.id"), nullable=False
     )
-    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(30), nullable=False)
     motivo: Mapped[str] = mapped_column(String(500), nullable=False)
     operador_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

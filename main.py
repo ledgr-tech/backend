@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from slowapi.errors import RateLimitExceeded
 
 from app.api.admin import router as admin_router
+from app.api.admin_assinaturas import router as admin_assinaturas_router
 from app.api.assinatura import router as assinatura_router
 from app.api.assistente import router as assistente_router
 from app.api.auth import router as auth_router
@@ -99,6 +100,7 @@ app.include_router(documentacao_publica_router)
 app.include_router(oauth_router)
 app.include_router(conexoes_mcp_router)
 app.include_router(admin_router)
+app.include_router(admin_assinaturas_router)
 # Rota exata, sem Mount: um Mount redirecionaria /mcp para /mcp/.
 app.router.add_route(caminho_do_mcp(), PortaDoMcp(), include_in_schema=False)
 

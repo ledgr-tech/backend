@@ -10,6 +10,17 @@ A conta é achada pela metadata `conta_id` (que o checkout põe na assinatura) o
 na falta dela, pelo cliente (`contas.stripe_customer_id`). Assinatura de preço
 que não é do Ledgr, ou sem conta, é ignorada e logada.
 
+O motivo e a origem do cancelamento (issue #169) saem do `cancellation_details`
+da assinatura a cada sincronização, e só valem com ela cancelada ou com o
+cancelamento agendado: a marca no `comment` diz `operador` (`ledgr:operador`,
+das ações do `/admin`) ou `cliente` (`ledgr:cliente`, do cancelamento pelo
+próprio cliente, que ainda não existe); `payment_failed` e `payment_disputed`
+são `falta_de_pagamento`; todo o resto é `painel_stripe`.
+
+O `usado_em` do cupom dado pelo `/admin` (issue #169) sai de duas leituras: o
+`checkout.session.completed` e os descontos da assinatura relida da API (a que
+chegar primeiro preenche).
+
 Os pagamentos (uma linha por fatura) vêm do payload da fatura: só campos
 estáveis entre versões da API. Uma fatura `paga` não volta a `falhou` se o
 evento da falha chegar depois. Fatura de valor zero (a que a Stripe cria ao
@@ -29,7 +40,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.plano import STATUS_EM_ANDAMENTO
-from app.models import AssinaturaStripe, Conta, PagamentoStripe
+from app.models import AssinaturaStripe, Conta, CupomEnviado, PagamentoStripe
 from app.services.assinatura import stripe_api
 
 logger = logging.getLogger(__name__)
@@ -91,6 +102,37 @@ def _preco_do_ledgr(assinatura: dict) -> tuple[dict, str, str] | None:
     return None
 
 
+MOTIVOS_DE_FALTA_DE_PAGAMENTO = frozenset({"payment_failed", "payment_disputed"})
+
+
+def motivo_e_origem_do_cancelamento(assinatura: dict) -> tuple[str | None, str | None]:
+    """O `cancellation_details.reason` e a origem do cancelamento, ou `(None,
+    None)` com a assinatura andando e sem cancelamento agendado.
+
+    A origem não é chute: `operador` e `cliente` só saem das marcas que o
+    próprio Ledgr envia no `comment`; `falta_de_pagamento`, de `payment_failed`
+    e `payment_disputed`; o resto (inclusive um `cancellation_requested` sem
+    marca) é `painel_stripe`, porque só o painel da Stripe cancela sem passar
+    pelo Ledgr."""
+    cancelando = assinatura.get("status") == "canceled" or bool(
+        assinatura.get("cancel_at_period_end")
+    )
+    if not cancelando:
+        return None, None
+    detalhes = assinatura.get("cancellation_details") or {}
+    motivo = detalhes.get("reason") or None
+    comentario = detalhes.get("comment")
+    if comentario == stripe_api.MARCA_DO_OPERADOR:
+        origem = "operador"
+    elif comentario == stripe_api.MARCA_DO_CLIENTE:
+        origem = "cliente"
+    elif motivo in MOTIVOS_DE_FALTA_DE_PAGAMENTO:
+        origem = "falta_de_pagamento"
+    else:
+        origem = "painel_stripe"
+    return motivo, origem
+
+
 def aplicar_assinatura(db: Session, assinatura: dict) -> str:
     """Grava `assinaturas_stripe` a partir da Subscription (já buscada na API).
     Devolve o resultado categorizado."""
@@ -134,7 +176,11 @@ def aplicar_assinatura(db: Session, assinatura: dict) -> str:
     )
     atual.cancelar_no_fim_do_periodo = bool(assinatura.get("cancel_at_period_end"))
     atual.cancelada_em = _instante(assinatura.get("canceled_at"))
+    atual.motivo_cancelamento, atual.origem_cancelamento = motivo_e_origem_do_cancelamento(
+        assinatura
+    )
     atual.atualizada_em = func.now()
+    _marcar_cupons_usados(db, conta, _codigos_da_assinatura(assinatura))
     db.flush()
     logger.info(
         "assinatura resultado=sincronizada conta_id=%s status=%s plano=%s periodo=%s",
@@ -161,6 +207,51 @@ def sincronizar_assinatura(db: Session, subscription_id: str) -> str:
     return aplicar_assinatura(db, assinatura)
 
 
+def _codigos_da_assinatura(assinatura: dict) -> set[str]:
+    """Os ids dos códigos promocionais dos descontos da assinatura. Só os
+    descontos expandidos (`buscar_assinatura` expande `discounts`) trazem o
+    `promotion_code`; um id solto não diz nada."""
+    codigos = (
+        _id(desconto.get("promotion_code"))
+        for desconto in assinatura.get("discounts") or []
+        if isinstance(desconto, dict)
+    )
+    return {codigo for codigo in codigos if codigo}
+
+
+def _codigos_da_sessao(sessao: dict) -> set[str]:
+    """Os ids dos códigos promocionais usados na sessão: os `discounts` dela e,
+    se a Stripe os trouxer, o detalhamento do total."""
+    descontos = list(sessao.get("discounts") or [])
+    detalhamento = (((sessao.get("total_details") or {}).get("breakdown")) or {}).get("discounts")
+    for item in detalhamento or []:
+        if isinstance(item, dict):
+            descontos.append(item.get("discount") or {})
+    codigos = (_id(desconto.get("promotion_code")) for desconto in descontos)
+    return {codigo for codigo in codigos if codigo}
+
+
+def _marcar_cupons_usados(db: Session, conta: Conta, codigos: set[str]) -> None:
+    """Preenche `usado_em` do cupom de `cupons_enviados` (forma "codigo") da
+    conta cujo código promocional está em `codigos` (issue #169). Duas leituras
+    chegam aqui: os descontos da sessão do checkout e os da assinatura
+    sincronizada. A que chegar primeiro preenche; a outra não sobrescreve,
+    porque só olha os que ainda estão sem `usado_em`."""
+    if not codigos:
+        return
+    cupons = db.scalars(
+        select(CupomEnviado).where(
+            CupomEnviado.conta_id == conta.id,
+            CupomEnviado.stripe_promotion_code_id.in_(codigos),
+            CupomEnviado.usado_em.is_(None),
+        )
+    ).all()
+    for cupom in cupons:
+        cupom.usado_em = func.now()
+        logger.info("checkout resultado=cupom_usado conta_id=%s cupom_id=%s", conta.id, cupom.id)
+    db.flush()
+
+
 def concluir_checkout(db: Session, sessao: dict) -> str:
     """`checkout.session.completed`: liga o cliente e a assinatura à conta pelo
     `client_reference_id` (a assinatura é buscada de novo na API)."""
@@ -176,6 +267,7 @@ def concluir_checkout(db: Session, sessao: dict) -> str:
         return "sem_conta"
     _ligar_cliente(conta, cliente_id)
     db.flush()
+    _marcar_cupons_usados(db, conta, _codigos_da_sessao(sessao))
     subscription_id = _id(sessao.get("subscription"))
     if subscription_id is None:
         return "sem_assinatura"

@@ -43,7 +43,6 @@ import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import status as http_status
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import plano as regra
@@ -58,6 +57,7 @@ from app.core.rate_limit import (
 )
 from app.models import Usuario
 from app.services.assinatura import precos, stripe_api
+from app.services.assinatura.cliente import garantir_cliente
 
 logger = logging.getLogger(__name__)
 
@@ -140,21 +140,7 @@ def iniciar_checkout(
             raise HTTPException(
                 status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE, detail=PLANO_INDISPONIVEL
             )
-        cliente_id = conta.stripe_customer_id
-        if cliente_id is None:
-            cliente_id = stripe_api.criar_cliente(
-                chave,
-                conta_id=conta_id,
-                razao_social=conta.razao_social,
-                cnpj=conta.cnpj,
-                email=admin.email,
-            )
-            conta.stripe_customer_id = cliente_id
-            try:
-                db.commit()
-            except IntegrityError:
-                db.rollback()
-                raise
+        cliente_id = garantir_cliente(db, chave, conta, admin.email)
         janela = int(agora.timestamp()) // JANELA_DA_IDEMPOTENCIA_SEGUNDOS
         url = stripe_api.criar_sessao_de_checkout(
             chave,

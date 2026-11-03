@@ -30,6 +30,7 @@ from app.models import (
     Configuracao,
     Conta,
     Convite,
+    CupomEnviado,
     DecisaoLinha,
     Empresa,
     EmpresaFavorita,
@@ -315,8 +316,17 @@ def _povoar(
         status="paga",
         ocorrido_em=datetime.now(UTC),
     )
-    db_session.add_all([assinatura, pagamento])
-    linhas += [assinatura, pagamento]
+    cupom = CupomEnviado(
+        conta_id=conta.id,
+        operador_id=operador.id,
+        operador_nome=NOME_ADMIN,
+        stripe_coupon_id="cupom_1",
+        cupom_nome="Cupom",
+        desconto="20% por 3 meses",
+        forma="assinatura",
+    )
+    db_session.add_all([assinatura, pagamento, cupom])
+    linhas += [assinatura, pagamento, cupom]
     db_session.commit()
     return (
         [(Conta, conta.id)]
