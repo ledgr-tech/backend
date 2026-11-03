@@ -216,13 +216,19 @@ def test_cria_a_sessao_de_assinatura_com_os_parametros_combinados(
     assert sessao["subscription_data"]["metadata"] == {"conta_id": conta_id}
     assert sessao["allow_promotion_codes"] is True
     assert sessao["locale"] == "pt-BR"
-    assert sessao["payment_method_types"] == ["card"]
+    # A API fixada não aceita `payment_method_types`: "só cartão" é do painel da Stripe.
+    assert "payment_method_types" not in sessao
     assert sessao["success_url"] == f"{FRONTEND_URL_TESTE}/assinatura?checkout=sucesso"
     assert sessao["cancel_url"] == f"{FRONTEND_URL_TESTE}/assinatura?checkout=cancelado"
     assert sessao["idempotency_key"]
     assert sessao["api_key"] == "sk_test_falsa"
     assert sessao["stripe_version"] == stripe.api_version
     assert sessao["customer"] == _conta(db_session, admin.conta_id).stripe_customer_id
+
+
+def test_a_stripe_falsa_recusa_payment_method_types_como_a_real(stripe_falso):
+    with pytest.raises(stripe.InvalidRequestError, match="no longer supported"):
+        stripe.checkout.Session.create(mode="subscription", payment_method_types=["card"])
 
 
 def test_o_preco_e_achado_pela_lookup_key(admin, cabecalho, precos):

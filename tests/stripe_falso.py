@@ -123,6 +123,13 @@ class StripeFalso:
 
     def session_create(self, **params):
         self._registrar("checkout.Session.create", params)
+        if "payment_method_types" in params:
+            # Como a Stripe real na versão fixada (2026-10-28.endive).
+            raise stripe.InvalidRequestError(
+                "The `payment_method_types` parameter is no longer supported when creating a "
+                "Checkout Session. Payment methods are now managed from your Dashboard settings.",
+                param="payment_method_types",
+            )
         sessao_id = self._id("cs_test")
         sessao = {"id": sessao_id, "object": "checkout.session", **params}
         self.sessoes[sessao_id] = sessao

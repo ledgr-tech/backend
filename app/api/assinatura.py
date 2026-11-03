@@ -18,7 +18,10 @@ toda: ignora `X-Ledgr-Empresa`. Corpo `{plano, periodo}`; valor fora de
   menos 48 horas no futuro; faltando menos que isso (ou com o teste já
   encerrado), não há `trial_end` e o primeiro pagamento é na hora, e o que
   sobrava do teste se perde. O front avisa antes de redirecionar.
-- Só cartão de crédito. O backend não recebe nem guarda dado de cartão.
+- Só cartão de crédito, garantido no painel da Stripe (Configurações > Pagamentos
+  > Formas de pagamento, só cartões ligados, em teste e em live): a API fixada
+  não aceita mais `payment_method_types` na Checkout Session. O backend não
+  recebe nem guarda dado de cartão.
 
 `GET /assinatura/precos` é pública (sem JWT, ignora `X-Ledgr-Empresa`): preço é
 informação pública, e a landing pode usá-la. Devolve a lista de preços do

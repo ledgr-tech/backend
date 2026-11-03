@@ -3,6 +3,8 @@
 - A versão da API é a `API_VERSION` abaixo, enviada em toda chamada. É a mesma
   que a biblioteca `stripe` fixada em requirements.in traz (tests/test_stripe_api.py
   confere): subir a biblioteca é revisar esta versão junto.
+- As formas de pagamento do checkout não vão na requisição: são as do painel da
+  Stripe (só cartão, ADR-026). Ver `criar_sessao_de_checkout`.
 - A chave vem de `STRIPE_SECRET_KEY`, só quando `STRIPE_HABILITADO` está ligada;
   senão `exigir_stripe` dá 503, e nada é chamado. O backend nunca recebe nem
   guarda dado de cartão: quem coleta o cartão é a página de checkout da Stripe.
@@ -150,7 +152,10 @@ def criar_sessao_de_checkout(
     chave_de_idempotencia: str,
 ) -> str:
     """Cria a Checkout Session em modo assinatura e devolve a URL. O cartão é
-    coletado pela Stripe, só cartão de crédito."""
+    coletado pela Stripe. Não envia `payment_method_types`: na API fixada
+    (2026-10-28.endive) o parâmetro não é mais aceito, e as formas de pagamento
+    vêm das configurações do painel da Stripe. "Só cartão" é lá que se garante
+    (Configurações > Pagamentos > Formas de pagamento), em teste e em live."""
     dados_da_assinatura: dict[str, Any] = {"metadata": {"conta_id": conta_id}}
     if trial_end is not None:
         dados_da_assinatura["trial_end"] = trial_end
@@ -163,7 +168,6 @@ def criar_sessao_de_checkout(
         subscription_data=dados_da_assinatura,
         allow_promotion_codes=True,
         locale="pt-BR",
-        payment_method_types=["card"],
         success_url=success_url,
         cancel_url=cancel_url,
         **_opcoes(chave, idempotency_key=chave_de_idempotencia),
