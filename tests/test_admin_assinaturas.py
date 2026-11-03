@@ -14,7 +14,7 @@ import pytest
 import stripe
 from conftest import FRONTEND_URL_TESTE
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from stripe_falso import assinatura_da_stripe, cupom_da_stripe
 
 from app.api.senha import obter_provedor_email_dependencia
@@ -25,6 +25,7 @@ from app.models import (
     Conta,
     CupomEnviado,
     EventoConta,
+    EventoStripe,
     PagamentoStripe,
     Usuario,
 )
@@ -897,8 +898,18 @@ def test_acoes_com_a_cobranca_desligada_dao_503(db_session, operador, cliente, m
     assert _get(o.headers, "/admin/cupons").status_code == 503
 
 
+@pytest.fixture
+def _eventos_stripe_apagados(db_session):
+    """O webhook grava o evento em `eventos_stripe`; tests/test_stripe_webhook.py
+    conta essa tabela inteira, então o que este módulo cria sai no fim."""
+    yield
+    db_session.rollback()
+    db_session.execute(delete(EventoStripe).where(EventoStripe.id.like("evt_teste_%")))
+    db_session.commit()
+
+
 def test_o_webhook_que_chega_depois_nao_muda_o_que_o_painel_gravou(
-    db_session, operador, cliente, stripe_falso
+    db_session, operador, cliente, stripe_falso, _eventos_stripe_apagados
 ):
     from test_stripe_webhook import _enviar, _evento
 
