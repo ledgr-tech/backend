@@ -30,7 +30,7 @@ from test_mcp_oauth import (
 )
 
 from app.core.config import settings
-from app.models import ConexaoMcp, Usuario
+from app.models import ConexaoMcp, Conta, Usuario
 from main import app
 
 BASE = "https://api.ledgr.teste"
@@ -38,6 +38,7 @@ DESCRICAO_SECRETA = "PAGAMENTO FORNECEDOR SIGILOSO"
 JUSTIFICATIVA_SECRETA = "Texto confidencial da justificativa"
 RESSALVA_SECRETA = "Ressalva confidencial do fechamento"
 NOME_DA_PESSOA = "Joana Pessoa Secreta"
+CIDADE_SECRETA = "Cidade Sigilosa Da Conta"  # issue #184
 VALOR_SO_DA_B = "777.77"
 FERRAMENTAS = {
     "empresa_conectada",
@@ -114,6 +115,10 @@ def cenario(
 
     cliente_http = TestClient(app_http)
     admin = criar_usuario(nome=NOME_DA_PESSOA)
+    # Cidade e UF da conta (issue #184) não podem aparecer no MCP.
+    conta = db_session.get(Conta, admin.conta_id)
+    conta.cidade, conta.uf = CIDADE_SECRETA, "AM"
+    db_session.commit()
     empresa_a = empresa_unica(db_session, admin.conta_id)
     empresa_b = criar_empresa(razao_social="Empresa B Ltda", conta_id=admin.conta_id).id
     jwt = gerar_token(admin.conta_id, usuario_id=admin.id)
@@ -295,6 +300,9 @@ def test_saidas_nao_tem_descricao_justificativa_ressalva_nomes_nem_arquivo(cenar
             JUSTIFICATIVA_SECRETA,
             RESSALVA_SECRETA,
             NOME_DA_PESSOA,
+            CIDADE_SECRETA,
+            '"cidade"',
+            '"uf"',
             "extrato.csv",
         ):
             assert proibido not in saida, (nome, proibido)

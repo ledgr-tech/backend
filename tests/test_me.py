@@ -58,6 +58,9 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "administrador": True,  # obsoleto: papel == "admin"
         "razao_social": conta.razao_social,
         "cnpj": conta.cnpj,
+        # Conta sem cidade e UF informadas (issue #184).
+        "cidade": None,
+        "uf": None,
         "empresas": [
             {"id": str(empresa.id), "razao_social": empresa.razao_social, "cnpj": empresa.cnpj}
         ],

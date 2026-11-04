@@ -16,8 +16,17 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
 - `GET /admin/contas`: busca (razão social sem acento, CNPJ com ou sem
   máscara, e-mail do admin), filtro por `situacao` (`sem_plano`, `teste`,
   `teste_encerrado`, `ativo`, `pagamento_pendente` e `assinatura_encerrada`
-  entre as contas não inativas; `inativa`, as inativas), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
+  entre as contas não inativas; `inativa`, as inativas), `uf` (uma das 27
+  siglas, ou `nao_informada`; issue #184), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
   o fim mais próximo primeiro, sem teste no fim), `limit` e `offset`.
+- `GET /admin/contas/por-uf` (issue #184): as contas por UF, com o total de
+  contas e quantas estão assinando, mais o grupo das sem UF informada
+  (`nao_informada`: as anteriores à #184 e as que não a informaram). "Assinando"
+  é a situação `ativo` do painel, a mesma do filtro `situacao=ativo` e de
+  `plano.situacao_da_conta`: conta não inativa com piloto ligado
+  (`assinatura_ativa`) ou assinatura da Stripe `active` ou `trialing`. O total
+  conta todas as contas, inclusive as inativas. Rota antes da do detalhe, que
+  de outro modo a pegaria como `conta_id`.
 - `GET /admin/contas/{conta_id}`: o item, o admin (nome e e-mail, o contato
   comercial), a inativação, o último login, o uso, a assinatura (com o motivo e
   a origem do cancelamento), os últimos 12 pagamentos, os cupons enviados e os
@@ -36,7 +45,9 @@ Paulo, o da franquia das issues #166 e #167),
 chaves de API, conexões MCP e links públicos ativos. Nunca lançamento,
 descrição, justificativa, nome de arquivo nem dado das empresas clientes.
 
-Logs só com ids e o resultado, nunca nome, e-mail nem o termo buscado.
+Cidade e UF (issue #184) vêm no item da lista e no detalhe, `null` quando a
+conta não os informou. Logs só com ids e o resultado, nunca nome, e-mail,
+cidade, UF nem o termo buscado.
 """
 
 import logging
@@ -55,6 +66,7 @@ from app.api.empresas import _MASCARA_CNPJ, _SEM_ACENTO_PYTHON, _nome_normalizad
 from app.core import plano
 from app.core.auth import SessaoAutenticada, _agora, obter_sessao_autenticada
 from app.core.database import SessionLocal, get_db
+from app.core.localizacao import UFS
 from app.core.rate_limit import (
     LIMITE_ADMIN_ACAO_POR_USUARIO,
     LIMITE_ADMIN_LEITURA_POR_USUARIO,
@@ -106,6 +118,9 @@ SituacaoDoFiltro = Literal[
     "inativa",
 ]
 Ordem = Literal["criada_em", "teste_termina_em"]
+UF_NAO_INFORMADA = "nao_informada"
+# As 27 siglas (app/core/localizacao.py) ou "nao_informada", para o filtro `uf`.
+UfDoFiltro = Literal[*UFS, "nao_informada"]
 
 
 @dataclass(frozen=True)
@@ -183,6 +198,8 @@ class ContaItemResponse(BaseModel):
     id: uuid.UUID
     razao_social: str
     cnpj: str
+    cidade: str | None
+    uf: str | None
     plano: str | None
     situacao: plano.Situacao
     teste_termina_em: datetime | None
@@ -196,6 +213,22 @@ class ContaListaResponse(BaseModel):
     limit: int
     offset: int
     itens: list[ContaItemResponse]
+
+
+class ContasDaUfResponse(BaseModel):
+    contas: int
+    assinando: int
+
+
+class ContasPorUfItemResponse(ContasDaUfResponse):
+    uf: str
+
+
+class ContasPorUfResponse(BaseModel):
+    contas: int
+    assinando: int
+    ufs: list[ContasPorUfItemResponse]
+    nao_informada: ContasDaUfResponse
 
 
 class AdminDaContaResponse(BaseModel):
@@ -350,6 +383,8 @@ def _item(conta: Conta, situacao: str) -> dict:
         "id": conta.id,
         "razao_social": conta.razao_social,
         "cnpj": conta.cnpj,
+        "cidade": conta.cidade,
+        "uf": conta.uf,
         "plano": conta.plano,
         "situacao": situacao,
         "teste_termina_em": conta.teste_termina_em,
@@ -557,6 +592,7 @@ def listar_contas(
     db: Annotated[Session, Depends(get_db)],
     busca: Annotated[str | None, Query(max_length=100)] = None,
     situacao: Annotated[SituacaoDoFiltro | None, Query()] = None,
+    uf: Annotated[UfDoFiltro | None, Query()] = None,
     ordem: Annotated[Ordem, Query()] = "criada_em",
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -570,6 +606,10 @@ def listar_contas(
         consulta = consulta.where(Conta.inativada_em.is_not(None))
     elif situacao is not None:
         consulta = consulta.where(Conta.inativada_em.is_(None), situacao_sql == situacao)
+    if uf == UF_NAO_INFORMADA:
+        consulta = consulta.where(Conta.uf.is_(None))
+    elif uf is not None:
+        consulta = consulta.where(Conta.uf == uf)
     if ordem == "teste_termina_em":
         consulta = consulta.order_by(Conta.teste_termina_em.asc().nulls_last(), Conta.id)
     else:
@@ -580,6 +620,42 @@ def listar_contas(
         limit=limit,
         offset=offset,
         itens=[ContaItemResponse(**_item(linha.Conta, linha.situacao)) for linha in linhas],
+    )
+
+
+@router.get("/contas/por-uf", response_model=ContasPorUfResponse)
+@limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+def contar_contas_por_uf(
+    request: Request,
+    _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ContasPorUfResponse:
+    """Onde estão os clientes e onde estão assinando (issue #184). "Assinando"
+    é a situação `ativo` do painel, de conta não inativa (`_situacao`)."""
+    assinando = and_(Conta.inativada_em.is_(None), _situacao(plano.agora()) == "ativo")
+    linhas = db.execute(
+        select(
+            Conta.uf,
+            func.count().label("contas"),
+            func.count().filter(assinando).label("assinando"),
+        ).group_by(Conta.uf)
+    ).all()
+    por_uf = {linha.uf: linha for linha in linhas}
+    sem_uf = por_uf.pop(None, None)
+    itens = sorted(
+        (
+            ContasPorUfItemResponse(uf=linha.uf, contas=linha.contas, assinando=linha.assinando)
+            for linha in por_uf.values()
+        ),
+        key=lambda item: (-item.contas, item.uf),
+    )
+    return ContasPorUfResponse(
+        contas=sum(linha.contas for linha in linhas),
+        assinando=sum(linha.assinando for linha in linhas),
+        ufs=itens,
+        nao_informada=ContasDaUfResponse(
+            contas=sem_uf.contas if sem_uf else 0, assinando=sem_uf.assinando if sem_uf else 0
+        ),
     )
 
 

@@ -16,6 +16,10 @@ essencial dos limites); e `situacao` ganhou `pagamento_pendente` e
 pela Stripe; senão traz `status` (o da Stripe), `plano`, `periodo`,
 `periodo_atual_fim` (em UTC) e `cancelar_no_fim_do_periodo`.
 
+`cidade` e `uf` (issue #184) são os da conta, informados no cadastro ou vindos
+da consulta de CNPJ; `null` nas contas anteriores à #184 e nas que não os
+informaram. Não há rota para mudá-los depois do cadastro.
+
 `preferencias` (issue #147) traz o que a pessoa dispensou no primeiro uso:
 `tutoriais_dispensados` (telas de `TELAS_DO_TUTORIAL`) e
 `roteiro_dispensado`. São do usuário, não da empresa nem da conta, e vêm de
@@ -232,6 +236,8 @@ class MeResponse(BaseModel):
     )
     razao_social: str
     cnpj: str
+    cidade: str | None
+    uf: str | None
     empresas: list[EmpresaDaConta]
     metodos_login: list[str]
     plano: str | None
@@ -276,6 +282,8 @@ def obter_dados_da_conta(
         administrador=usuario.papel == "admin",
         razao_social=conta.razao_social,
         cnpj=conta.cnpj,
+        cidade=conta.cidade,
+        uf=conta.uf,
         empresas=[
             EmpresaDaConta(id=empresa.id, razao_social=empresa.razao_social, cnpj=empresa.cnpj)
             for empresa in empresas

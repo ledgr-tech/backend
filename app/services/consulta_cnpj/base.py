@@ -11,7 +11,10 @@ O resultado é sempre categorizado, nunca texto livre do provedor:
 - "indisponivel": não deu para saber (consulta desligada, timeout, erro de
   rede, 5xx, 429, corpo fora do formato ou CNPJ recusado pelo formato).
 
-A razão social vem só com "ativa" e "inativa". `consultar` nunca levanta:
+A razão social vem só com "ativa" e "inativa", e com ela o município e a UF
+da Receita (issue #184), quando o provedor os traz num formato que serve
+(app/core/localizacao.py): o que não serve vira `None`, sem mudar a situação.
+Os três ficam só em memória (no cache de 24 horas). `consultar` nunca levanta:
 qualquer falha vira "indisponivel".
 """
 
@@ -25,6 +28,8 @@ SituacaoCNPJ = Literal["ativa", "inativa", "nao_encontrado", "indisponivel"]
 class ResultadoConsultaCNPJ:
     situacao: SituacaoCNPJ
     razao_social: str | None = None
+    municipio: str | None = None
+    uf: str | None = None
 
 
 INDISPONIVEL = ResultadoConsultaCNPJ(situacao="indisponivel")

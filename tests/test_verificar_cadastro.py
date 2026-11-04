@@ -23,7 +23,12 @@ CNPJ_VALIDO = "12345678000195"
 # Consulta à Receita desligada (padrão nos testes, tests/conftest.py): a
 # situação vem "nao_verificado" (issue #119; com a consulta ligada, ver
 # tests/test_consulta_cnpj_cadastro.py).
-NAO_VERIFICADO = {"cnpj_situacao": "nao_verificado", "razao_social": None}
+NAO_VERIFICADO = {
+    "cnpj_situacao": "nao_verificado",
+    "razao_social": None,
+    "cidade": None,
+    "uf": None,
+}
 
 
 def _verificar(email: str, cnpj: str):

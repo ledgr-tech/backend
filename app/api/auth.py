@@ -44,6 +44,18 @@ contas, inclusive no `/register/verificar`: o CNPJ da conta é único no
 sistema, e o mesmo CNPJ como empresa cliente de outra conta não impede o
 cadastro. As respostas trazem `conta_id`, o valor que o front grava no token,
 e `empresa_id` com o mesmo valor, obsoleto, até o front migrar.
+
+Cidade e UF da conta (issue #184, regras em app/core/localizacao.py): o
+`/register` e o `/register/google` aceitam `cidade` e `uf`, opcionais nesta
+primeira entrega (o front que já está na main não os envia). Vazio ou só
+espaços vale como não informado; a UF vai em maiúsculas e tem que ser uma das
+27 siglas; a cidade fica sem espaços nas pontas, com 2 a 80 caracteres, na caixa
+que veio; fora disso é 422 (sem repetir o valor no corpo, app/core/
+erros_validacao.py). Sem cidade e sem UF no cadastro, vale o município e a UF da
+consulta de CNPJ, a mesma que já roda no POST (nenhuma chamada externa a mais);
+se vier só um dos dois, grava só o que veio, e a consulta não completa o outro.
+O `/register/verificar` devolve `cidade` e `uf` da consulta, junto da razão
+social, para a tela pré-preencher. Nada disso vai a log.
 """
 
 import logging
@@ -55,7 +67,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
 from fastapi.exceptions import RequestValidationError
-from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -66,6 +78,7 @@ from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
 from app.core.google import IdentidadeGoogle, identidade_ou_erro_http
+from app.core.localizacao import normalizar_cidade, normalizar_uf
 from app.core.rate_limit import (
     LIMITE_CADASTRO,
     LIMITE_LOGIN,
@@ -115,12 +128,28 @@ def _cnpj_valido(valor: str) -> str:
 CnpjValido = Annotated[str, AfterValidator(_cnpj_valido)]
 
 
+def _cidade_do_cadastro(valor: object) -> object:
+    # Só o texto passa pela regra; outro tipo cai na validação de `str`.
+    return normalizar_cidade(valor) if isinstance(valor, str) else valor
+
+
+def _uf_do_cadastro(valor: object) -> object:
+    return normalizar_uf(valor) if isinstance(valor, str) else valor
+
+
+# Opcionais; vazio vira `None` (issue #184). O 422 não repete o valor enviado.
+CidadeDoCadastro = Annotated[str | None, BeforeValidator(_cidade_do_cadastro)]
+UfDoCadastro = Annotated[str | None, BeforeValidator(_uf_do_cadastro)]
+
+
 class CadastroRequest(BaseModel):
     nome: str = Field(min_length=1)
     email: EmailStr
     senha: SenhaNova
     razao_social: str = Field(min_length=1)
     cnpj: CnpjValido
+    cidade: CidadeDoCadastro = None
+    uf: UfDoCadastro = None
 
     @field_validator("nome", "razao_social")
     @classmethod
@@ -144,8 +173,11 @@ class VerificacaoCadastroResponse(BaseModel):
     email_disponivel: bool
     cnpj_disponivel: bool
     cnpj_situacao: SituacaoCnpjNaResposta
-    # A razão social que a Receita devolveu, só com "ativa" ou "inativa".
+    # A razão social que a Receita devolveu, só com "ativa" ou "inativa", e com
+    # ela o município e a UF (issue #184), quando a Receita os trouxe.
     razao_social: str | None
+    cidade: str | None
+    uf: str | None
 
 
 class LoginRequest(BaseModel):
@@ -207,6 +239,8 @@ class CadastroGoogleRequest(BaseModel):
     cnpj: CnpjValido
     # Sem `nome`, vale o `name` do token do Google.
     nome: TextoPreenchido | None = None
+    cidade: CidadeDoCadastro = None
+    uf: UfDoCadastro = None
 
 
 class LoginGoogleRequest(BaseModel):
@@ -275,19 +309,38 @@ def cnpj_de_conta(db: Session, cnpj: str) -> uuid.UUID | None:
     return db.scalar(select(Conta.id).where(Conta.cnpj == cnpj))
 
 
+def localizacao_da_conta(
+    cidade: str | None, uf: str | None, receita: ResultadoConsultaCNPJ
+) -> tuple[str | None, str | None]:
+    """Cidade e UF que a conta grava (issue #184): o que a pessoa enviou; só se
+    ela não enviou nenhum dos dois vale o da consulta de CNPJ. Com só um dos
+    dois enviado, o outro fica nulo, sem completar pela consulta."""
+    if cidade is None and uf is None:
+        return receita.municipio, receita.uf
+    return cidade, uf
+
+
 def nova_conta(
-    razao_social: str, cnpj: str, receita: ResultadoConsultaCNPJ
+    razao_social: str,
+    cnpj: str,
+    receita: ResultadoConsultaCNPJ,
+    cidade: str | None = None,
+    uf: str | None = None,
 ) -> tuple[Conta, Empresa, Configuracao]:
     """A conta, a primeira empresa cliente dela, com o mesmo CNPJ e a mesma
     razão social, e a configuração dessa empresa (issue #133). A consulta na
     Receita vale para as duas. O cadastro (pelo e-mail e pelo Google) começa o
     teste de 14 dias, sem plano e sem cartão (issues #166 e #167, ADR-026): o
-    plano é escolhido no checkout."""
+    plano é escolhido no checkout. `cidade` e `uf` são os do cadastro, já
+    validados; ver `localizacao_da_conta` para o que a consulta completa."""
     verificado_em = cnpj_verificado_em(receita)
+    cidade, uf = localizacao_da_conta(cidade, uf, receita)
     conta = Conta(
         id=uuid.uuid4(),
         razao_social=razao_social,
         cnpj=cnpj,
+        cidade=cidade,
+        uf=uf,
         cnpj_verificado_em=verificado_em,
         teste_termina_em=plano.agora() + plano.DURACAO_TESTE,
     )
@@ -323,7 +376,9 @@ def cadastrar(
     receita = situacao_na_receita(db, consulta, dados.cnpj)
     barrar_cnpj_recusado(receita, dados.cnpj)
 
-    conta, empresa, configuracao = nova_conta(dados.razao_social, dados.cnpj, receita)
+    conta, empresa, configuracao = nova_conta(
+        dados.razao_social, dados.cnpj, receita, dados.cidade, dados.uf
+    )
     usuario = Usuario(
         conta_id=conta.id,
         nome=dados.nome,
@@ -403,6 +458,10 @@ def verificar_cadastro(
     "nao_verificado". A razão social da Receita só vem com "ativa" ou
     "inativa". O resultado fica 24 horas no cache, e o `/register` em seguida
     não consulta de novo.
+
+    Cidade e UF (issue #184): o município e a UF da Receita, com a razão social,
+    para a tela pré-preencher; nulos quando a consulta está desligada ou
+    indisponível, ou a Receita não os trouxe. Não são gravados aqui.
     """
     email_em_uso = db.scalar(
         select(Usuario.id).where(Usuario.email == normalizar_email(dados.email))
@@ -414,6 +473,8 @@ def verificar_cadastro(
         cnpj_disponivel=cnpj_em_uso is None,
         cnpj_situacao="nao_verificado" if receita.situacao == "indisponivel" else receita.situacao,
         razao_social=receita.razao_social,
+        cidade=receita.municipio,
+        uf=receita.uf,
     )
 
 
@@ -538,7 +599,9 @@ def cadastrar_google(
         logger.info("cadastro_google resultado=cnpj_%s", receita.situacao)
     barrar_cnpj_recusado(receita, dados.cnpj)
 
-    conta, empresa, configuracao = nova_conta(dados.razao_social, dados.cnpj, receita)
+    conta, empresa, configuracao = nova_conta(
+        dados.razao_social, dados.cnpj, receita, dados.cidade, dados.uf
+    )
     usuario = Usuario(
         conta_id=conta.id,
         nome=nome,

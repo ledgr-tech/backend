@@ -129,6 +129,8 @@ def test_verificar_ativa_devolve_situacao_e_razao_social(db_session, receita):
         "cnpj_disponivel": True,
         "cnpj_situacao": "ativa",
         "razao_social": RAZAO,
+        "cidade": None,
+        "uf": None,
     }
     assert str(receita.pedidos[0].url) == f"{BASE}/{cnpj}"
 
