@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 
 from app.core import auth
 from app.core.config import settings
-from app.core.plano import PERIODOS, PLANOS
+from app.core.plano import PERIODOS, PLANOS, limite_da_conta
+from app.models import Conta
+from app.services.assinatura import precos as servico_precos
 from main import app
 from scripts import stripe_catalogo as catalogo
 
@@ -21,6 +23,18 @@ client = TestClient(app)
 
 T0 = datetime(2026, 10, 30, 15, 0, tzinfo=UTC)
 PRECOS_DO_ARQUIVO = json.loads(catalogo.ARQUIVO_DE_PRECOS.read_text(encoding="utf-8"))["planos"]
+SEM_LIMITES = {"conciliacoes_por_mes": None, "empresas": None, "usuarios": None}
+# Valores diferentes por plano e por recurso: nenhum se confunde com outro.
+LIMITES_CONFIGURADOS = {
+    "essencial": {"conciliacoes_por_mes": 30, "empresas": 1, "usuarios": 2},
+    "padrao": {"conciliacoes_por_mes": 120, "empresas": 5, "usuarios": 6},
+    "avancado": {"conciliacoes_por_mes": 600, "empresas": 20, "usuarios": 15},
+}
+RECURSO_DO_LIMITE = {
+    "conciliacoes_por_mes": "conciliacoes",
+    "empresas": "empresas",
+    "usuarios": "usuarios",
+}
 INTERVALOS = {
     "mensal": ("month", 1),
     "trimestral": ("month", 3),
@@ -68,6 +82,8 @@ def test_lista_completa_e_ordenada_por_plano_e_periodo(catalogo_da_stripe):
             "intervalo": intervalo,
             "quantidade_de_intervalos": quantidade,
             "nome_do_produto": PRECOS_DO_ARQUIVO[preco["plano"]]["nome"],
+            # Sem LIMITE_* na configuração, nada é limitado (issue #183).
+            "limites": SEM_LIMITES,
         }
 
 
@@ -223,3 +239,117 @@ def test_rate_limit_por_ip(catalogo_da_stripe):
 
     assert codigos[:30] == [200] * 30
     assert codigos[30] == 429
+
+
+# --- limites de cada plano (issue #183) ---------------------------------------------
+
+
+def _configurar_limites(monkeypatch, limites: dict) -> None:
+    for plano, bloco in limites.items():
+        for campo, valor in bloco.items():
+            monkeypatch.setattr(settings, f"limite_{RECURSO_DO_LIMITE[campo]}_{plano}", valor)
+
+
+def test_limites_vazios_vem_null_nos_tres_campos_de_todos_os_itens(catalogo_da_stripe):
+    corpo = _precos().json()
+
+    assert len(corpo) == 12
+    assert [p["limites"] for p in corpo] == [SEM_LIMITES] * 12
+
+
+def test_cada_item_traz_o_bloco_do_seu_plano_e_os_periodos_trazem_o_mesmo(
+    catalogo_da_stripe, monkeypatch
+):
+    _configurar_limites(monkeypatch, LIMITES_CONFIGURADOS)
+
+    corpo = _precos().json()
+
+    assert len(corpo) == 12
+    for plano in PLANOS:
+        do_plano = [p for p in corpo if p["plano"] == plano]
+        assert [p["periodo"] for p in do_plano] == list(PERIODOS)
+        # A franquia é mensal também nos planos trimestral, semestral e anual.
+        assert [p["limites"] for p in do_plano] == [LIMITES_CONFIGURADOS[plano]] * 4
+
+
+def test_um_plano_sem_limite_em_um_recurso_traz_null_so_nele(catalogo_da_stripe, monkeypatch):
+    _configurar_limites(monkeypatch, {"padrao": {"conciliacoes_por_mes": 120, "empresas": None}})
+
+    corpo = _precos().json()
+
+    padrao = next(p for p in corpo if p["plano"] == "padrao")
+    assert padrao["limites"] == {"conciliacoes_por_mes": 120, "empresas": None, "usuarios": None}
+    essencial = next(p for p in corpo if p["plano"] == "essencial")
+    assert essencial["limites"] == SEM_LIMITES
+
+
+def test_o_valor_da_rota_e_o_da_regra_do_402_e_do_me(catalogo_da_stripe, monkeypatch):
+    _configurar_limites(monkeypatch, LIMITES_CONFIGURADOS)
+
+    corpo = _precos().json()
+
+    for preco in corpo:
+        conta = Conta(plano=preco["plano"])
+        for campo, recurso in RECURSO_DO_LIMITE.items():
+            assert preco["limites"][campo] == limite_da_conta(conta, recurso)
+
+
+def test_o_cache_quente_nao_segura_o_limite_antigo(catalogo_da_stripe, monkeypatch):
+    primeira = _precos().json()
+    chamadas = len(catalogo_da_stripe.chamadas)
+    assert [p["limites"] for p in primeira] == [SEM_LIMITES] * 12
+    # O preço muda na Stripe e o limite muda na configuração, dentro dos 10 minutos.
+    for preco in catalogo_da_stripe.precos.values():
+        if preco["lookup_key"] == "padrao_mensal":
+            preco["unit_amount"] = 1
+    _configurar_limites(monkeypatch, LIMITES_CONFIGURADOS)
+    _passar(monkeypatch, timedelta(minutes=9, seconds=59))
+
+    segunda = _precos().json()
+
+    # O limite novo aparece na hora; o preço e a Stripe seguem os do cache.
+    assert len(catalogo_da_stripe.chamadas) == chamadas
+    assert [p["limites"] for p in segunda] == [LIMITES_CONFIGURADOS[p["plano"]] for p in segunda]
+    assert [{k: v for k, v in p.items() if k != "limites"} for p in segunda] == [
+        {k: v for k, v in p.items() if k != "limites"} for p in primeira
+    ]
+
+
+def test_o_limite_nao_vai_para_o_cache(catalogo_da_stripe, monkeypatch):
+    """Mexer na resposta não suja o que está guardado, e o limite sai da resposta
+    seguinte quando a configuração volta ao vazio."""
+    _configurar_limites(monkeypatch, LIMITES_CONFIGURADOS)
+    _precos()
+    assert all("limites" not in preco for preco in servico_precos._cache.precos)
+
+    _configurar_limites(monkeypatch, {p: SEM_LIMITES for p in PLANOS})
+
+    assert [p["limites"] for p in _precos().json()] == [SEM_LIMITES] * 12
+
+
+def test_a_rota_sem_jwt_segue_200_com_limites_e_ignora_a_empresa(catalogo_da_stripe, monkeypatch):
+    _configurar_limites(monkeypatch, LIMITES_CONFIGURADOS)
+
+    resposta = _precos(**{"X-Ledgr-Empresa": "nao-e-um-uuid"})
+
+    assert resposta.status_code == 200
+    assert "Authorization" not in resposta.request.headers
+    assert resposta.json()[0]["limites"] == LIMITES_CONFIGURADOS["essencial"]
+
+
+def test_com_a_cobranca_desligada_da_503_mesmo_com_limites(catalogo_da_stripe, monkeypatch):
+    _configurar_limites(monkeypatch, LIMITES_CONFIGURADOS)
+    monkeypatch.setattr(settings, "stripe_habilitado", False)
+
+    assert _precos().status_code == 503
+
+
+def test_o_openapi_descreve_o_bloco_de_limites():
+    esquemas = app.openapi()["components"]["schemas"]
+
+    assert "limites" in esquemas["PrecoResponse"]["required"]
+    assert set(esquemas["LimitesDoPlano"]["properties"]) == {
+        "conciliacoes_por_mes",
+        "empresas",
+        "usuarios",
+    }

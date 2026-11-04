@@ -34,7 +34,9 @@ empresas, quantos usuários ou quantas conciliações por mês a conta pode ter,
 pelas variáveis `LIMITE_<RECURSO>_<PLANO>` (app/core/config.py). Vale o plano
 efetivo (`plano_efetivo`), em qualquer situação: o da assinatura da Stripe
 quando ela existe; senão o escolhido em `contas.plano`; senão os limites do
-essencial. Sem valor configurado, `None`: não há limite. `chegou_ao_limite` é
+essencial. Sem valor configurado, `None`: não há limite. `limite_do_plano` é a
+mesma regra por plano, sem conta: é o que o `GET /assinatura/precos` mostra
+(issue #183), e `limite_da_conta` só escolhe o plano e a chama. `chegou_ao_limite` é
 a regra do 402: a conta no limite não adiciona mais, e quem já passou dele
 (limite ligado ou reduzido depois) mantém tudo, só não cresce. Contar o que a
 conta usa precisa de banco e fica em app/services/plano.py.
@@ -114,14 +116,24 @@ def plano_efetivo(conta: _ComPlano) -> Plano:
     return plano_vigente(conta) or PLANO_DOS_LIMITES_SEM_PLANO
 
 
+def limite_do_plano(
+    plano: Plano, recurso: Recurso, configuracao: "Settings | None" = None
+) -> int | None:
+    """Quantas empresas, quantos usuários ou quantas conciliações por mês o plano
+    dá; `None` é sem limite. É a única leitura das variáveis
+    `LIMITE_<RECURSO>_<PLANO>`: o 402, o `GET /me` e o `GET /assinatura/precos`
+    passam por aqui."""
+    if configuracao is None:
+        from app.core.config import settings as configuracao
+    return getattr(configuracao, f"limite_{recurso}_{plano}")
+
+
 def limite_da_conta(
     conta: _ComPlano, recurso: Recurso, configuracao: "Settings | None" = None
 ) -> int | None:
     """Quantas empresas, quantos usuários ou quantas conciliações por mês a conta
-    pode ter; `None` é sem limite."""
-    if configuracao is None:
-        from app.core.config import settings as configuracao
-    return getattr(configuracao, f"limite_{recurso}_{plano_efetivo(conta)}")
+    pode ter, pelo plano efetivo; `None` é sem limite."""
+    return limite_do_plano(plano_efetivo(conta), recurso, configuracao)
 
 
 def chegou_ao_limite(usados: int, maximo: int | None) -> bool:

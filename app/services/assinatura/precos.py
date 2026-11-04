@@ -10,6 +10,17 @@ visita: depois de rodar scripts/stripe_catalogo.py, o preço novo aparece em at�
 10 minutos (ou no próximo deploy). Com o cache vencido e a Stripe fora do ar,
 serve o último valor (e loga), sem tentar de novo por 1 minuto; sem nenhum valor
 guardado, 502. Sem a cobrança ligada, 503, e nada é chamado.
+
+Limites do plano (issue #183): cada item traz o bloco `limites` do seu plano
+(conciliações por mês, empresas e usuários; `None` é sem limite), o mesmo em
+qualquer período, pela mesma regra do 402 e do `GET /me` (`limite_do_plano`,
+app/core/plano.py). O cache guarda só o que vem da Stripe: os limites não
+entram nele e são lidos da configuração a cada chamada (`precos_com_limites`).
+Isso não os deixa mais "frescos" que os preços, só de outro jeito: a
+configuração (`LIMITE_<RECURSO>_<PLANO>`) é lida uma vez, quando o processo
+sobe, então mudar um limite exige reiniciar o serviço, e a resposta passa a
+trazê-lo na hora, sem esperar o cache. Já o preço novo leva até 10 minutos.
+Com as variáveis vazias, tudo é `None`: nenhum valor padrão mora no backend.
 """
 
 import logging
@@ -19,7 +30,7 @@ from datetime import datetime, timedelta
 
 import stripe
 
-from app.core.plano import PERIODOS, PLANOS, agora
+from app.core.plano import PERIODOS, PLANOS, Plano, agora, limite_do_plano
 from app.services.assinatura import stripe_api
 
 logger = logging.getLogger(__name__)
@@ -97,3 +108,18 @@ def precos_publicos() -> list[dict]:
         _cache.valido_ate = instante + VALIDADE_DO_CACHE
         _cache.nao_tentar_antes = None
         return lista
+
+
+def limites_do_plano(plano: Plano) -> dict[str, int | None]:
+    """O bloco `limites` do plano, lido da configuração (nunca do cache)."""
+    return {
+        "conciliacoes_por_mes": limite_do_plano(plano, "conciliacoes"),
+        "empresas": limite_do_plano(plano, "empresas"),
+        "usuarios": limite_do_plano(plano, "usuarios"),
+    }
+
+
+def precos_com_limites() -> list[dict]:
+    """`precos_publicos` com o bloco `limites` de cada plano em cada item. Monta
+    dicts novos: o que está no cache não é alterado."""
+    return [{**preco, "limites": limites_do_plano(preco["plano"])} for preco in precos_publicos()]

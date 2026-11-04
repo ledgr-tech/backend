@@ -29,6 +29,9 @@ catálogo da Stripe, ordenada por plano e período, com cache de 10 minutos
 (app/services/assinatura/precos.py); a tela de planos lê os preços daqui, nunca
 de valor fixo no front. Rate limit por IP. 503 com a cobrança desligada, 502 se
 a Stripe falha sem nada em cache. O backend não guarda preço: só repassa.
+Desde a issue #183, cada item traz o bloco `limites` do seu plano
+(`conciliacoes_por_mes`, `empresas` e `usuarios`, `null` é sem limite), pela
+mesma regra do 402 e do `GET /me`, aplicado a cada chamada e fora do cache.
 
 Nada aqui libera acesso: a situação da conta só muda quando o webhook
 (app/api/stripe_webhook.py) confirma. A rota fica liberada para a conta inativa
@@ -86,6 +89,12 @@ class CheckoutResponse(BaseModel):
     url: str
 
 
+class LimitesDoPlano(BaseModel):
+    conciliacoes_por_mes: int | None
+    empresas: int | None
+    usuarios: int | None
+
+
 class PrecoResponse(BaseModel):
     plano: regra.Plano
     periodo: regra.Periodo
@@ -94,6 +103,7 @@ class PrecoResponse(BaseModel):
     intervalo: str | None
     quantidade_de_intervalos: int | None
     nome_do_produto: str | None
+    limites: LimitesDoPlano
 
 
 def _urls_de_retorno() -> tuple[str, str]:
@@ -170,4 +180,4 @@ def iniciar_checkout(
 @router.get("/precos", response_model=list[PrecoResponse])
 @limiter.limit(LIMITE_PRECOS_POR_IP)
 def listar_precos(request: Request) -> list[dict]:
-    return precos.precos_publicos()
+    return precos.precos_com_limites()
