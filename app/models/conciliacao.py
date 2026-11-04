@@ -44,6 +44,13 @@ class Conciliacao(Base, TimestampMixin):
     rodada (ADR-007), a ligação some junto e a geração da rodada nova a refaz
     (o texto continua no cache, e o mesmo contexto não é pago de novo).
 
+    `match_agrupado` (issue #131, ADR-027) é o lançamento que faz parte de um
+    grupo N para 1 ou 1 para N cuja soma bate ao centavo com o do outro lado.
+    Cada lançamento do grupo é uma linha própria, só com a ponta dele (a do
+    banco ou a do sistema, nunca as duas), e todas as linhas do grupo têm o
+    mesmo `grupo_id`. `grupo_id` é nulo em toda linha que não é
+    `match_agrupado`, e os dois CHECKs abaixo travam as duas regras.
+
     Sem UniqueConstraint de propósito: a idempotência de reexecutar a
     conciliação do mesmo par de extratos é responsabilidade do motor (#16).
     """
@@ -51,13 +58,23 @@ class Conciliacao(Base, TimestampMixin):
     __tablename__ = "conciliacoes"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('match_exato', 'match_tolerancia', 'divergente_valor', "
-            "'divergente_data', 'sem_correspondencia', 'duplicado', 'tarifa_bancaria')",
+            "status IN ('match_exato', 'match_tolerancia', 'match_agrupado', "
+            "'divergente_valor', 'divergente_data', 'sem_correspondencia', 'duplicado', "
+            "'tarifa_bancaria')",
             name="ck_conciliacoes_status_valido",
         ),
         CheckConstraint(
-            "regra_aplicada IS NULL OR regra_aplicada IN ('exato', 'tolerancia', 'fuzzy_descricao')",
+            "regra_aplicada IS NULL OR regra_aplicada IN "
+            "('exato', 'tolerancia', 'fuzzy_descricao', 'agrupamento')",
             name="ck_conciliacoes_regra_aplicada_valida",
+        ),
+        CheckConstraint(
+            "(status = 'match_agrupado') = (grupo_id IS NOT NULL)",
+            name="ck_conciliacoes_grupo_id_so_no_match_agrupado",
+        ),
+        CheckConstraint(
+            "status <> 'match_agrupado' OR num_nonnulls(lancamento_banco_id, lancamento_sistema_id) = 1",
+            name="ck_conciliacoes_match_agrupado_uma_ponta",
         ),
         CheckConstraint(
             "score_confianca IS NULL OR score_confianca BETWEEN 0 AND 1",
@@ -89,3 +106,6 @@ class Conciliacao(Base, TimestampMixin):
     regra_aplicada: Mapped[str | None] = mapped_column(String, nullable=True)
     score_confianca: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     explicacao_chave: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    grupo_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
