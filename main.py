@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 
 from app.api.admin import router as admin_router
@@ -35,6 +36,7 @@ from app.api.troca_email import router as troca_email_router
 from app.api.v1 import router as v1_router
 from app.core import conta_inativa
 from app.core.config import settings
+from app.core.erros_validacao import tratar_validacao
 from app.core.frontend_url import avisar_frontend_url_no_startup
 from app.core.logging import configurar_logs
 from app.core.rate_limit import limite_excedido, limiter
@@ -71,6 +73,7 @@ else:
 app.state.limiter = limiter
 app.middleware("http")(registrar_acesso)
 app.add_exception_handler(RateLimitExceeded, limite_excedido)
+app.add_exception_handler(RequestValidationError, tratar_validacao)
 app.add_exception_handler(conta_inativa.ContaInativaError, conta_inativa.tratar)
 
 app.include_router(auth_router)

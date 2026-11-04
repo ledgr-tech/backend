@@ -26,15 +26,23 @@ BASE = "https://brasilapi.test/api/cnpj/v1"
 RAZAO = "EMPRESA DE TESTE LTDA"
 
 
-def corpo_brasilapi(situacao="ATIVA", razao=RAZAO, cnpj=CNPJ) -> dict:
-    """O que importa do 200 da BrasilAPI (o corpo real traz bem mais campos)."""
-    return {
+def corpo_brasilapi(
+    situacao="ATIVA", razao=RAZAO, cnpj=CNPJ, municipio=None, uf=None, **extras
+) -> dict:
+    """O que importa do 200 da BrasilAPI (o corpo real traz bem mais campos).
+    `municipio` e `uf` (issue #184) só entram no corpo quando passados."""
+    corpo = {
         "cnpj": cnpj,
         "razao_social": razao,
         "situacao_cadastral": 2 if situacao == "ATIVA" else 8,
         "descricao_situacao_cadastral": situacao,
         "qsa": [{"nome_socio": "NAO DEVE SER LIDO"}],
     }
+    if municipio is not None:
+        corpo["municipio"] = municipio
+    if uf is not None:
+        corpo["uf"] = uf
+    return {**corpo, **extras}
 
 
 NAO_ENCONTRADO_BRASILAPI = {
@@ -63,6 +71,42 @@ def test_ativa_devolve_razao_social_e_chama_a_url_certa():
     assert str(pedidos[0].url) == f"{BASE}/{CNPJ}"
     assert pedidos[0].method == "GET"
     assert "authorization" not in pedidos[0].headers
+
+
+def test_municipio_e_uf_vem_no_resultado_ativo_e_no_inativo():  # issue #184
+    for situacao, esperada in (("ATIVA", "ativa"), ("BAIXADA", "inativa")):
+        corpo = corpo_brasilapi(situacao, municipio=" SÃO PAULO ", uf="sp")
+        consulta, _ = _consulta(lambda r, c=corpo: httpx.Response(200, json=c))
+
+        assert consulta.consultar(CNPJ) == ResultadoConsultaCNPJ(
+            esperada, RAZAO, municipio="SÃO PAULO", uf="SP"
+        )
+
+
+def test_municipio_e_uf_ausentes_ou_estranhos_ficam_nulos_sem_mudar_a_situacao():
+    estranhos = [
+        {},  # a BrasilAPI sem os campos
+        {"municipio": None, "uf": None},
+        {"municipio": "", "uf": "  "},
+        {"municipio": 123, "uf": ["SP"]},
+        {"municipio": "X", "uf": "ZZ"},
+        {"municipio": "a" * 81, "uf": "SPP"},
+    ]
+    for extras in estranhos:
+        corpo = {**corpo_brasilapi(), **extras}
+        consulta, _ = _consulta(lambda r, c=corpo: httpx.Response(200, json=c))
+
+        assert consulta.consultar(CNPJ) == ResultadoConsultaCNPJ("ativa", RAZAO), extras
+
+
+def test_so_o_municipio_ou_so_a_uf_vem_como_vieram():
+    consulta, _ = _consulta(
+        lambda r: httpx.Response(200, json=corpo_brasilapi(municipio="Natal", uf="XX"))
+    )
+    assert consulta.consultar(CNPJ) == ResultadoConsultaCNPJ("ativa", RAZAO, municipio="Natal")
+
+    consulta, _ = _consulta(lambda r: httpx.Response(200, json=corpo_brasilapi(uf="RN")))
+    assert consulta.consultar(CNPJ) == ResultadoConsultaCNPJ("ativa", RAZAO, uf="RN")
 
 
 @pytest.mark.parametrize("situacao", ["BAIXADA", "INAPTA", "SUSPENSA", "NULA", "OUTRA"])
@@ -206,7 +250,42 @@ def test_log_nao_traz_cnpj_nem_razao_social(caplog):
     assert RAZAO not in texto
 
 
+def test_log_nao_traz_municipio_nem_uf(caplog):  # issue #184
+    caplog.set_level(logging.DEBUG)
+    respostas = iter(
+        [
+            httpx.Response(200, json=corpo_brasilapi(municipio="ILHA SIGILOSA", uf="AM")),
+            httpx.Response(200, json=corpo_brasilapi(municipio="ILHA SIGILOSA", uf="AM")),
+            httpx.Response(503, text="ILHA SIGILOSA"),
+            httpx.Response(200, json={"municipio": "ILHA SIGILOSA", "uf": "AM"}),
+        ]
+    )
+    consulta, _ = _consulta(lambda r: next(respostas))
+
+    primeira = consultar_cnpj(CNPJ, consulta)
+    consultar_cnpj(CNPJ, consulta)  # do cache
+    modulo_cache.cache_por_cnpj.limpar()
+    consultar_cnpj(CNPJ, consulta)  # 503
+    consultar_cnpj(CNPJ, consulta)  # corpo fora do formato
+
+    assert primeira.municipio == "ILHA SIGILOSA"
+    assert "ILHA SIGILOSA" not in caplog.text
+    assert "uf=AM" not in caplog.text and "'AM'" not in caplog.text
+
+
 # --- cache e consultar_cnpj -----------------------------------------------------
+
+
+def test_o_cache_guarda_municipio_e_uf_so_em_memoria():  # issue #184
+    consulta, pedidos = _consulta(
+        lambda r: httpx.Response(200, json=corpo_brasilapi(municipio="Natal", uf="RN"))
+    )
+
+    primeiro = consultar_cnpj(CNPJ, consulta)
+    segundo = consultar_cnpj(CNPJ, consulta)
+
+    assert primeiro == segundo == ResultadoConsultaCNPJ("ativa", RAZAO, "Natal", "RN")
+    assert len(pedidos) == 1
 
 
 def test_consultar_cnpj_usa_o_cache_por_24_horas():

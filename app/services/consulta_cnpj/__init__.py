@@ -8,7 +8,8 @@ de 24 horas (app/services/consulta_cnpj/cache.py), e sem provedor devolve
 mesmo motivo de app/services/email/__init__.py.
 
 Log: uma linha por consulta, `consulta_cnpj resultado=<categoria>
-origem=<api|cache|desligada> duracao_ms=<n>`. Nunca o CNPJ nem a razão social.
+origem=<api|cache|desligada> duracao_ms=<n>`. Nunca o CNPJ, a razão social, o
+município nem a UF.
 """
 
 import logging

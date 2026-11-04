@@ -18,8 +18,11 @@ termina sozinha depois, limitada pelo mesmo timeout do `httpx`.
 
 Mapeamento, sempre categorizado (app/services/consulta_cnpj/base.py):
 - 200 com `razao_social` e `descricao_situacao_cadastral` em texto: "ativa"
-  se a situação é ATIVA, senão "inativa". Corpo fora disso, ou com outro
-  `cnpj` que não o consultado, vira "indisponivel".
+  se a situação é ATIVA, senão "inativa". Traz também `municipio` e `uf`
+  (issue #184), quando servem para `contas.cidade` e `contas.uf`
+  (app/core/localizacao.py); se faltam ou vêm fora do formato, ficam `None` e
+  a situação não muda. Corpo fora disso, ou com outro `cnpj` que não o
+  consultado, vira "indisponivel".
 - 404 com o corpo de erro da BrasilAPI (`type` "not_found"): "nao_encontrado".
   Um 404 sem esse corpo (URL errada na configuração, página de erro do
   servidor) vira "indisponivel", para nunca barrar cadastro por engano.
@@ -27,8 +30,8 @@ Mapeamento, sempre categorizado (app/services/consulta_cnpj/base.py):
   aceite), 429, 5xx, qualquer outro status, timeout e erro de rede:
   "indisponivel".
 
-Nunca loga o CNPJ, a razão social, o corpo nem a chave: só o motivo
-categorizado da falha, o código HTTP e a duração.
+Nunca loga o CNPJ, a razão social, o município, a UF, o corpo nem a chave: só
+o motivo categorizado da falha, o código HTTP e a duração.
 """
 
 import logging
@@ -40,6 +43,7 @@ from typing import Any
 
 import httpx
 
+from app.core.localizacao import cidade_da_receita, uf_da_receita
 from app.services.consulta_cnpj.base import (
     INDISPONIVEL,
     NAO_ENCONTRADO,
@@ -80,6 +84,8 @@ def _interpretar(corpo: Any, cnpj: str) -> ResultadoConsultaCNPJ | None:
     return ResultadoConsultaCNPJ(
         situacao="ativa" if situacao.upper() == "ATIVA" else "inativa",
         razao_social=razao_social,
+        municipio=cidade_da_receita(corpo.get("municipio")),
+        uf=uf_da_receita(corpo.get("uf")),
     )
 
 
