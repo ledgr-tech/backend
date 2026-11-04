@@ -172,6 +172,15 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = ""
     stripe_modo_live: bool = False
 
+    # Agrupamento N para 1 e 1 para N no motor de matching (issue #131,
+    # ADR-027): ligado, a etapa depois do exato e da tolerância agrupa os
+    # lançamentos sem par cuja soma bate ao centavo com um do outro lado
+    # (`match_agrupado`). Desligado por padrão, como as outras flags: desligado,
+    # o motor se comporta como antes. Depende da tolerância de data da empresa
+    # (`Configuracao.tolerancia_dias_default`), que é a janela do grupo. Só se
+    # cria no Railway quando for ligar (07-tecnico/stack-e-deploy.md).
+    agrupamento_habilitado: bool = False
+
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
     # boot com o motivo, em vez de deixar a API no ar sem log.

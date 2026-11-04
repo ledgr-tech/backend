@@ -12,7 +12,7 @@ inexistente ou de outra empresa devolve 404 com a MESMA mensagem (sem
 confirmar a existência do id de outra empresa, mesmo padrão de
 app/api/conciliacoes.py). (b)/(c) `montar_contexto_divergencia`
 (app/services/ia/contexto.py) já valida elegibilidade (levanta
-`ValueError` pra `match_exato`/`match_tolerancia`/desconhecido, traduzido
+`ValueError` pra `match_exato`/`match_tolerancia`/`match_agrupado`/desconhecido, traduzido
 aqui pra 422) e monta o contexto. (d) Provedor indisponível
 (`obter_provedor()` devolveu `None`: recurso desligado, sem chave ou
 provedor desconhecido) — 200 com o fallback determinístico,

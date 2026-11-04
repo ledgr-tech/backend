@@ -23,9 +23,13 @@ class ExecucaoConciliacao(Base, TimestampMixin):
     execução, ou 0 quando a empresa não tem `Configuracao`), não a
     configuração atual — a configuração pode mudar depois da execução.
 
-    As 7 colunas de contagem espelham as categorias de
-    `app/services/matching.py` (motor exato, tolerância de data e as 5
-    categorias de divergência). O CHECK `ck_execucoes_conciliacao_total_e_
+    As 8 colunas de contagem espelham as categorias de
+    `app/services/matching.py` (motor exato, tolerância de data, agrupamento
+    e as 5 categorias de divergência). `match_agrupado` (issue #131, ADR-027)
+    conta LINHAS, os lançamentos que entraram em grupos, para a soma abaixo
+    continuar valendo; `agrupamentos` conta os grupos e fica FORA da soma
+    (um grupo de 1 lançamento contra 10 são 11 linhas e 1 agrupamento).
+    Execuções anteriores à #131 têm 0 nas duas. O CHECK `ck_execucoes_conciliacao_total_e_
     soma_das_categorias` é a correção do bug original (issue #27, ADR-010):
     antes, `total` contava os pares por tolerância mas o retorno do motor não
     incluía `match_tolerancia`, então a soma das categorias devolvidas ficava
@@ -50,12 +54,12 @@ class ExecucaoConciliacao(Base, TimestampMixin):
         CheckConstraint(
             "total >= 0 AND match_exato >= 0 AND match_tolerancia >= 0 AND duplicado >= 0 "
             "AND sem_correspondencia >= 0 AND tarifa_bancaria >= 0 AND divergente_valor >= 0 "
-            "AND divergente_data >= 0",
+            "AND divergente_data >= 0 AND match_agrupado >= 0 AND agrupamentos >= 0",
             name="ck_execucoes_conciliacao_contagens_nao_negativas",
         ),
         CheckConstraint(
-            "total = match_exato + match_tolerancia + duplicado + sem_correspondencia "
-            "+ tarifa_bancaria + divergente_valor + divergente_data",
+            "total = match_exato + match_tolerancia + match_agrupado + duplicado "
+            "+ sem_correspondencia + tarifa_bancaria + divergente_valor + divergente_data",
             name="ck_execucoes_conciliacao_total_e_soma_das_categorias",
         ),
         Index("ix_execucoes_conciliacao_empresa_id_criado_em", "empresa_id", "criado_em"),
@@ -86,3 +90,5 @@ class ExecucaoConciliacao(Base, TimestampMixin):
     tarifa_bancaria: Mapped[int] = mapped_column(Integer, nullable=False)
     divergente_valor: Mapped[int] = mapped_column(Integer, nullable=False)
     divergente_data: Mapped[int] = mapped_column(Integer, nullable=False)
+    match_agrupado: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    agrupamentos: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

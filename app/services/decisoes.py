@@ -3,9 +3,11 @@ em vigor e contagem de justificadas. Único lugar com essas regras, usado por
 `GET /conciliacoes/{extrato_id}`, `POST /conciliacoes/{extrato_id}/decisoes`
 e `GET /execucoes`.
 
-Uma linha "diverge" quando o status não é `match_exato` nem
-`match_tolerancia` (as cinco categorias de divergência), mesma regra de
-`estaResolvida` no frontend. Só linha divergente aceita decisão.
+Uma linha "diverge" quando o status não é `match_exato`, `match_tolerancia`
+nem `match_agrupado` (as cinco categorias de divergência), mesma regra de
+`estaResolvida` no frontend. Só linha divergente aceita decisão. O
+`match_agrupado` (issue #131, ADR-027) entra aqui como resolvido: o grupo é
+automático e não passa por conferência.
 
 Aprovação (issue #132, ADR-019): toda justificativa nasce aguardando
 aprovação. `justificativa_aprovada` marca a justificada em vigor como
@@ -38,7 +40,7 @@ from sqlalchemy.orm import Session, aliased
 from app.models import Conciliacao, DecisaoLinha, ExecucaoConciliacao, Lancamento
 from app.services.normalizacao import _normalizar_descricao
 
-STATUS_RESOLVIDOS = frozenset({"match_exato", "match_tolerancia"})
+STATUS_RESOLVIDOS = frozenset({"match_exato", "match_tolerancia", "match_agrupado"})
 
 TIPOS_DECISAO = ("conferida", "justificada")
 TIPOS_DESFAZER = {"conferencia_desfeita": "conferida", "justificativa_desfeita": "justificada"}
