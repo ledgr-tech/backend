@@ -470,11 +470,13 @@ def test_resumo_conciliacoes_e_fechamentos_do_mes(conta):
         "total",
         "match_exato",
         "match_tolerancia",
+        "match_agrupado",
         "duplicado",
         "sem_correspondencia",
         "tarifa_bancaria",
         "divergente_valor",
         "divergente_data",
+        "agrupamentos",
         "justificadas",
         "aguardando_aprovacao",
         "pendentes",
@@ -531,7 +533,7 @@ def test_divergencias_iguais_as_do_app_com_situacao_lado_e_valor(conta):
     do_app = {
         (i["chave"], i["status"])
         for i in c.itens_do_app(banco)
-        if i["status"] not in ("match_exato", "match_tolerancia")
+        if i["status"] not in ("match_exato", "match_tolerancia", "match_agrupado")
     }
     assert {(d["chave"], d["categoria"]) for d in corpo["itens"]} == do_app
     assert corpo["total"] == len(do_app) == 4

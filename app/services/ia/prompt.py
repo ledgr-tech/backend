@@ -54,7 +54,7 @@ def motivo_deterministico(status: str) -> str:
     """Texto fixo do motivo pra `status` (ADR-011) — mesmo texto usado como
     fallback pelo PR B quando a IA está desligada, o provedor falha ou o
     limite diário estourou. Levanta `ValueError` pra status não elegível
-    (`match_exato`, `match_tolerancia` ou desconhecido): só as 5 categorias
+    (`match_exato`, `match_tolerancia`, `match_agrupado` ou desconhecido): só as 5 categorias
     de divergência têm explicação."""
     if status in _MOTIVOS_DETERMINISTICOS:
         return _MOTIVOS_DETERMINISTICOS[status]

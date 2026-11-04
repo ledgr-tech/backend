@@ -78,11 +78,13 @@ def test_post_feliz_grava_linhas_e_devolve_contagens(
         "total": 6,
         "match_exato": 4,
         "match_tolerancia": 0,
+        "match_agrupado": 0,
         "duplicado": 1,
         "sem_correspondencia": 1,
         "tarifa_bancaria": 0,
         "divergente_valor": 0,
         "divergente_data": 0,
+        "agrupamentos": 0,
     }
     linhas = _conciliacoes(db_session, banco.id, sistema.id)
     assert len(linhas) == 6
@@ -881,11 +883,13 @@ def test_post_cobre_as_5_categorias_de_divergencia(
         "total": 7,
         "match_exato": 1,
         "match_tolerancia": 0,
+        "match_agrupado": 0,
         "duplicado": 0,
         "sem_correspondencia": 1,
         "tarifa_bancaria": 1,
         "divergente_valor": 2,
         "divergente_data": 2,
+        "agrupamentos": 0,
     }
 
     por_lancamento_banco = {

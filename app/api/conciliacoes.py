@@ -58,6 +58,18 @@ do extrato (`_validar_extrato_banco`) e a montagem da query
 códigos, mesmos filtros e mesma ordenação; o que muda é que a exportação não
 pagina e devolve CSV em vez de JSON.
 
+Agrupamento (issue #131, ADR-027): `match_agrupado` é o lançamento que fez
+parte de um grupo N para 1 ou 1 para N, uma linha por lançamento, só com a
+ponta dele, e é resolvido (não aceita decisão, 422 como o `match_exato`). Cada
+item traz `grupo_id` (o mesmo em todas as linhas do grupo, `null` nas demais) e
+`grupo`, o resumo do grupo: `quantidade_banco`, `quantidade_sistema`,
+`valor_unico` (o do lançamento único, com sinal, em string) e
+`maior_desvio_dias` (o maior desvio de data entre o lançamento único e os
+membros). O resumo sai de UMA consulta agregada por página, nunca uma por
+linha, e vale para o grupo inteiro mesmo que parte dele esteja em outra
+página. O filtro `grupo_id` traz todos os membros de um grupo: um lote de 200
+lançamentos atravessa páginas. A listagem e a exportação têm o mesmo filtro.
+
 Explicação (issue #140): cada item traz `explicacao`, o texto da IA ligado à
 linha (`conciliacoes.explicacao_chave`, pela geração automática ou pelo
 clique no `POST /explicacoes`), e `gerada_por_ia`, `true` só quando há esse
@@ -181,6 +193,7 @@ STATUS_PROCESSADO = {"concluido", "concluido_com_erros"}
 StatusConciliacao = Literal[
     "match_exato",
     "match_tolerancia",
+    "match_agrupado",
     "divergente_valor",
     "divergente_data",
     "sem_correspondencia",
@@ -200,11 +213,14 @@ class ConciliacaoResponse(BaseModel):
     total: int
     match_exato: int
     match_tolerancia: int
+    # Issue #131: linhas agrupadas (lançamentos) e quantos grupos elas formam.
+    match_agrupado: int
     duplicado: int
     sem_correspondencia: int
     tarifa_bancaria: int
     divergente_valor: int
     divergente_data: int
+    agrupamentos: int
 
 
 def _garantir_mes_aberto(db: Session, empresa_id: uuid.UUID, extrato_banco: Extrato) -> None:
@@ -329,12 +345,23 @@ def _decisao_response(vigente: decisoes.DecisaoEmVigor | None) -> DecisaoRespons
     )
 
 
+class GrupoResponse(BaseModel):
+    """Resumo de um grupo `match_agrupado` (issue #131, ADR-027)."""
+
+    quantidade_banco: int
+    quantidade_sistema: int
+    valor_unico: Decimal
+    maior_desvio_dias: int
+
+
 class ItemConciliacaoResponse(BaseModel):
     id: uuid.UUID
     extrato_sistema_id: uuid.UUID
     status: str
     regra_aplicada: str | None
     score_confianca: Decimal | None
+    grupo_id: uuid.UUID | None
+    grupo: GrupoResponse | None
     lancamento_banco: LancamentoResponse | None
     lancamento_sistema: LancamentoResponse | None
     chave: str
@@ -379,6 +406,58 @@ def _chave(linha) -> str:
     )
 
 
+def _resumos_dos_grupos(
+    db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID, grupos: set[uuid.UUID]
+) -> dict[uuid.UUID, GrupoResponse]:
+    """O resumo de cada grupo, numa consulta agregada só (qualquer que seja o
+    número de grupos da página). O lançamento único é o lado que tem uma linha
+    só; o maior desvio de data é o dos membros (o outro lado) em relação a ele.
+    Conta o grupo inteiro, não só as linhas da página."""
+    if not grupos:
+        return {}
+    lanc_banco = aliased(Lancamento)
+    lanc_sistema = aliased(Lancamento)
+    linhas = db.execute(
+        select(
+            Conciliacao.grupo_id,
+            func.count(lanc_banco.id).label("quantidade_banco"),
+            func.count(lanc_sistema.id).label("quantidade_sistema"),
+            func.min(lanc_banco.valor).label("banco_valor"),
+            func.min(lanc_banco.data).label("banco_data_min"),
+            func.max(lanc_banco.data).label("banco_data_max"),
+            func.min(lanc_sistema.valor).label("sistema_valor"),
+            func.min(lanc_sistema.data).label("sistema_data_min"),
+            func.max(lanc_sistema.data).label("sistema_data_max"),
+        )
+        .select_from(Conciliacao)
+        .outerjoin(lanc_banco, Conciliacao.lancamento_banco_id == lanc_banco.id)
+        .outerjoin(lanc_sistema, Conciliacao.lancamento_sistema_id == lanc_sistema.id)
+        .where(
+            Conciliacao.empresa_id == empresa_id,
+            Conciliacao.extrato_banco_id == extrato_banco_id,
+            Conciliacao.grupo_id.in_(sorted(grupos)),
+        )
+        .group_by(Conciliacao.grupo_id)
+    ).all()
+
+    resumos = {}
+    for linha in linhas:
+        unico_e_do_banco = linha.quantidade_banco == 1
+        prefixo = "banco" if unico_e_do_banco else "sistema"
+        outro = "sistema" if unico_e_do_banco else "banco"
+        data_unico = getattr(linha, f"{prefixo}_data_min")
+        resumos[linha.grupo_id] = GrupoResponse(
+            quantidade_banco=linha.quantidade_banco,
+            quantidade_sistema=linha.quantidade_sistema,
+            valor_unico=getattr(linha, f"{prefixo}_valor"),
+            maior_desvio_dias=max(
+                abs((getattr(linha, f"{outro}_data_min") - data_unico).days),
+                abs((getattr(linha, f"{outro}_data_max") - data_unico).days),
+            ),
+        )
+    return resumos
+
+
 def _validar_extrato_banco(db: Session, extrato_id: uuid.UUID, empresa_id: uuid.UUID) -> Extrato:
     """Extrato do banco validado (issue #20, reusado pela exportação da
     issue #26): existe, é da empresa do token (404 igual pros dois casos,
@@ -398,6 +477,7 @@ def _construir_consulta_itens(
     extrato_id: uuid.UUID,
     status: StatusConciliacao | None,
     extrato_sistema_id: uuid.UUID | None,
+    grupo_id: uuid.UUID | None = None,
 ) -> tuple[Select, list]:
     """Query compartilhada entre a listagem (issue #20) e a exportação CSV
     (issue #26): mesmos filtros (sempre por `empresa_id` e
@@ -414,6 +494,8 @@ def _construir_consulta_itens(
         filtros.append(Conciliacao.status == status)
     if extrato_sistema_id is not None:
         filtros.append(Conciliacao.extrato_sistema_id == extrato_sistema_id)
+    if grupo_id is not None:
+        filtros.append(Conciliacao.grupo_id == grupo_id)
 
     lanc_banco = aliased(Lancamento)
     lanc_sistema = aliased(Lancamento)
@@ -424,6 +506,7 @@ def _construir_consulta_itens(
             Conciliacao.status,
             Conciliacao.regra_aplicada,
             Conciliacao.score_confianca,
+            Conciliacao.grupo_id,
             lanc_banco.id.label("banco_id"),
             lanc_banco.data.label("banco_data"),
             lanc_banco.valor.label("banco_valor"),
@@ -458,10 +541,11 @@ def listar_conciliacoes(
     offset: Annotated[int, Query(ge=0)] = 0,
     status: StatusConciliacao | None = None,
     extrato_sistema_id: uuid.UUID | None = None,
+    grupo_id: uuid.UUID | None = None,
 ) -> ConciliacaoListaResponse:
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
     consulta, filtros = _construir_consulta_itens(
-        empresa_id, extrato_id, status, extrato_sistema_id
+        empresa_id, extrato_id, status, extrato_sistema_id, grupo_id
     )
     if settings.llm_habilitado:
         # O texto da IA ligado à linha, no mesmo SELECT e pela empresa dela.
@@ -477,6 +561,9 @@ def listar_conciliacoes(
 
     chaves = [_chave(linha) for linha in linhas]
     eventos_por_chave = decisoes.carregar_eventos(db, empresa_id, extrato_id, set(chaves))
+    resumos_dos_grupos = _resumos_dos_grupos(
+        db, empresa_id, extrato_id, {linha.grupo_id for linha in linhas if linha.grupo_id}
+    )
 
     itens = []
     for linha, chave in zip(linhas, chaves, strict=True):
@@ -488,6 +575,8 @@ def listar_conciliacoes(
                 status=linha.status,
                 regra_aplicada=linha.regra_aplicada,
                 score_confianca=linha.score_confianca,
+                grupo_id=linha.grupo_id,
+                grupo=resumos_dos_grupos.get(linha.grupo_id),
                 lancamento_banco=_lancamento_ou_none(linha, "banco"),
                 lancamento_sistema=_lancamento_ou_none(linha, "sistema"),
                 chave=chave,
@@ -528,6 +617,7 @@ def exportar_conciliacoes(
     db: Annotated[Session, Depends(get_db)],
     status: StatusConciliacao | None = None,
     extrato_sistema_id: uuid.UUID | None = None,
+    grupo_id: uuid.UUID | None = None,
 ) -> Response:
     """Exportação CSV do relatório de conciliação (issue #26): mesmo recorte
     de `listar_conciliacoes` (mesma validação, mesmos filtros, mesma
@@ -535,7 +625,9 @@ def exportar_conciliacoes(
     sem paginação. Formatação e neutralização de injeção de fórmula em
     app/services/exportacao.py."""
     _validar_extrato_banco(db, extrato_id, empresa_id)
-    consulta, _ = _construir_consulta_itens(empresa_id, extrato_id, status, extrato_sistema_id)
+    consulta, _ = _construir_consulta_itens(
+        empresa_id, extrato_id, status, extrato_sistema_id, grupo_id
+    )
     linhas = db.execute(consulta).all()
 
     linhas_exportacao = [
@@ -549,6 +641,7 @@ def exportar_conciliacoes(
             sistema_data=linha.sistema_data,
             sistema_valor=linha.sistema_valor,
             sistema_descricao=linha.sistema_descricao,
+            grupo_id=linha.grupo_id,
         )
         for linha in linhas
     ]

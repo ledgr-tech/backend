@@ -58,6 +58,7 @@ CAMPOS_DO_RELATORIO = {
     "resumo": (
         "total",
         "conciliadas",
+        "agrupamentos",
         "justificadas",
         "pendentes",
         "linhas_nao_lidas",
@@ -268,7 +269,15 @@ def relatorio(db: Session, link: LinkRelatorio, fechamento: Fechamento) -> dict:
         "ressalva": fechamento.ressalva,
         "resumo": {
             "total": contagens["total"],
-            "conciliadas": contagens["match_exato"] + contagens["match_tolerancia"],
+            # Com o agrupamento (issue #131), "conciliadas" soma as linhas
+            # agrupadas, e `agrupamentos` diz quantos grupos elas formam. O
+            # resumo congelado antes da #131 não tem as chaves: 0.
+            "conciliadas": (
+                contagens["match_exato"]
+                + contagens["match_tolerancia"]
+                + contagens.get("match_agrupado", 0)
+            ),
+            "agrupamentos": contagens.get("agrupamentos", 0),
             "justificadas": resumo["justificadas"],
             "pendentes": resumo["pendentes"],
             "linhas_nao_lidas": resumo["linhas_nao_lidas"],

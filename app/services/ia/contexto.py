@@ -25,7 +25,10 @@ lançamento que já tem par confirmado seria enganoso. Isso é seguro de
 implementar porque as linhas de match guardam os dois lados
 explicitamente (`Conciliacao.lancamento_banco_id` e
 `lancamento_sistema_id` não nulos), então a consulta é uma simples
-exclusão por id, sem ambiguidade.
+exclusão por id, sem ambiguidade. O `match_agrupado` (issue #131) também
+consome o lançamento, mas guarda só a ponta dele: a mesma exclusão por id,
+olhando a coluna do outro lado. Ele nunca é divergência, então não gera
+contexto nem explicação.
 
 A ordem dos candidatos é 100% determinística (entra no hash da chave de
 cache, app/services/ia/cache.py): ordenados em Python (mesmo estilo de
@@ -51,6 +54,7 @@ from app.services.matching import (
     STATUS_DIVERGENTE_DATA,
     STATUS_DIVERGENTE_VALOR,
     STATUS_DUPLICADO,
+    STATUS_MATCH_AGRUPADO,
     STATUS_MATCH_EXATO,
     STATUS_MATCH_TOLERANCIA,
     STATUS_SEM_CORRESPONDENCIA,
@@ -100,7 +104,9 @@ def _ids_ja_casados(db: Session, conciliacao: Conciliacao, coluna_outro_lado) ->
             Conciliacao.empresa_id == conciliacao.empresa_id,
             Conciliacao.extrato_banco_id == conciliacao.extrato_banco_id,
             Conciliacao.extrato_sistema_id == conciliacao.extrato_sistema_id,
-            Conciliacao.status.in_((STATUS_MATCH_EXATO, STATUS_MATCH_TOLERANCIA)),
+            Conciliacao.status.in_(
+                (STATUS_MATCH_EXATO, STATUS_MATCH_TOLERANCIA, STATUS_MATCH_AGRUPADO)
+            ),
             coluna_outro_lado.isnot(None),
         )
     ).all()
@@ -125,7 +131,7 @@ def _contar_mesmo_valor_e_data(
 def montar_contexto_divergencia(db: Session, conciliacao: Conciliacao) -> ContextoDivergencia:
     """Contexto pra `conciliacao` (ADR-011). Levanta `ValueError` (a mesma
     exceção de `motivo_deterministico`) pra status não elegível
-    (`match_exato`, `match_tolerancia` ou desconhecido) — chamado como
+    (`match_exato`, `match_tolerancia`, `match_agrupado` ou desconhecido) — chamado como
     primeiro passo, antes de qualquer consulta, pra falhar rápido."""
     motivo = motivo_deterministico(conciliacao.status)
 

@@ -536,3 +536,53 @@ def test_conta_inativa_da_403_no_mcp(cenario, db_session):
 
     assert (parado.status_code, parado.json()) == (403, conta_inativa.corpo())
     assert voltou.status_code not in (401, 403)
+
+
+@pytest.mark.usefixtures("mcp")
+def test_mcp_conta_o_agrupamento_como_conciliado_e_nao_como_divergencia(
+    cenario, db_session, criar_extrato_da_empresa, inserir_lancamentos, monkeypatch
+):
+    """Issue #131: um lote de 150 mil (1 do banco contra 10 do sistema) em
+    outubro da empresa A. As 11 linhas são `match_agrupado`: contam em
+    `total`, não são divergência, e o MCP e a /v1 dizem o mesmo."""
+    monkeypatch.setattr(settings, "agrupamento_habilitado", True)
+    headers = cabecalhos(cenario.jwt, cenario.empresa_a)
+    extratos = {}
+    for origem, itens in (
+        ("banco", [("-150000.00", "lote")]),
+        (
+            "sistema",
+            [(f"-{valor}.00", "parcela") for valor in (5000, 8000, 11000, 12500, 14000)]
+            + [(f"-{valor}.00", "parcela") for valor in (15500, 17000, 18500, 21000, 27500)],
+        ),
+    ):
+        novo = criar_extrato_da_empresa(cenario.empresa_a, origem)
+        inserir_lancamentos(novo, itens)
+        novo.periodo_inicio, novo.periodo_fim = date(2026, 10, 1), date(2026, 10, 31)
+        db_session.commit()
+        extratos[origem] = novo
+    resposta = cenario.http.post(
+        "/conciliacoes",
+        headers=headers,
+        json={
+            "extrato_banco_id": str(extratos["banco"].id),
+            "extrato_sistema_id": str(extratos["sistema"].id),
+        },
+    )
+    assert resposta.status_code == 201, resposta.text
+    assert resposta.json()["match_agrupado"] == 11 and resposta.json()["agrupamentos"] == 1
+
+    resultado = _chamar(cenario.conectar(), "resumo_do_mes", {"competencia": "2026-10"})
+
+    contagens = resultado.structured_content["contagens"]
+    assert contagens["match_agrupado"] == 11 and contagens["agrupamentos"] == 1
+    assert contagens["total"] == 11
+    assert _texto(resultado) == (
+        "Outubro de 2026: 0 divergências, 0 sem justificativa, mês aberto, pronto para fechar."
+    )
+    v1 = cenario.http.get(
+        f"/v1/empresas/{cenario.empresa_a}/resumo",
+        headers={"Authorization": f"Bearer {cenario.chave_api()}"},
+        params={"competencia": "2026-10"},
+    )
+    assert resultado.structured_content == v1.json()

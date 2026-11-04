@@ -48,7 +48,7 @@ número de linhas DIVERGENTES do par em `conciliacoes` cuja decisão em vigor é
 rodada nova (regras em app/services/decisoes.py). Nas execuções com
 `atual: false` é 0 (decisão de 05/10): `conciliacoes` só tem a última rodada
 de cada par, então não há como saber o que estava justificado naquela época.
-Fica FORA de `total`, que continua a soma das sete categorias (não é coluna,
+Fica FORA de `total`, que continua a soma das categorias (não é coluna,
 o CHECK da tabela não muda). Custo: duas consultas a mais por página, não
 por item — as linhas divergentes dos pares atuais da página e os eventos dos
 extratos do banco envolvidos (`contar_justificativas`).
@@ -56,6 +56,11 @@ extratos do banco envolvidos (`contar_justificativas`).
 Desde a issue #132, `justificadas` conta só as justificativas APROVADAS, e
 `contagens.aguardando_aprovacao` conta as que aguardam aprovação, com a mesma
 regra (0 nas execuções com `atual: false`). Também fica fora de `total`.
+
+Agrupamento (issue #131, ADR-027): `contagens.match_agrupado` conta LINHAS (os
+lançamentos que entraram em grupos) e entra na soma de `total`;
+`contagens.agrupamentos` conta os grupos e fica fora dela. O percentual de
+acerto soma as linhas agrupadas. Execuções anteriores devolvem 0 nos dois campos.
 
 Nunca loga descrição, valor nem nome de arquivo (mesma regra de
 app/services/matching.py).
@@ -85,11 +90,13 @@ CATEGORIAS_CONTAGEM = (
     "total",
     "match_exato",
     "match_tolerancia",
+    "match_agrupado",
     "duplicado",
     "sem_correspondencia",
     "tarifa_bancaria",
     "divergente_valor",
     "divergente_data",
+    "agrupamentos",
 )
 
 
@@ -97,11 +104,15 @@ class ContagensResponse(BaseModel):
     total: int
     match_exato: int
     match_tolerancia: int
+    # Issue #131, ADR-027: linhas (lançamentos) agrupadas e quantos grupos elas
+    # formam. As execuções anteriores à #131 devolvem 0 nos dois.
+    match_agrupado: int
     duplicado: int
     sem_correspondencia: int
     tarifa_bancaria: int
     divergente_valor: int
     divergente_data: int
+    agrupamentos: int
     justificadas: int
     aguardando_aprovacao: int
 
@@ -228,7 +239,7 @@ def listar_execucoes(
                 **_contagem_de_justificativas(justificativas, linha),
             ),
             percentual_acerto=calcular_percentual_acerto(
-                linha.match_exato, linha.match_tolerancia, linha.total
+                linha.match_exato, linha.match_tolerancia, linha.total, linha.match_agrupado
             ),
             atual=(linha.rn == 1),
             periodo_inicio=linha.periodo_inicio,

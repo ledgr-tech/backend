@@ -8,6 +8,13 @@ Formato Excel BR (issue #26): separador `;`, UTF-8 com BOM, CRLF, aspas só
 quando necessário (`csv.QUOTE_MINIMAL`). Data `dd/mm/aaaa`, valor e score com
 vírgula decimal (sem separador de milhar), campos nulos saem vazios.
 
+Agrupamento (issue #131, ADR-027): o status `match_agrupado` sai como
+"Conciliado por agrupamento". Quando o arquivo tem alguma linha agrupada, ele
+ganha uma coluna final "Grupo", com um número sequencial por grupo na ordem do
+arquivo (o do primeiro aparecer é 1) e vazia nas demais linhas, pro contador
+filtrar o grupo no Excel. Sem linha agrupada, o CSV é idêntico ao de antes: as
+nove colunas anteriores nunca mudam de posição nem de conteúdo.
+
 Neutralização de injeção de fórmula (`neutralizar_formula`): só nas colunas
 de descrição — nunca em valor, data, status, regra ou score, porque um
 débito como -150,00 não pode ser alterado. Segue a mitigação usual de CSV
@@ -22,6 +29,7 @@ app/services/matching.py).
 
 import csv
 import io
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -44,6 +52,7 @@ CABECALHO_EXPORTACAO = [
 ROTULOS_STATUS = {
     "match_exato": "Match exato",
     "match_tolerancia": "Match por tolerância de data",
+    "match_agrupado": "Conciliado por agrupamento",
     "duplicado": "Duplicado",
     "sem_correspondencia": "Sem correspondência",
     "tarifa_bancaria": "Tarifa bancária",
@@ -55,7 +64,10 @@ ROTULOS_REGRA = {
     "exato": "Exato",
     "tolerancia": "Tolerância de data",
     "fuzzy_descricao": "Similaridade de descrição",
+    "agrupamento": "Agrupamento por soma",
 }
+
+COLUNA_GRUPO = "Grupo"
 
 # Caracteres que, como primeiro caractere não-espaço de uma célula, o
 # Excel/Sheets podem interpretar como início de fórmula ou comando.
@@ -78,6 +90,7 @@ class LinhaExportacao:
     sistema_data: date | None
     sistema_valor: Decimal | None
     sistema_descricao: str | None
+    grupo_id: uuid.UUID | None = None
 
 
 def neutralizar_formula(texto: str) -> str:
@@ -134,8 +147,12 @@ def gerar_csv_conciliacoes(linhas: list[LinhaExportacao]) -> bytes:
     """
     buffer = io.StringIO()
     escritor = csv.writer(buffer, delimiter=";", lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
-    escritor.writerow(CABECALHO_EXPORTACAO)
+    com_grupo = any(linha.grupo_id is not None for linha in linhas)
+    escritor.writerow([*CABECALHO_EXPORTACAO, COLUNA_GRUPO] if com_grupo else CABECALHO_EXPORTACAO)
+    numeros: dict[uuid.UUID, int] = {}
     for linha in linhas:
+        if linha.grupo_id is not None:
+            numeros.setdefault(linha.grupo_id, len(numeros) + 1)
         escritor.writerow(
             [
                 ROTULOS_STATUS.get(linha.status, linha.status),
@@ -147,6 +164,7 @@ def gerar_csv_conciliacoes(linhas: list[LinhaExportacao]) -> bytes:
                 _celula_descricao(linha.sistema_descricao),
                 ROTULOS_REGRA.get(linha.regra_aplicada, "") if linha.regra_aplicada else "",
                 formatar_score(linha.score_confianca),
+                *([numeros.get(linha.grupo_id, "")] if com_grupo else []),
             ]
         )
     return b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")

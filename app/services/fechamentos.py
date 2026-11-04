@@ -47,15 +47,20 @@ from app.services.travas import (
     travar_mes_compartilhada,
 )
 
+# `agrupamentos` (issue #131, ADR-027) conta grupos e fica fora da soma de
+# `total`; `match_agrupado` conta linhas. Os resumos congelados antes da #131
+# não têm as duas chaves, e quem os lê trata a falta como 0.
 CATEGORIAS = (
     "total",
     "match_exato",
     "match_tolerancia",
+    "match_agrupado",
     "duplicado",
     "sem_correspondencia",
     "tarifa_bancaria",
     "divergente_valor",
     "divergente_data",
+    "agrupamentos",
 )
 
 _FORMATO_COMPETENCIA = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
