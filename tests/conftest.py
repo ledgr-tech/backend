@@ -159,6 +159,9 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # Aprovação de justificativas (issue #132): desligada, como em produção
     # até o front aprovar; quem testa a aprovação liga no próprio teste.
     monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
+    # Agrupamento N para 1 (issue #131): desligado, como em produção; quem
+    # testa liga no próprio teste.
+    monkeypatch.setattr(settings, "agrupamento_habilitado", False)
     # Conexão MCP (issue #136): desligada e sem URLs, como em produção; quem
     # testa liga e configura no próprio teste.
     monkeypatch.setattr(settings, "mcp_habilitado", False)

@@ -71,6 +71,12 @@ ESTOUROU = "estourou"
 # tipo, menos o de mais cópias), enumera direto em vez de montar camadas de bits.
 LIMITE_ENUMERACAO = 1000
 
+# Quanto vale um passo da enumeração (uma chamada da busca em profundidade, de
+# ~1 a 2 µs) na unidade do teto de trabalho (palavra de 64 bits, ~2 ns). Só entra
+# em `Busca.trabalho`, pro teto da conciliação inteira: a enumeração em si já é
+# limitada por `LIMITE_ENUMERACAO`.
+PESO_DO_PASSO_DA_ENUMERACAO = 500
+
 # Teto de trabalho por busca, em palavras de 64 bits mexidas pela programação
 # dinâmica. Calibrado em 04/11 (Python 3.13 em Docker, num notebook de
 # desenvolvimento): o custo estimado prevê bem o tempo, entre 1,4 e 2,7 ns por
@@ -90,17 +96,14 @@ class Busca:
     # valor -> quantas cópias entram no conjunto; só quando `situacao` é UNICO,
     # e só os valores com pelo menos uma cópia.
     quantidades: dict[int, int] | None = None
-    # Palavras mexidas pela programação dinâmica (0 nos atalhos e na
-    # enumeração), na mesma unidade de `LIMITE_TRABALHO`.
+    # Trabalho gasto, na unidade de `LIMITE_TRABALHO` (palavras mexidas pela
+    # programação dinâmica; a enumeração entra pelo peso de cada passo; 0 nos
+    # atalhos).
     trabalho: int = 0
 
 
 def _bit(camada: bytes, posicao: int) -> int:
     return (camada[posicao >> 3] >> (posicao & 7)) & 1
-
-
-def _copias_efetivas(valor: int, quantidade: int, alvo: int) -> int:
-    return min(quantidade, alvo // valor)
 
 
 def _acrescentar(camada: int, valor: int, copias: int, mascara: int) -> int:
@@ -115,21 +118,11 @@ def _acrescentar(camada: int, valor: int, copias: int, mascara: int) -> int:
     return camada
 
 
-def _deslocamentos(copias: int) -> int:
-    contagem, restante, bloco = 0, copias, 1
-    while restante > 0:
-        restante -= min(bloco, restante)
-        bloco <<= 1
-        contagem += 1
-    return contagem
-
-
-def _enumerar(alvo: int, tipos: list[tuple[int, int]]) -> Busca:
+def _enumerar(alvo: int, tipos: list[tuple[int, int]], efetivas: list[int]) -> Busca:
     """Quantidades de cada tipo, por busca em profundidade com poda, até achar
     duas soluções. O tipo de mais cópias fica por último: sobra a ele uma
     divisão exata, não um laço, então o custo é o produto das cópias dos
     demais."""
-    efetivas = [_copias_efetivas(valor, copias, alvo) for valor, copias in tipos]
     ordem = sorted(range(len(tipos)), key=lambda i: (efetivas[i], tipos[i][0]))
     capacidade = [0] * (len(ordem) + 1)  # o que os tipos de `p` em diante ainda somam, no máximo
     for posicao in range(len(ordem) - 1, -1, -1):
@@ -137,8 +130,11 @@ def _enumerar(alvo: int, tipos: list[tuple[int, int]]) -> Busca:
         capacidade[posicao] = capacidade[posicao + 1] + tipos[indice][0] * efetivas[indice]
 
     achadas: list[dict[int, int]] = []
+    passos = 0
 
     def descer(posicao: int, resto: int, escolhas: dict[int, int]) -> None:
+        nonlocal passos
+        passos += 1
         indice = ordem[posicao]
         valor = tipos[indice][0]
         if posicao == len(ordem) - 1:
@@ -152,16 +148,19 @@ def _enumerar(alvo: int, tipos: list[tuple[int, int]]) -> Busca:
                 return
 
     descer(0, alvo, {})
+    trabalho = passos * PESO_DO_PASSO_DA_ENUMERACAO
     if not achadas:
-        return Busca(NENHUM)
+        return Busca(NENHUM, trabalho=trabalho)
     if len(achadas) > 1:
-        return Busca(AMBIGUO)
-    return Busca(UNICO, {tipos[i][0]: q for i, q in achadas[0].items() if q})
+        return Busca(AMBIGUO, trabalho=trabalho)
+    return Busca(UNICO, {tipos[i][0]: q for i, q in achadas[0].items() if q}, trabalho=trabalho)
 
 
-def _buscar_denso(alvo: int, tipos: list[tuple[int, int]], limite_trabalho: int) -> Busca:
-    efetivas = [_copias_efetivas(valor, copias, alvo) for valor, copias in tipos]
-    deslocamentos = sum(_deslocamentos(copias) for copias in efetivas)
+def _buscar_denso(
+    alvo: int, tipos: list[tuple[int, int]], efetivas: list[int], limite_trabalho: int
+) -> Busca:
+    # Um tipo com `e` cópias entra em `e.bit_length()` deslocamentos (divisão binária).
+    deslocamentos = sum(copias.bit_length() for copias in efetivas)
     trabalho = 2 * deslocamentos * (alvo // 64 + 1)
     if trabalho > limite_trabalho:
         return Busca(ESTOUROU)
@@ -209,18 +208,18 @@ def buscar_conjunto_unico(
     alvo: int, valores: list[int] | tuple[int, ...], limite_trabalho: int = LIMITE_TRABALHO
 ) -> Busca:
     """Ver a docstring do módulo."""
-    contagem = Counter(valor for valor in valores if 0 < valor < alvo)
-    if sum(contagem.values()) < 2:
+    uteis = [valor for valor in valores if 0 < valor < alvo]
+    if len(uteis) < 2:
         return Busca(NENHUM)
-    tipos = sorted(contagem.items())
-    soma_total = sum(valor * copias for valor, copias in tipos)
+    soma_total = sum(uteis)
     if soma_total < alvo:
         return Busca(NENHUM)
+    uteis.sort()
+    if uteis[0] + uteis[1] > alvo:
+        return Busca(NENHUM)
+    tipos = sorted(Counter(uteis).items())
     if soma_total == alvo:
         return Busca(UNICO, dict(tipos))
-    menores = tipos[0][0] * 2 if tipos[0][1] >= 2 else tipos[0][0] + tipos[1][0]
-    if menores > alvo:
-        return Busca(NENHUM)
 
     divisor = reduce(gcd, (valor for valor, _ in tipos))
     if alvo % divisor:
@@ -232,16 +231,16 @@ def buscar_conjunto_unico(
     inverter = complemento < alvo_escala
     alvo_busca = complemento if inverter else alvo_escala
 
-    efetivas = sorted(_copias_efetivas(valor, copias, alvo_busca) for valor, copias in escala)
+    efetivas = [min(copias, alvo_busca // valor) for valor, copias in escala]
     combinacoes = 1
-    for copias in efetivas[:-1]:  # o tipo de mais cópias sai por divisão (ver `_enumerar`)
+    for copias in sorted(efetivas)[:-1]:  # o tipo de mais cópias sai por divisão (ver `_enumerar`)
         combinacoes *= copias + 1
         if combinacoes > LIMITE_ENUMERACAO:
             break
     if combinacoes <= LIMITE_ENUMERACAO:
-        achado = _enumerar(alvo_busca, escala)
+        achado = _enumerar(alvo_busca, escala, efetivas)
     else:
-        achado = _buscar_denso(alvo_busca, escala, limite_trabalho)
+        achado = _buscar_denso(alvo_busca, escala, efetivas, limite_trabalho)
 
     if achado.situacao != UNICO:
         return achado

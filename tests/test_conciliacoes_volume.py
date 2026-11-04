@@ -36,6 +36,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, insert, select
 
+from app.core.config import settings
 from app.models import Conciliacao, Extrato, Lancamento
 from main import app
 
@@ -227,3 +228,47 @@ def test_post_conciliacoes_tempo_cresce_de_forma_aproximadamente_linear(
     for tempo in (tempo_5k, tempo_20k):
         assert tempo < TETO_SEGURANCA_SEGUNDOS, f"POST levou {tempo:.2f}s (travou?)"
     verificar_crescimento_linear(tempo_5k, tempo_20k, 4, RAZAO_MAXIMA)
+
+
+@pytest.mark.volume
+def test_post_conciliacoes_com_agrupamento_ligado_nao_regride_o_tempo(
+    db_session, criar_empresa, auth_headers, monkeypatch
+):
+    """Issue #131 (ADR-027): com `AGRUPAMENTO_HABILITADO` ligada o motor tem uma
+    etapa a mais sobre o que sobrou sem par (5 mil de cada lado em 20 mil, com
+    as datas ciclando em 28 dias). O tempo segue linear e perto do de antes."""
+    empresa_id = criar_empresa().id
+    headers = auth_headers(empresa_id)
+    aquecimento = _montar_par(db_session, empresa_id, 200)
+    pequeno = _montar_par(db_session, empresa_id, 5_000)
+    grande = _montar_par(db_session, empresa_id, 20_000)
+    grande_sem_agrupar = _montar_par(db_session, empresa_id, 20_000)
+
+    resposta_antes, tempo_antes = _conciliar(headers, *grande_sem_agrupar)  # flag desligada
+    assert resposta_antes.status_code == 201
+
+    monkeypatch.setattr(settings, "agrupamento_habilitado", True)
+    resposta, _ = _conciliar(headers, *aquecimento)  # aquecimento, fora da medição
+    assert resposta.status_code == 201
+    resposta_5k, tempo_5k = _conciliar(headers, *pequeno)
+    resposta_20k, tempo_20k = _conciliar(headers, *grande)
+    print(
+        f"\nTEMPO_POST_CONCILIACOES_AGRUPAMENTO 5k={tempo_5k:.2f}s 20k={tempo_20k:.2f}s "
+        f"razao={tempo_20k / tempo_5k:.2f} 20k_sem_agrupar={tempo_antes:.2f}s"
+    )
+
+    assert resposta_5k.status_code == resposta_20k.status_code == 201
+    # os sem par de cada lado ficam longe um do outro (100 mil e 200 mil): nada agrupa, e as
+    # contagens são as mesmas da conciliação sem a etapa
+    corpo = resposta_20k.json()
+    assert corpo["match_agrupado"] == 0 and corpo["agrupamentos"] == 0
+    assert {k: v for k, v in corpo.items() if "extrato" not in k} == {
+        k: v for k, v in resposta_antes.json().items() if "extrato" not in k
+    }
+    for tempo in (tempo_5k, tempo_20k):
+        assert tempo < TETO_SEGURANCA_SEGUNDOS, f"POST levou {tempo:.2f}s (travou?)"
+    verificar_crescimento_linear(tempo_5k, tempo_20k, 4, RAZAO_MAXIMA)
+    # sem regredir o tempo dos 20 mil de antes (folga de 50% mais 2 s pro ruído do runner)
+    assert (
+        tempo_20k < tempo_antes * 1.5 + 2.0
+    ), f"20k com a etapa levou {tempo_20k:.2f}s e sem ela {tempo_antes:.2f}s"

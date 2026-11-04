@@ -135,6 +135,7 @@ from rapidfuzz import fuzz
 from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Lancamento
 from app.services import soma_exata
 from app.services.normalizacao import _normalizar_descricao
@@ -433,6 +434,7 @@ class _Ponta:
     inteiros (`centavos`, sempre positivo) e o sinal à parte."""
 
     item: LancamentoParaMatching
+    indice: int  # posição entre todas as pontas da etapa, pra marcar uso sem hash de uuid
     lado: str  # "banco" ou "sistema"
     sinal: int
     centavos: int
@@ -452,7 +454,9 @@ def _centavos(valor: Decimal) -> int | None:
     return int(inteiro)
 
 
-def _pontas_do_agrupamento(itens: list[LancamentoParaMatching], lado: str) -> list[_Ponta]:
+def _pontas_do_agrupamento(
+    itens: list[LancamentoParaMatching], lado: str, primeiro_indice: int
+) -> list[_Ponta]:
     """Os lançamentos que podem entrar num grupo: valor diferente de zero e,
     do lado do banco, sem termo de tarifa (a tarifa mantém a prioridade da
     classificação, ADR-009)."""
@@ -467,6 +471,7 @@ def _pontas_do_agrupamento(itens: list[LancamentoParaMatching], lado: str) -> li
         pontas.append(
             _Ponta(
                 item=item,
+                indice=primeiro_indice + len(pontas),
                 lado=lado,
                 sinal=1 if item.valor > 0 else -1,
                 centavos=centavos,
@@ -556,9 +561,8 @@ def agrupar_por_soma(
         ]
 
     tolerancia = max(tolerancia_dias or 0, 0)
-    pontas = _pontas_do_agrupamento(banco_sem_par, "banco") + _pontas_do_agrupamento(
-        sistema_sem_par, "sistema"
-    )
+    pontas = _pontas_do_agrupamento(banco_sem_par, "banco", 0)
+    pontas += _pontas_do_agrupamento(sistema_sem_par, "sistema", len(pontas))
     if not banco_sem_par or not sistema_sem_par or len(pontas) < 3:
         return _sem_correspondencia(set())
 
@@ -571,7 +575,7 @@ def agrupar_por_soma(
         for lado_e_sinal, lista in por_lado_e_sinal.items()
     }
 
-    usados: set[uuid.UUID] = set()
+    usada = [False] * len(pontas)  # por `_Ponta.indice`
 
     def _candidatos(unico: _Ponta) -> list[_Ponta]:
         lado_oposto = "sistema" if unico.lado == "banco" else "banco"
@@ -579,30 +583,49 @@ def agrupar_por_soma(
         datas = ordinais.get((lado_oposto, unico.sinal), [])
         inicio = bisect_left(datas, unico.ordinal - tolerancia)
         fim = bisect_right(datas, unico.ordinal + tolerancia)
+        limite = unico.centavos
         return [
             candidato
             for candidato in lista[inicio:fim]
-            if candidato.centavos < unico.centavos and candidato.item.id not in usados
+            if candidato.centavos < limite and not usada[candidato.indice]
         ]
 
+    # Em que versão do conjunto de candidatos cada data de cada lado e sinal
+    # foi mexida por último (a versão sobe a cada grupo formado), e em que
+    # versão cada lançamento único foi avaliado. Um único ambíguo ou estourado
+    # só é avaliado de novo se algum candidato da janela dele foi consumido
+    # desde então: sem isso, a repetição reavaliaria tudo a cada rodada.
+    versao = 0
+    alterado_em: dict[tuple[str, int], dict[int, int]] = defaultdict(dict)
+    avaliado_na_versao: dict[int, int] = {}
+
+    def _janela_mudou(unico: _Ponta) -> bool:
+        lado_oposto = "sistema" if unico.lado == "banco" else "banco"
+        mexidas = alterado_em.get((lado_oposto, unico.sinal))
+        if not mexidas:
+            return False
+        desde = avaliado_na_versao[unico.indice]
+        return any(
+            mexidas.get(dia, -1) > desde
+            for dia in range(unico.ordinal - tolerancia, unico.ordinal + tolerancia + 1)
+        )
+
     # Maior valor absoluto primeiro; o lado, a data e a chave estável desempatam.
-    pendentes = sorted(
-        pontas,
-        key=lambda p: (-p.centavos, p.lado, p.ordinal, p.chave),
-    )
+    pendentes = sorted(pontas, key=lambda p: (-p.centavos, p.lado, p.ordinal, p.chave))
     grupos: list[tuple[_Ponta, list[_Ponta]]] = []
-    estourados: dict[uuid.UUID, int] = {}
+    estourados: dict[int, int] = {}  # por `_Ponta.indice`, com a contagem de candidatos
     trabalho_restante = LIMITE_TRABALHO_TOTAL
-    avaliado_na_versao: dict[uuid.UUID, int] = {}
-    versao = 0  # sobe a cada grupo formado: o conjunto de candidatos mudou
     while pendentes:
         seguintes = []
         formou = False
         for unico in pendentes:
-            id_unico = unico.item.id
-            if id_unico in usados or avaliado_na_versao.get(id_unico) == versao:
+            if usada[unico.indice]:
                 continue
-            avaliado_na_versao[id_unico] = versao
+            if unico.indice in avaliado_na_versao and not _janela_mudou(unico):
+                seguintes.append(unico)
+                continue
+            avaliado_na_versao[unico.indice] = versao
+            estourados.pop(unico.indice, None)
             candidatos = _candidatos(unico)
             if len(candidatos) < 2:
                 continue
@@ -615,23 +638,23 @@ def agrupar_por_soma(
             if busca.situacao == soma_exata.UNICO:
                 membros = _escolher_membros(unico, candidatos, busca.quantidades or {})
                 grupos.append((unico, membros))
-                usados.add(id_unico)
-                usados.update(membro.item.id for membro in membros)
-                estourados.pop(id_unico, None)
                 versao += 1
+                for ponta in [unico, *membros]:
+                    usada[ponta.indice] = True
+                    alterado_em[(ponta.lado, ponta.sinal)][ponta.ordinal] = versao
                 formou = True
             elif busca.situacao in (soma_exata.AMBIGUO, soma_exata.ESTOUROU):
                 # Pode mudar quando um grupo consumir candidatos dele.
                 seguintes.append(unico)
                 if busca.situacao == soma_exata.ESTOUROU:
-                    estourados[id_unico] = len(candidatos)
-                else:
-                    estourados.pop(id_unico, None)
+                    estourados[unico.indice] = len(candidatos)
         if not formou:
             break
         pendentes = seguintes
 
-    _registrar_tetos_estourados(estourados, usados)
+    _registrar_tetos_estourados(
+        [(pontas[indice].item.id, candidatos) for indice, candidatos in estourados.items()]
+    )
 
     resultados: list[ResultadoMatching] = []
     for indice, (unico, membros) in enumerate(grupos):
@@ -651,25 +674,25 @@ def agrupar_por_soma(
                     grupo_id=indice,
                 )
             )
-    return resultados + _sem_correspondencia(usados)
+    agrupados = {r.lancamento_banco_id or r.lancamento_sistema_id for r in resultados}
+    return resultados + _sem_correspondencia(agrupados)
 
 
-def _registrar_tetos_estourados(estourados: dict[uuid.UUID, int], usados: set[uuid.UUID]) -> None:
+def _registrar_tetos_estourados(estourados: list[tuple[uuid.UUID, int]]) -> None:
     """Loga os lançamentos únicos cuja busca passou do teto de trabalho e que
     seguem sem grupo: só o id do lançamento e a contagem de candidatos, nunca
     valor, descrição ou data (e no máximo `LIMITE_LOGS_DO_AGRUPAMENTO` linhas
     por conciliação, o resto numa contagem só)."""
-    restantes = [(id_, candidatos) for id_, candidatos in estourados.items() if id_ not in usados]
-    for id_, candidatos in restantes[:LIMITE_LOGS_DO_AGRUPAMENTO]:
+    for id_, candidatos in estourados[:LIMITE_LOGS_DO_AGRUPAMENTO]:
         logger.warning(
             "agrupamento resultado=teto_de_trabalho lancamento_id=%s candidatos=%d",
             id_,
             candidatos,
         )
-    if len(restantes) > LIMITE_LOGS_DO_AGRUPAMENTO:
+    if len(estourados) > LIMITE_LOGS_DO_AGRUPAMENTO:
         logger.warning(
             "agrupamento resultado=teto_de_trabalho outros_lancamentos=%d",
-            len(restantes) - LIMITE_LOGS_DO_AGRUPAMENTO,
+            len(estourados) - LIMITE_LOGS_DO_AGRUPAMENTO,
         )
 
 
@@ -810,9 +833,11 @@ def conciliar_extratos(
     Idempotente (ADR-007): apaga as conciliações anteriores do par
     (empresa_id, extrato_banco_id, extrato_sistema_id) e grava as novas na
     mesma transação, em insert em lote. Devolve as contagens por status
-    (incluindo `match_tolerancia`, issue #27 — ver comentário no cálculo de
-    `contagens` abaixo). Quem chama valida empresa, origem e status dos
-    extratos antes.
+    (incluindo `match_tolerancia`, issue #27, e `match_agrupado` e
+    `agrupamentos`, issue #131 — ver comentário no cálculo de `contagens`
+    abaixo). Quem chama valida empresa, origem e status dos extratos antes. O
+    agrupamento só roda com `AGRUPAMENTO_HABILITADO` ligada; desligada, o
+    resultado é o de antes dele.
 
     Concorrência: a transação começa adquirindo a trava do EXTRATO DO BANCO
     (`app/services/travas.py`, desde a issue #86; antes era por par), então
@@ -837,17 +862,25 @@ def conciliar_extratos(
                 Configuracao.empresa_id == empresa_id
             )
         ).scalar_one_or_none()
-        resultados = executar_motor(banco, sistema, tolerancia_dias or 0, agrupar=False)
+        resultados = executar_motor(
+            banco, sistema, tolerancia_dias or 0, agrupar=settings.agrupamento_habilitado
+        )
 
         # Contagens calculadas uma única vez (issue #27, ADR-010): antes, o
         # retorno do motor não incluía match_tolerancia, então a soma das
         # categorias devolvidas ficava menor que `total` sempre que
         # tolerancia_dias > 0. O mesmo dict grava `execucoes_conciliacao` e
         # volta pro response de `POST /conciliacoes`, pra nunca mais divergir.
+        #
+        # Agrupamento (issue #131, ADR-027): `match_agrupado` conta LINHAS (os
+        # lançamentos que entraram em grupos), pra soma das categorias seguir
+        # igual a `total` e o CHECK de `execucoes_conciliacao` continuar
+        # valendo; `agrupamentos` conta os grupos e fica fora da soma.
         contagens = {
             "total": len(resultados),
             STATUS_MATCH_EXATO: sum(r.status == STATUS_MATCH_EXATO for r in resultados),
             STATUS_MATCH_TOLERANCIA: sum(r.status == STATUS_MATCH_TOLERANCIA for r in resultados),
+            STATUS_MATCH_AGRUPADO: sum(r.status == STATUS_MATCH_AGRUPADO for r in resultados),
             STATUS_DUPLICADO: sum(r.status == STATUS_DUPLICADO for r in resultados),
             STATUS_SEM_CORRESPONDENCIA: sum(
                 r.status == STATUS_SEM_CORRESPONDENCIA for r in resultados
@@ -855,6 +888,12 @@ def conciliar_extratos(
             STATUS_TARIFA_BANCARIA: sum(r.status == STATUS_TARIFA_BANCARIA for r in resultados),
             STATUS_DIVERGENTE_VALOR: sum(r.status == STATUS_DIVERGENTE_VALOR for r in resultados),
             STATUS_DIVERGENTE_DATA: sum(r.status == STATUS_DIVERGENTE_DATA for r in resultados),
+            "agrupamentos": len({r.grupo_id for r in resultados if r.grupo_id is not None}),
+        }
+        # O núcleo puro identifica o grupo por um índice; o uuid4 nasce aqui.
+        grupos = {
+            indice: uuid.uuid4()
+            for indice in sorted({r.grupo_id for r in resultados if r.grupo_id is not None})
         }
 
         db.execute(
@@ -882,6 +921,7 @@ def conciliar_extratos(
                         "status": resultado.status,
                         "regra_aplicada": resultado.regra_aplicada,
                         "score_confianca": resultado.score_confianca,
+                        "grupo_id": grupos.get(resultado.grupo_id),
                     }
                     for resultado in resultados
                 ],
