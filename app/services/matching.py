@@ -1,5 +1,6 @@
-"""Motor de matching (issues #16, #22, #23 e #24): concilia os lançamentos de
-um extrato do banco com os de um extrato do sistema, pela regra da ADR-006.
+"""Motor de matching (issues #16, #22, #23, #24 e #131): concilia os
+lançamentos de um extrato do banco com os de um extrato do sistema, pela regra
+da ADR-006.
 
 Dividido em camadas, pra que a regra seja testável sem banco:
 - `parear_lancamentos`: núcleo puro do motor exato (ADR-006), com o
@@ -8,9 +9,13 @@ Dividido em camadas, pra que a regra seja testável sem banco:
   lançamentos em memória e devolve a lista de resultados, sem tocar em banco.
 - `parear_por_tolerancia`: núcleo puro da segunda passada (issue #22, ADR-008),
   sobre o que o motor exato deixou `sem_correspondencia`.
+- `agrupar_por_soma`: núcleo puro do agrupamento N para 1 e 1 para N (issue
+  #131, ADR-027), atrás da flag `AGRUPAMENTO_HABILITADO`, sobre o que o exato e
+  a tolerância deixaram `sem_correspondencia`.
 - `classificar_divergencias`: núcleo puro da terceira passada (issue #24,
   ADR-007/ADR-009), sub-classifica o que ainda sobrou `sem_correspondencia`
   depois das passadas anteriores.
+- `executar_motor`: as passadas acima em sequência, sem banco.
 - `conciliar_extratos`: carrega os lançamentos (sempre filtrando por
   `empresa_id` e `extrato_id`, ADR-004), chama o núcleo e persiste em
   `conciliacoes` (schema da ADR-007).
@@ -47,6 +52,24 @@ ocorrências) e casa greedy 1:1: `match_tolerancia`, regra `tolerancia`, score
 valor), então não compara todos contra todos, só os de mesmo valor. O
 desempate de candidatos com a mesma diferença de dias usa similaridade de
 descrição (issue #23) em vez de comparar a descrição como string simples.
+
+Agrupamento (issue #131, ADR-027): etapa depois do exato e da tolerância e
+antes da classificação, só sobre o que sobrou `sem_correspondencia` (nunca
+`duplicado`), e roda também com tolerância 0. Um lançamento único de um lado
+fecha grupo com 2 ou mais do outro quando a soma bate ao centavo
+(`match_agrupado`, regra `agrupamento`, uma linha por lançamento, todas com o
+mesmo `grupo_id`). A janela é a tolerância de data da empresa em relação ao
+lançamento único; sinal igual em todo o grupo; sem teto de tamanho. Só agrupa
+se o conjunto de valores for único (ambiguidade real não agrupa); valores
+iguais são intercambiáveis e o desempate é determinístico (menor desvio de
+data, descrição mais parecida, ordem estável). Os dois sentidos rodam juntos,
+o lançamento único de maior valor primeiro, e a etapa se repete até nada mudar.
+O 1 para 1 tem prioridade: se o banco tem um pagamento individual igual a um
+lançamento do lote e o sistema não tem lançamento próprio para ele, o 1 para 1
+consome o do lote e o grupo não fecha. A busca está em
+app/services/soma_exata.py, com o teto de trabalho que a protege de janela
+patológica. Tarifa do banco, valor zero e `duplicado` ficam de fora. Ver
+`agrupar_por_soma`.
 
 Similaridade de descrição (issue #23, ADR-008): `_similaridade_descricao` é
 max(`rapidfuzz.fuzz.token_sort_ratio`, `fuzz.token_set_ratio`) entre duas
@@ -96,10 +119,13 @@ todos). `regra_aplicada` fica NULL nas 3 categorias novas, igual já era pra
 classificação de item solto.
 
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
-de log fica pra Sprint 7).
+de log fica pra Sprint 7). O único log do motor é o do teto de trabalho do
+agrupamento, só com id do lançamento e contagem de candidatos.
 """
 
+import logging
 import uuid
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -110,19 +136,37 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
 from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Lancamento
+from app.services import soma_exata
 from app.services.normalizacao import _normalizar_descricao
 from app.services.travas import travar_extrato_banco
+
+logger = logging.getLogger(__name__)
 
 STATUS_MATCH_EXATO = "match_exato"
 STATUS_DUPLICADO = "duplicado"
 STATUS_SEM_CORRESPONDENCIA = "sem_correspondencia"
 STATUS_MATCH_TOLERANCIA = "match_tolerancia"
+STATUS_MATCH_AGRUPADO = "match_agrupado"
 STATUS_TARIFA_BANCARIA = "tarifa_bancaria"
 STATUS_DIVERGENTE_VALOR = "divergente_valor"
 STATUS_DIVERGENTE_DATA = "divergente_data"
 REGRA_EXATO = "exato"
 REGRA_TOLERANCIA = "tolerancia"
+REGRA_AGRUPAMENTO = "agrupamento"
 SCORE_EXATO = Decimal("1.000")
+# Agrupar nunca pontua como par exato (ADR-027): mesmo com todos os lançamentos
+# do grupo na mesma data, o score sai no máximo 0,900.
+SCORE_MAXIMO_AGRUPAMENTO = Decimal("0.900")
+# Teto de trabalho da conciliação inteira no agrupamento, na unidade de
+# `soma_exata.LIMITE_TRABALHO` (~2 ns por palavra, uns 4 s). Protege a requisição
+# de um extrato com milhares de janelas pesadas, cada uma abaixo do teto por
+# lançamento. Os lançamentos únicos de maior valor vêm primeiro, então o lote
+# grande de verdade é avaliado antes de qualquer sobra pequena. Estourado, o
+# resto da etapa não faz mais busca pesada (o que não precisa dela segue).
+LIMITE_TRABALHO_TOTAL = 2_000_000_000
+# Quantos lançamentos com o teto de trabalho estourado o motor lista no log por
+# conciliação; o resto vai numa linha só, com a contagem.
+LIMITE_LOGS_DO_AGRUPAMENTO = 20
 
 # Termos de descrição (já passados por _normalizar_descricao: casefold, sem
 # stripar acento de propósito) que classificam um lançamento do banco sem par
@@ -175,13 +219,19 @@ class LancamentoParaMatching:
 @dataclass(frozen=True)
 class ResultadoMatching:
     """Uma linha futura de `conciliacoes`. Nos excedentes e sem par, só o
-    lado correspondente tem id, e regra/score ficam nulos."""
+    lado correspondente tem id, e regra/score ficam nulos.
+
+    `grupo_id` (issue #131, ADR-027) só vem preenchido nas linhas
+    `match_agrupado`: é o ÍNDICE do grupo na execução (0, 1, 2...), igual em
+    todas as linhas do mesmo grupo. O núcleo puro só identifica os grupos;
+    `conciliar_extratos` troca cada índice por um uuid4 ao gravar."""
 
     status: str
     lancamento_banco_id: uuid.UUID | None
     lancamento_sistema_id: uuid.UUID | None
     regra_aplicada: str | None = None
     score_confianca: Decimal | None = None
+    grupo_id: int | None = None
 
 
 def _agrupar(
@@ -377,6 +427,252 @@ def parear_por_tolerancia(
     return resultados
 
 
+@dataclass(frozen=True)
+class _Ponta:
+    """Um lançamento sem par elegível ao agrupamento, com o valor em centavos
+    inteiros (`centavos`, sempre positivo) e o sinal à parte."""
+
+    item: LancamentoParaMatching
+    lado: str  # "banco" ou "sistema"
+    sinal: int
+    centavos: int
+    ordinal: int
+    # Desempate estável e total (descrição normalizada, ocorrência, posição na
+    # entrada), sem depender de objeto nem de id.
+    chave: tuple[str, int, int]
+
+
+def _centavos(valor: Decimal) -> int | None:
+    """O valor absoluto em centavos inteiros, ou `None` se for zero ou não
+    cair num número inteiro de centavos (a soma é ao centavo, sem arredondar)."""
+    centavos = abs(valor) * 100
+    inteiro = centavos.to_integral_value()
+    if centavos != inteiro or inteiro <= 0:
+        return None
+    return int(inteiro)
+
+
+def _pontas_do_agrupamento(itens: list[LancamentoParaMatching], lado: str) -> list[_Ponta]:
+    """Os lançamentos que podem entrar num grupo: valor diferente de zero e,
+    do lado do banco, sem termo de tarifa (a tarifa mantém a prioridade da
+    classificação, ADR-009)."""
+    pontas = []
+    for indice, item in enumerate(itens):
+        centavos = _centavos(item.valor)
+        if centavos is None:
+            continue
+        descricao = _normalizar_descricao(item.descricao)
+        if lado == "banco" and _contem_termo_tarifa(descricao):
+            continue
+        pontas.append(
+            _Ponta(
+                item=item,
+                lado=lado,
+                sinal=1 if item.valor > 0 else -1,
+                centavos=centavos,
+                ordinal=item.data.toordinal(),
+                chave=(descricao, item.ocorrencia, indice),
+            )
+        )
+    return pontas
+
+
+def _escolher_membros(
+    unico: _Ponta, candidatos: list[_Ponta], quantidades: dict[int, int]
+) -> list[_Ponta]:
+    """Os candidatos de cada valor do conjunto achado. Candidatos de mesmo
+    valor são equivalentes pra soma, então entram os que desviam menos em data
+    do lançamento único, depois os de descrição mais parecida com a dele
+    (`_similaridade_descricao`), depois a ordem estável. O desvio total e a
+    similaridade total são somas por candidato, então escolher valor a valor
+    dá o mesmo conjunto que escolher o grupo inteiro."""
+    por_valor: dict[int, list[_Ponta]] = defaultdict(list)
+    for candidato in candidatos:
+        por_valor[candidato.centavos].append(candidato)
+
+    membros: list[_Ponta] = []
+    for centavos, quantidade in quantidades.items():
+        do_valor = por_valor[centavos]
+        if len(do_valor) > quantidade:
+            do_valor = sorted(
+                do_valor,
+                key=lambda c: (
+                    abs(c.ordinal - unico.ordinal),
+                    -_similaridade_descricao(c.item.descricao, unico.item.descricao),
+                    c.chave,
+                ),
+            )
+        membros.extend(do_valor[:quantidade])
+    return sorted(membros, key=lambda c: (c.ordinal, c.centavos, c.chave))
+
+
+def agrupar_por_soma(
+    banco_sem_par: list[LancamentoParaMatching],
+    sistema_sem_par: list[LancamentoParaMatching],
+    tolerancia_dias: int,
+) -> list[ResultadoMatching]:
+    """Quarta etapa (issue #131, ADR-027) sobre os `sem_correspondencia` das
+    passadas anteriores: agrupamento N para 1 e 1 para N, `match_agrupado`,
+    regra `agrupamento`. Pura e determinística, no contrato de
+    `parear_por_tolerancia`: recebe os sem par e devolve resultados pra todos
+    eles, os que entraram em grupo e os que continuam `sem_correspondencia`.
+
+    Um lançamento único de um lado fecha grupo com 2 ou mais lançamentos do
+    outro quando a soma bate ao centavo. Os candidatos dele são os lançamentos
+    sem par do outro lado, do mesmo sinal, de valor diferente de zero e menor
+    que o dele, com data a no máximo `tolerancia_dias` da dele (a mesma medida
+    do 1 para 1: os membros ficam a até 2x a tolerância entre si; com
+    tolerância 0, só o mesmo dia). Lançamento do banco com termo de tarifa
+    fica de fora. A busca é completa e exata (app/services/soma_exata.py), sem
+    teto de tamanho do grupo, e só agrupa se o conjunto de valores for único:
+    com dois conjuntos de valores diferentes e a mesma soma, é ambíguo e não
+    agrupa. Conjuntos de mesmo multiconjunto de valores não são ambiguidade
+    (`_escolher_membros`).
+
+    Os dois sentidos rodam juntos. A ordem é determinística: o lançamento
+    único de maior valor absoluto primeiro, desempate por chave estável, e um
+    lançamento entra num grupo só, como único ou como membro. A etapa se
+    repete até nada mudar, porque um grupo formado consome candidatos e pode
+    desfazer a ambiguidade de outro (os únicos sem solução, que só ficam sem
+    candidatos, não voltam a ser avaliados). O pareamento 1 para 1 já rodou e
+    tem prioridade: o que ele consumiu não está aqui.
+
+    O teto de trabalho (`soma_exata.LIMITE_TRABALHO`) é só proteção contra
+    janela patológica: estourou, o lançamento segue como divergência, e o log
+    leva só ids e contagens. `score_confianca` é 1 - maior desvio de data /
+    (tolerância + 1), limitado a `SCORE_MAXIMO_AGRUPAMENTO`; `grupo_id` é o
+    índice do grupo (ver `ResultadoMatching`).
+    """
+
+    def _sem_correspondencia(usados: set[uuid.UUID]) -> list[ResultadoMatching]:
+        return [
+            ResultadoMatching(STATUS_SEM_CORRESPONDENCIA, item.id, None)
+            for item in banco_sem_par
+            if item.id not in usados
+        ] + [
+            ResultadoMatching(STATUS_SEM_CORRESPONDENCIA, None, item.id)
+            for item in sistema_sem_par
+            if item.id not in usados
+        ]
+
+    tolerancia = max(tolerancia_dias or 0, 0)
+    pontas = _pontas_do_agrupamento(banco_sem_par, "banco") + _pontas_do_agrupamento(
+        sistema_sem_par, "sistema"
+    )
+    if not banco_sem_par or not sistema_sem_par or len(pontas) < 3:
+        return _sem_correspondencia(set())
+
+    # Por lado e sinal, em ordem de data, pra achar a janela com bisect.
+    por_lado_e_sinal: dict[tuple[str, int], list[_Ponta]] = defaultdict(list)
+    for ponta in sorted(pontas, key=lambda p: (p.ordinal, p.centavos, p.chave)):
+        por_lado_e_sinal[(ponta.lado, ponta.sinal)].append(ponta)
+    ordinais = {
+        lado_e_sinal: [ponta.ordinal for ponta in lista]
+        for lado_e_sinal, lista in por_lado_e_sinal.items()
+    }
+
+    usados: set[uuid.UUID] = set()
+
+    def _candidatos(unico: _Ponta) -> list[_Ponta]:
+        lado_oposto = "sistema" if unico.lado == "banco" else "banco"
+        lista = por_lado_e_sinal.get((lado_oposto, unico.sinal), [])
+        datas = ordinais.get((lado_oposto, unico.sinal), [])
+        inicio = bisect_left(datas, unico.ordinal - tolerancia)
+        fim = bisect_right(datas, unico.ordinal + tolerancia)
+        return [
+            candidato
+            for candidato in lista[inicio:fim]
+            if candidato.centavos < unico.centavos and candidato.item.id not in usados
+        ]
+
+    # Maior valor absoluto primeiro; o lado, a data e a chave estável desempatam.
+    pendentes = sorted(
+        pontas,
+        key=lambda p: (-p.centavos, p.lado, p.ordinal, p.chave),
+    )
+    grupos: list[tuple[_Ponta, list[_Ponta]]] = []
+    estourados: dict[uuid.UUID, int] = {}
+    trabalho_restante = LIMITE_TRABALHO_TOTAL
+    avaliado_na_versao: dict[uuid.UUID, int] = {}
+    versao = 0  # sobe a cada grupo formado: o conjunto de candidatos mudou
+    while pendentes:
+        seguintes = []
+        formou = False
+        for unico in pendentes:
+            id_unico = unico.item.id
+            if id_unico in usados or avaliado_na_versao.get(id_unico) == versao:
+                continue
+            avaliado_na_versao[id_unico] = versao
+            candidatos = _candidatos(unico)
+            if len(candidatos) < 2:
+                continue
+            busca = soma_exata.buscar_conjunto_unico(
+                unico.centavos,
+                [candidato.centavos for candidato in candidatos],
+                limite_trabalho=min(soma_exata.LIMITE_TRABALHO, trabalho_restante),
+            )
+            trabalho_restante -= busca.trabalho
+            if busca.situacao == soma_exata.UNICO:
+                membros = _escolher_membros(unico, candidatos, busca.quantidades or {})
+                grupos.append((unico, membros))
+                usados.add(id_unico)
+                usados.update(membro.item.id for membro in membros)
+                estourados.pop(id_unico, None)
+                versao += 1
+                formou = True
+            elif busca.situacao in (soma_exata.AMBIGUO, soma_exata.ESTOUROU):
+                # Pode mudar quando um grupo consumir candidatos dele.
+                seguintes.append(unico)
+                if busca.situacao == soma_exata.ESTOUROU:
+                    estourados[id_unico] = len(candidatos)
+                else:
+                    estourados.pop(id_unico, None)
+        if not formou:
+            break
+        pendentes = seguintes
+
+    _registrar_tetos_estourados(estourados, usados)
+
+    resultados: list[ResultadoMatching] = []
+    for indice, (unico, membros) in enumerate(grupos):
+        desvio_maximo = max(abs(membro.ordinal - unico.ordinal) for membro in membros)
+        score = min(
+            round(Decimal(1) - Decimal(desvio_maximo) / Decimal(tolerancia + 1), 3),
+            SCORE_MAXIMO_AGRUPAMENTO,
+        )
+        for ponta in [unico, *membros]:
+            resultados.append(
+                ResultadoMatching(
+                    status=STATUS_MATCH_AGRUPADO,
+                    lancamento_banco_id=ponta.item.id if ponta.lado == "banco" else None,
+                    lancamento_sistema_id=ponta.item.id if ponta.lado == "sistema" else None,
+                    regra_aplicada=REGRA_AGRUPAMENTO,
+                    score_confianca=score,
+                    grupo_id=indice,
+                )
+            )
+    return resultados + _sem_correspondencia(usados)
+
+
+def _registrar_tetos_estourados(estourados: dict[uuid.UUID, int], usados: set[uuid.UUID]) -> None:
+    """Loga os lançamentos únicos cuja busca passou do teto de trabalho e que
+    seguem sem grupo: só o id do lançamento e a contagem de candidatos, nunca
+    valor, descrição ou data (e no máximo `LIMITE_LOGS_DO_AGRUPAMENTO` linhas
+    por conciliação, o resto numa contagem só)."""
+    restantes = [(id_, candidatos) for id_, candidatos in estourados.items() if id_ not in usados]
+    for id_, candidatos in restantes[:LIMITE_LOGS_DO_AGRUPAMENTO]:
+        logger.warning(
+            "agrupamento resultado=teto_de_trabalho lancamento_id=%s candidatos=%d",
+            id_,
+            candidatos,
+        )
+    if len(restantes) > LIMITE_LOGS_DO_AGRUPAMENTO:
+        logger.warning(
+            "agrupamento resultado=teto_de_trabalho outros_lancamentos=%d",
+            len(restantes) - LIMITE_LOGS_DO_AGRUPAMENTO,
+        )
+
+
 def _contem_termo_tarifa(descricao_normalizada: str) -> bool:
     return any(termo in descricao_normalizada for termo in TERMOS_TARIFA_BANCARIA)
 
@@ -454,6 +750,55 @@ def _carregar_lancamentos(
     ]
 
 
+def _sobras(
+    resultados: list[ResultadoMatching],
+    banco_por_id: dict[uuid.UUID, LancamentoParaMatching],
+    sistema_por_id: dict[uuid.UUID, LancamentoParaMatching],
+) -> tuple[list[LancamentoParaMatching], list[LancamentoParaMatching]]:
+    """Os LancamentoParaMatching originais por trás de cada
+    ResultadoMatching(status=sem_correspondencia) de `resultados`."""
+    sem_par = [r for r in resultados if r.status == STATUS_SEM_CORRESPONDENCIA]
+    return (
+        [banco_por_id[r.lancamento_banco_id] for r in sem_par if r.lancamento_banco_id],
+        [sistema_por_id[r.lancamento_sistema_id] for r in sem_par if r.lancamento_sistema_id],
+    )
+
+
+def executar_motor(
+    banco: list[LancamentoParaMatching],
+    sistema: list[LancamentoParaMatching],
+    tolerancia_dias: int,
+    agrupar: bool,
+) -> list[ResultadoMatching]:
+    """As passadas do motor em sequência, sem banco: exato (ADR-006),
+    tolerância de data (só com `tolerancia_dias` > 0), agrupamento (só com
+    `agrupar`, a flag `AGRUPAMENTO_HABILITADO`; roda também com tolerância 0) e
+    a classificação das divergências, nessa ordem. Cada passada só vê o que a
+    anterior deixou `sem_correspondencia`, nunca o `duplicado`. É o que
+    `conciliar_extratos` persiste."""
+    resultados = parear_lancamentos(banco, sistema)
+    banco_por_id = {item.id: item for item in banco}
+    sistema_por_id = {item.id: item for item in sistema}
+
+    if tolerancia_dias:
+        banco_sem_par, sistema_sem_par = _sobras(resultados, banco_por_id, sistema_por_id)
+        resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
+        resultados += parear_por_tolerancia(banco_sem_par, sistema_sem_par, tolerancia_dias)
+
+    # Agrupamento (issue #131): sobre o que o 1 para 1 deixou, que tem prioridade.
+    if agrupar:
+        banco_sem_par, sistema_sem_par = _sobras(resultados, banco_por_id, sistema_por_id)
+        resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
+        resultados += agrupar_por_soma(banco_sem_par, sistema_sem_par, tolerancia_dias)
+
+    # Terceira passada (issue #24): sub-classifica o que ainda sobrou
+    # sem_correspondencia depois das anteriores.
+    banco_sem_par, sistema_sem_par = _sobras(resultados, banco_por_id, sistema_por_id)
+    resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
+    resultados += classificar_divergencias(banco_sem_par, sistema_sem_par)
+    return resultados
+
+
 def conciliar_extratos(
     db: Session,
     empresa_id: uuid.UUID,
@@ -487,40 +832,12 @@ def conciliar_extratos(
         travar_extrato_banco(db, empresa_id, extrato_banco_id)
         banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
         sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
-        resultados = parear_lancamentos(banco, sistema)
-        banco_por_id = {item.id: item for item in banco}
-        sistema_por_id = {item.id: item for item in sistema}
-
-        def _sobras(
-            resultados: list[ResultadoMatching],
-        ) -> tuple[list[LancamentoParaMatching], list[LancamentoParaMatching]]:
-            """Os LancamentoParaMatching originais por trás de cada
-            ResultadoMatching(status=sem_correspondencia) de `resultados`."""
-            sem_par = [r for r in resultados if r.status == STATUS_SEM_CORRESPONDENCIA]
-            return (
-                [banco_por_id[r.lancamento_banco_id] for r in sem_par if r.lancamento_banco_id],
-                [
-                    sistema_por_id[r.lancamento_sistema_id]
-                    for r in sem_par
-                    if r.lancamento_sistema_id
-                ],
-            )
-
         tolerancia_dias = db.execute(
             select(Configuracao.tolerancia_dias_default).where(
                 Configuracao.empresa_id == empresa_id
             )
         ).scalar_one_or_none()
-        if tolerancia_dias:
-            banco_sem_par, sistema_sem_par = _sobras(resultados)
-            resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
-            resultados += parear_por_tolerancia(banco_sem_par, sistema_sem_par, tolerancia_dias)
-
-        # Terceira passada (issue #24): sub-classifica o que ainda sobrou
-        # sem_correspondencia depois do motor exato e da tolerância.
-        banco_sem_par, sistema_sem_par = _sobras(resultados)
-        resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
-        resultados += classificar_divergencias(banco_sem_par, sistema_sem_par)
+        resultados = executar_motor(banco, sistema, tolerancia_dias or 0, agrupar=False)
 
         # Contagens calculadas uma única vez (issue #27, ADR-010): antes, o
         # retorno do motor não incluía match_tolerancia, então a soma das
