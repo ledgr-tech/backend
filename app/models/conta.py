@@ -5,6 +5,7 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, String, UniqueConstra
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.localizacao import CIDADE_MAXIMO, CIDADE_MINIMO, UFS
 from app.core.plano import PLANOS
 from app.models.base import Base, TimestampMixin
 
@@ -33,6 +34,10 @@ class Conta(Base, TimestampMixin):
     cliente da conta na Stripe, criado no primeiro checkout. A situação é
     calculada, nunca gravada.
 
+    Localização (issue #184): `cidade` e `uf`, nulas, informadas no cadastro ou
+    vindas da consulta de CNPJ (regras em app/core/localizacao.py). Dado da
+    conta, nunca da empresa cliente; as contas antigas ficam com nulo.
+
     As contas que existiam antes da #133 têm o mesmo id da empresa de que
     vieram: o JWT já emitido leva esse id no claim `empresa_id`, que passou a
     ser lido como o id da conta (app/core/auth.py).
@@ -54,6 +59,14 @@ class Conta(Base, TimestampMixin):
             "(inativada_em IS NULL) = (motivo_inativacao IS NULL)",
             name="ck_contas_inativacao_completa",
         ),
+        CheckConstraint(
+            f"cidade IS NULL OR char_length(cidade) BETWEEN {CIDADE_MINIMO} AND {CIDADE_MAXIMO}",
+            name="ck_contas_cidade_tamanho",
+        ),
+        CheckConstraint(
+            "uf IS NULL OR uf IN (" + ", ".join(f"'{uf}'" for uf in UFS) + ")",
+            name="ck_contas_uf_valida",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -70,6 +83,8 @@ class Conta(Base, TimestampMixin):
     assinatura_ativa: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    cidade: Mapped[str | None] = mapped_column(String, nullable=True)
+    uf: Mapped[str | None] = mapped_column(String(2), nullable=True)
     inativada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     motivo_inativacao: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
