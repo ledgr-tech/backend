@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from app.core import auth
 from app.core.auth import CABECALHO_EMPRESA
 from app.core.config import Settings, settings
-from app.core.plano import chegou_ao_limite, limite_da_conta
+from app.core.plano import chegou_ao_limite, limite_da_conta, limite_do_plano
 from app.models import Conta
 from app.services.usuarios import remover_usuario
 from main import app
@@ -294,3 +294,20 @@ def test_limites_no_me_para_todos_os_papeis(db_session, equipe, limites):
             "usuarios": {"usados": 3, "maximo": 10},
             "conciliacoes": {"usadas": 0, "maximo": None},
         }
+
+
+def test_limite_da_conta_e_o_limite_do_plano_efetivo():
+    configuracao = Settings(
+        _env_file=None,
+        database_url="postgresql://x/y",
+        limite_usuarios_essencial=2,
+        limite_usuarios_padrao=6,
+    )
+
+    for plano in (None, "essencial", "padrao", "avancado"):
+        efetivo = plano or "essencial"
+        assert limite_da_conta(Conta(plano=plano), "usuarios", configuracao) == limite_do_plano(
+            efetivo, "usuarios", configuracao
+        )
+    assert limite_do_plano("padrao", "usuarios", configuracao) == 6
+    assert limite_do_plano("avancado", "usuarios", configuracao) is None
