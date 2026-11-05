@@ -121,6 +121,18 @@ rejeitada, conferida ou sem decisão) também é 422, como aprovar sem
 justificativa pendente. Mês fechado é 409, com a mesma mensagem das outras
 decisões.
 
+Quem pode desfazer (issue #174): `decisao`, na listagem e na resposta do POST,
+traz `pode_desfazer_aprovacao` (bool, sempre presente quando há decisão), o
+cálculo para quem faz a requisição: `true` só quando o `aprovacao_desfeita`
+seria aceito agora, ou seja, justificativa aprovada em vigor, aprovação ligada,
+mês aberto, e quem aprovou ou o admin nas três exceções acima. É `false` nos
+demais casos, inclusive com a flag desligada e na justificativa que nasceu
+aprovada. A regra é a mesma função do 403/422 (`app/services/desfazer_aprovacao.py`),
+então o campo e o POST não divergem. O campo existe só em `decisao`, não nos
+itens de `eventos`, e não sai na API pública `/v1`, no MCP, no relatório
+público nem no CSV. O que depende do usuário e do mês carrega uma vez por
+requisição e os aprovadores da página, numa consulta só: nenhuma por item.
+
 Com a flag ligada, a justificativa aprovada em vigor não pode ser alterada
 nem retirada (`TIPOS_QUE_TIRAM_A_APROVACAO`: justificar de novo, conferir e
 `justificativa_desfeita`): 409 para qualquer papel, até quem aprovou desfazer
@@ -151,7 +163,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from fastapi import status as http_status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, aliased
 
@@ -169,10 +181,10 @@ from app.models import (
     ExplicacaoDivergencia,
     Extrato,
     Lancamento,
-    Usuario,
 )
 from app.models.extrato import STATUS_RASCUNHO
-from app.services import decisoes, saldo
+from app.services import decisoes, desfazer_aprovacao, saldo
+from app.services.desfazer_aprovacao import PAPEIS_QUE_APROVAM, Recusa
 from app.services.exportacao import LinhaExportacao, gerar_csv_conciliacoes
 from app.services.fechamentos import MesFechadoError, garantir_mes_aberto
 from app.services.ia import ProvedorDeIA
@@ -329,19 +341,38 @@ class DecisaoResponse(BaseModel):
     aprovada_em: datetime | None = None
 
 
+class DecisaoEmVigorResponse(DecisaoResponse):
+    """A `decisao` do item e a resposta do POST: o evento em vigor mais o que é
+    de quem faz a requisição. Os itens de `eventos` não trazem o campo."""
+
+    pode_desfazer_aprovacao: bool = Field(
+        description=(
+            "Calculado para quem faz a requisição (issue #174): `true` só quando "
+            "`aprovacao_desfeita` seria aceito agora para este usuário (justificativa "
+            "aprovada em vigor, aprovação ligada, mês aberto, e quem aprovou, ou o admin "
+            "quando quem aprovou foi removido ou rebaixado e na aprovação da migração "
+            "de 21/10). `false` nos demais casos, inclusive com a aprovação desligada."
+        ),
+        examples=[True],
+    )
+
+
 def _evento_response(evento: DecisaoLinha) -> DecisaoResponse:
     return DecisaoResponse(**vars(decisoes.como_evento(evento)))
 
 
-def _decisao_response(vigente: decisoes.DecisaoEmVigor | None) -> DecisaoResponse | None:
+def _decisao_response(
+    vigente: decisoes.DecisaoEmVigor | None, pode_desfazer_aprovacao: bool
+) -> DecisaoEmVigorResponse | None:
     if vigente is None:
         return None
     aprovacao = vigente.aprovacao
-    return DecisaoResponse(
+    return DecisaoEmVigorResponse(
         **vars(decisoes.como_evento(vigente.evento)),
         situacao=vigente.situacao,
         aprovada_por=aprovacao.autor_nome if aprovacao is not None else None,
         aprovada_em=aprovacao.em if aprovacao is not None else None,
+        pode_desfazer_aprovacao=pode_desfazer_aprovacao,
     )
 
 
@@ -365,7 +396,7 @@ class ItemConciliacaoResponse(BaseModel):
     lancamento_banco: LancamentoResponse | None
     lancamento_sistema: LancamentoResponse | None
     chave: str
-    decisao: DecisaoResponse | None
+    decisao: DecisaoEmVigorResponse | None
     eventos: list[DecisaoResponse]
     explicacao: str | None
     gerada_por_ia: bool
@@ -535,7 +566,7 @@ def _construir_consulta_itens(
 @router.get("/{extrato_id}", response_model=ConciliacaoListaResponse)
 def listar_conciliacoes(
     extrato_id: uuid.UUID,
-    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -543,6 +574,7 @@ def listar_conciliacoes(
     extrato_sistema_id: uuid.UUID | None = None,
     grupo_id: uuid.UUID | None = None,
 ) -> ConciliacaoListaResponse:
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
     consulta, filtros = _construir_consulta_itens(
         empresa_id, extrato_id, status, extrato_sistema_id, grupo_id
@@ -565,8 +597,13 @@ def listar_conciliacoes(
         db, empresa_id, extrato_id, {linha.grupo_id for linha in linhas if linha.grupo_id}
     )
 
+    vigentes = [decisoes.decisao_vigente(eventos_por_chave.get(chave, [])) for chave in chaves]
+    contexto = desfazer_aprovacao.carregar_contexto(
+        db, usuario, empresa_id, extrato_banco, vigentes
+    )
+
     itens = []
-    for linha, chave in zip(linhas, chaves, strict=True):
+    for linha, chave, vigente in zip(linhas, chaves, vigentes, strict=True):
         eventos = eventos_por_chave.get(chave, [])
         itens.append(
             ItemConciliacaoResponse(
@@ -580,7 +617,9 @@ def listar_conciliacoes(
                 lancamento_banco=_lancamento_ou_none(linha, "banco"),
                 lancamento_sistema=_lancamento_ou_none(linha, "sistema"),
                 chave=chave,
-                decisao=_decisao_response(decisoes.decisao_vigente(eventos)),
+                decisao=_decisao_response(
+                    vigente, desfazer_aprovacao.pode_desfazer_aprovacao(contexto, vigente)
+                ),
                 eventos=[_evento_response(evento) for evento in eventos],
                 explicacao=getattr(linha, "explicacao_texto", None),
                 gerada_por_ia=getattr(linha, "explicacao_texto", None) is not None,
@@ -670,8 +709,6 @@ TipoDecisao = Literal[
 ]
 
 SEM_JUSTIFICATIVA_AGUARDANDO = "Não há justificativa aguardando aprovação nesta linha."
-# Quem aprova e rejeita justificativas (issue #132, ADR-019).
-PAPEIS_QUE_APROVAM = ("admin", "gestor")
 # Desfazer a aprovação (issue #164).
 APROVACAO_DESLIGADA = (
     "A aprovação de justificativas está desligada, então não há aprovação para desfazer."
@@ -719,25 +756,21 @@ def _linha_da_chave(
     return next((linha for linha in db.execute(consulta) if _chave(linha) == chave), None)
 
 
-def _pode_desfazer_aprovacao(db: Session, usuario: Usuario, aprovacao: DecisaoLinha) -> bool:
-    """Quem aprovou desfaz. O admin desfaz também quando quem aprovou não pode
-    mais (removido, de outra conta ou sem papel de aprovar) e na aprovação da
-    migração da #132, que não é de ninguém: sem isso, essas aprovações ficariam
-    impossíveis de desfazer. O analista já recebeu 403 antes."""
-    da_migracao = aprovacao.autor_nome == decisoes.AUTOR_APROVACAO_DA_MIGRACAO
-    if not da_migracao and aprovacao.usuario_id == usuario.id:
-        return True
-    if usuario.papel != "admin":
-        return False
-    if da_migracao:
-        return True
-    aprovador = db.get(Usuario, aprovacao.usuario_id)
-    return (
-        aprovador is None
-        or aprovador.removido_em is not None
-        or aprovador.conta_id != usuario.conta_id
-        or aprovador.papel not in PAPEIS_QUE_APROVAM
-    )
+def _recusa_http(recusa: Recusa) -> HTTPException:
+    """O erro de cada motivo de `desfazer_aprovacao.motivo_da_recusa`. O mês
+    fechado não passa por aqui: `_garantir_mes_aberto` já deu o 409."""
+    if recusa is Recusa.SEM_PAPEL:
+        return HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=mensagem_de_papel(PAPEIS_QUE_APROVAM),
+        )
+    if recusa is Recusa.FLAG_DESLIGADA:
+        return _regra_violada(APROVACAO_DESLIGADA)
+    if recusa is Recusa.SEM_APROVACAO:
+        return _regra_violada(SEM_APROVACAO_PARA_DESFAZER)
+    if recusa is Recusa.SO_QUEM_APROVOU:
+        return HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_QUEM_APROVOU)
+    raise AssertionError(f"motivo sem erro HTTP: {recusa}")
 
 
 def _aprovar_junto(db: Session, justificativa: DecisaoLinha) -> None:
@@ -763,24 +796,26 @@ def _aprovar_junto(db: Session, justificativa: DecisaoLinha) -> None:
     )
 
 
-@router.post("/{extrato_id}/decisoes", response_model=DecisaoResponse | None)
+@router.post("/{extrato_id}/decisoes", response_model=DecisaoEmVigorResponse | None)
 def registrar_decisao(
     extrato_id: uuid.UUID,
     corpo: DecisaoRequest,
     ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
     db: Annotated[Session, Depends(get_db)],
-) -> DecisaoResponse | None:
+) -> DecisaoEmVigorResponse | None:
     usuario, empresa_id = ativa.usuario, ativa.empresa.id
     desfaz_aprovacao = corpo.tipo == decisoes.TIPO_APROVACAO_DESFEITA
-    if (
-        corpo.tipo in decisoes.TIPOS_APROVACAO or desfaz_aprovacao
-    ) and usuario.papel not in PAPEIS_QUE_APROVAM:
-        raise HTTPException(
-            status_code=http_status.HTTP_403_FORBIDDEN,
-            detail=mensagem_de_papel(PAPEIS_QUE_APROVAM),
+    if corpo.tipo in decisoes.TIPOS_APROVACAO and usuario.papel not in PAPEIS_QUE_APROVAM:
+        raise _recusa_http(Recusa.SEM_PAPEL)
+    if desfaz_aprovacao:
+        # O papel e a flag vêm antes de qualquer outra validação, como sempre.
+        # Sem a decisão em vigor, o motivo de uma linha sem aprovação sai aqui
+        # (`SEM_APROVACAO`) e é ignorado: a regra inteira roda abaixo.
+        recusa = desfazer_aprovacao.motivo_da_recusa(
+            desfazer_aprovacao.contexto_basico(usuario), None
         )
-    if desfaz_aprovacao and not settings.aprovacao_justificativas_habilitada:
-        raise _regra_violada(APROVACAO_DESLIGADA)
+        if recusa in (Recusa.SEM_PAPEL, Recusa.FLAG_DESLIGADA):
+            raise _recusa_http(recusa)
     extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
 
     # As travas (mês e extrato do banco) vêm ANTES da rodada: uma rodada nova
@@ -839,10 +874,13 @@ def registrar_decisao(
             raise _regra_violada("Desfazer a aprovação não tem texto.")
         eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
         vigente = decisoes.decisao_vigente(eventos.get(corpo.chave, []))
-        if not decisoes.justificativa_aprovada(vigente):
-            raise _regra_violada(SEM_APROVACAO_PARA_DESFAZER)
-        if not _pode_desfazer_aprovacao(db, usuario, vigente.aprovacao):
-            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_QUEM_APROVOU)
+        # `_garantir_mes_aberto` já deu o 409 do mês fechado, com a trava.
+        contexto = desfazer_aprovacao.carregar_contexto(
+            db, usuario, empresa_id, extrato_banco, [vigente]
+        )
+        recusa = desfazer_aprovacao.motivo_da_recusa(contexto, vigente)
+        if recusa is not Recusa.PERMITIDO:
+            raise _recusa_http(recusa)
 
     # Com a aprovação ligada, a justificativa aprovada em vigor só é alterada
     # (justificar de novo, conferir) ou retirada depois que quem aprovou desfaz
@@ -873,4 +911,8 @@ def registrar_decisao(
     if corpo.tipo in decisoes.TIPOS_DESFAZER or corpo.tipo == "justificativa_rejeitada":
         return None
     eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
-    return _decisao_response(decisoes.decisao_vigente(eventos.get(corpo.chave, [])))
+    vigente = decisoes.decisao_vigente(eventos.get(corpo.chave, []))
+    contexto = desfazer_aprovacao.carregar_contexto(
+        db, usuario, empresa_id, extrato_banco, [vigente]
+    )
+    return _decisao_response(vigente, desfazer_aprovacao.pode_desfazer_aprovacao(contexto, vigente))
