@@ -45,6 +45,11 @@ TIMEOUT_HEALTHCHECK_SEGUNDOS = 10
 # seguintes enquanto esta não terminar.
 TIMEOUT_DUMP_SEGUNDOS = 60 * 60
 TIMEOUT_VERSAO_SEGUNDOS = 30
+# O Railway perde o log de um container de cron que sai rápido demais: em
+# 06/11, a falha de configuração saiu em 1 s e o deploy mostrou só "Crashed",
+# sem a linha que dizia quais variáveis faltavam. Na falha, o processo espera
+# antes de sair, para o log chegar ao painel.
+ESPERA_ANTES_DE_SAIR_COM_ERRO_SEGUNDOS = 15
 
 VARIAVEIS_OBRIGATORIAS = (
     "DATABASE_URL",
@@ -348,5 +353,24 @@ def main() -> int:
     )
 
 
+def rodar(
+    principal: Callable[[], int] = main,
+    *,
+    dormir: Callable[[float], None] = time.sleep,
+) -> int:
+    """Código de saída do processo. Na falha, espera antes de devolver (ver
+    ESPERA_ANTES_DE_SAIR_COM_ERRO_SEGUNDOS). Uma exceção que escapou do `main`
+    também vira código 1, e no log vai só o nome da classe, pela regra da #34:
+    o traceback traria a mensagem, que pode ter endpoint ou credencial."""
+    try:
+        codigo = principal()
+    except Exception as exc:  # noqa: BLE001 - a mensagem não pode ir para o log
+        logger.error("backup falhou: %s inesperado", type(exc).__name__)
+        codigo = 1
+    if codigo != 0:
+        dormir(ESPERA_ANTES_DE_SAIR_COM_ERRO_SEGUNDOS)
+    return codigo
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(rodar())
