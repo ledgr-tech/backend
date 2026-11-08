@@ -113,6 +113,25 @@ def test_divergente_data_ate_3_mais_proxima_primeiro_em_dias(db_session, par):
     assert 30 not in diferencas
 
 
+def test_par_de_data_usa_a_ponta_gravada_e_nao_vira_candidato_de_valor(db_session, par):
+    empresa, banco, sistema = par
+    dia = date(2026, 10, 5)
+    do_banco = _lancamento_em(db_session, banco, "1854.00", dia)
+    mesma_data = _lancamento_em(db_session, sistema, "957.72", dia)
+    outra_data = _lancamento_em(db_session, sistema, "1854.00", date(2026, 10, 3))
+    linha = _conciliacao(
+        db_session, empresa.id, banco.id, sistema.id, "divergente_data", do_banco.id, outra_data.id
+    )
+    sobra = _conciliacao(
+        db_session, empresa.id, banco.id, sistema.id, "divergente_valor", None, mesma_data.id
+    )
+
+    (candidato,) = montar_contexto_divergencia(db_session, linha).candidatos
+    assert candidato.lancamento.data == outra_data.data
+    assert candidato.diferenca_dias == 2
+    assert montar_contexto_divergencia(db_session, sobra).candidatos == ()
+
+
 def test_duplicado_quantidades_mesmo_lado_e_outro_lado(db_session, par):
     empresa, banco, sistema = par
     d = date(2026, 9, 20)

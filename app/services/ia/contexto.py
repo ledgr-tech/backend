@@ -12,10 +12,9 @@ replicar a mesma igualdade direta (Decimal `==` Decimal, `date` `==`
 `date`) nas cláusulas `WHERE`, e importar as constantes de status em vez de
 redeclarar as strings.
 
-Uma linha de `conciliacoes` de divergência guarda só UM lado (o outro fica
-NULL) — `_lado_do_item` abaixo decide de qual lado é o item e qual é o
-extrato do lado oposto, a partir de qual coluna de lançamento está
-preenchida.
+Uma divergência pode ter uma ponta só ou, em `divergente_data`, um par
+gravado pelo motor. O contexto do par usa a linha bancária como item e a
+ponta gravada do sistema como candidata.
 
 Exclusão de candidatos já casados (ADR-011): um lançamento do outro lado
 que já é `lancamento_banco_id`/`lancamento_sistema_id` de uma linha
@@ -27,8 +26,8 @@ explicitamente (`Conciliacao.lancamento_banco_id` e
 `lancamento_sistema_id` não nulos), então a consulta é uma simples
 exclusão por id, sem ambiguidade. O `match_agrupado` (issue #131) também
 consome o lançamento, mas guarda só a ponta dele: a mesma exclusão por id,
-olhando a coluna do outro lado. Ele nunca é divergência, então não gera
-contexto nem explicação.
+olhando a coluna do outro lado. O par com divergência de data também reserva
+as suas pontas, embora continue elegível a uma explicação própria.
 
 A ordem dos candidatos é 100% determinística (entra no hash da chave de
 cache, app/services/ia/cache.py): ordenados em Python (mesmo estilo de
@@ -44,7 +43,7 @@ lançamento de outra empresa, mesmo que o extrato_id estivesse certo.
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Conciliacao, Lancamento
@@ -79,7 +78,7 @@ def _chave_desempate(lancamento: Lancamento) -> tuple:
 
 def _lado_do_item(conciliacao: Conciliacao) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, object]:
     """(extrato_do_item, extrato_do_outro_lado, lancamento_id_do_item,
-    coluna_do_outro_lado) — a linha de divergência guarda só um lado."""
+    coluna_do_outro_lado). Se há duas pontas, o banco é a referência."""
     if conciliacao.lancamento_banco_id is not None:
         return (
             conciliacao.extrato_banco_id,
@@ -96,16 +95,21 @@ def _lado_do_item(conciliacao: Conciliacao) -> tuple[uuid.UUID, uuid.UUID, uuid.
 
 
 def _ids_ja_casados(db: Session, conciliacao: Conciliacao, coluna_outro_lado) -> set[uuid.UUID]:
-    """Ids de lançamento do outro lado já consumidos por um
-    match_exato/match_tolerancia do mesmo par de extratos (ver docstring do
-    módulo) — nunca entram como candidato de divergência."""
+    """Ids do outro lado já associados pelo motor no mesmo par de extratos."""
     linhas = db.execute(
         select(coluna_outro_lado).where(
             Conciliacao.empresa_id == conciliacao.empresa_id,
             Conciliacao.extrato_banco_id == conciliacao.extrato_banco_id,
             Conciliacao.extrato_sistema_id == conciliacao.extrato_sistema_id,
-            Conciliacao.status.in_(
-                (STATUS_MATCH_EXATO, STATUS_MATCH_TOLERANCIA, STATUS_MATCH_AGRUPADO)
+            or_(
+                Conciliacao.status.in_(
+                    (STATUS_MATCH_EXATO, STATUS_MATCH_TOLERANCIA, STATUS_MATCH_AGRUPADO)
+                ),
+                and_(
+                    Conciliacao.status == STATUS_DIVERGENTE_DATA,
+                    Conciliacao.lancamento_banco_id.isnot(None),
+                    Conciliacao.lancamento_sistema_id.isnot(None),
+                ),
             ),
             coluna_outro_lado.isnot(None),
         )
@@ -172,7 +176,12 @@ def montar_contexto_divergencia(db: Session, conciliacao: Conciliacao) -> Contex
             quantidade_outro_lado=None,
         )
 
-    ja_casados = _ids_ja_casados(db, conciliacao, coluna_outro_lado)
+    vinculado = (
+        conciliacao.lancamento_sistema_id
+        if conciliacao.status == STATUS_DIVERGENTE_DATA and conciliacao.lancamento_banco_id
+        else None
+    )
+    ja_casados = set() if vinculado else _ids_ja_casados(db, conciliacao, coluna_outro_lado)
 
     if conciliacao.status == STATUS_DIVERGENTE_VALOR:
         consulta = select(Lancamento).where(
@@ -212,7 +221,9 @@ def montar_contexto_divergencia(db: Session, conciliacao: Conciliacao) -> Contex
             Lancamento.valor == item.valor,
             Lancamento.data != item.data,
         )
-        if ja_casados:
+        if vinculado:
+            consulta = consulta.where(Lancamento.id == vinculado)
+        elif ja_casados:
             consulta = consulta.where(Lancamento.id.not_in(ja_casados))
         candidatos_lancamentos = db.execute(consulta).scalars().all()
         candidatos_ordenados = sorted(

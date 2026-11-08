@@ -779,20 +779,30 @@ def test_post_com_tolerancia_e_par_por_tolerancia_total_bate_com_soma_das_7_cate
 def test_post_sem_configuracao_datas_diferentes_e_mesmo_valor_viram_divergente_data(
     db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
 ):
-    # Sem tolerância (sem Configuracao = 0, issue #22), o par não casa como
-    # match_tolerancia — mas o mesmo valor no outro lado agora classifica
-    # como divergente_data (issue #24) em vez de ficar em sem_correspondencia.
+    # Sem tolerância (sem Configuracao = 0), as duas pontas ficam em revisão.
     empresa = criar_empresa()
     banco = criar_extrato_da_empresa(empresa.id, "banco")
     sistema = criar_extrato_da_empresa(empresa.id, "sistema")
-    _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
-    _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 6))
+    do_banco = _lancamento_em(db_session, banco, "10.00", date(2026, 9, 5))
+    do_sistema = _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 6))
 
     response = _post(auth_headers(empresa.id), banco.id, sistema.id)
 
     assert response.status_code == 201
-    linhas = _conciliacoes(db_session, banco.id, sistema.id)
-    assert [linha.status for linha in linhas] == ["divergente_data"] * 2
+    assert response.json()["divergente_data"] == 1
+    assert response.json()["match_tolerancia"] == 0
+    (linha,) = _conciliacoes(db_session, banco.id, sistema.id)
+    assert (linha.status, linha.lancamento_banco_id, linha.lancamento_sistema_id) == (
+        "divergente_data",
+        do_banco.id,
+        do_sistema.id,
+    )
+    lista = _get(auth_headers(empresa.id), banco.id, extrato_sistema_id=str(sistema.id))
+    assert lista.status_code == 200
+    (item,) = lista.json()["itens"]
+    assert item["status"] == "divergente_data"
+    assert item["lancamento_banco"]["data"] == "2026-09-05"
+    assert item["lancamento_sistema"]["data"] == "2026-09-06"
 
 
 def test_post_com_tolerancia_0_datas_diferentes_e_mesmo_valor_viram_divergente_data(
@@ -809,7 +819,7 @@ def test_post_com_tolerancia_0_datas_diferentes_e_mesmo_valor_viram_divergente_d
     _post(auth_headers(empresa.id), banco.id, sistema.id)
 
     linhas = _conciliacoes(db_session, banco.id, sistema.id)
-    assert [linha.status for linha in linhas] == ["divergente_data"] * 2
+    assert [linha.status for linha in linhas] == ["divergente_data"]
 
 
 def test_post_valor_e_data_diferentes_continua_sem_correspondencia(
@@ -836,9 +846,7 @@ def test_post_cobre_as_5_categorias_de_divergencia(
     """Critério de aceite da issue #24: extrato sintético com um lançamento
     de cada categoria (mais um match, pra não deixar a contagem de match_exato
     zerada) cai na categoria certa. Cada categoria usa uma data própria,
-    porque divergente_valor/divergente_data são decididos por sets de datas e
-    valores dos remanescentes inteiros, não por um par correlacionado
-    específico — datas repetidas entre categorias colidiriam entre si."""
+    para separar o par de data divergente das sobras de valor."""
     empresa = criar_empresa()
     banco = criar_extrato_da_empresa(empresa.id, "banco")
     sistema = criar_extrato_da_empresa(empresa.id, "sistema")
@@ -875,12 +883,11 @@ def test_post_cobre_as_5_categorias_de_divergencia(
 
     assert response.status_code == 201
     corpo = response.json()
-    # 8 lançamentos (5 banco + 3 sistema), mas o par exato vira 1 única linha
-    # (match_exato conta pares/linhas, não lançamentos) — daí 7 linhas, não 8.
+    # 8 lançamentos, com o par exato e o de data divergente em uma linha cada.
     assert corpo == {
         "extrato_banco_id": str(banco.id),
         "extrato_sistema_id": str(sistema.id),
-        "total": 7,
+        "total": 6,
         "match_exato": 1,
         "match_tolerancia": 0,
         "match_agrupado": 0,
@@ -888,7 +895,7 @@ def test_post_cobre_as_5_categorias_de_divergencia(
         "sem_correspondencia": 1,
         "tarifa_bancaria": 1,
         "divergente_valor": 2,
-        "divergente_data": 2,
+        "divergente_data": 1,
         "agrupamentos": 0,
     }
 

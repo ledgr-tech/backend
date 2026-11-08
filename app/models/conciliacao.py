@@ -44,6 +44,10 @@ class Conciliacao(Base, TimestampMixin):
     rodada (ADR-007), a ligação some junto e a geração da rodada nova a refaz
     (o texto continua no cache, e o mesmo contexto não é pago de novo).
 
+    Uma `divergente_data` pode guardar as duas pontas quando o mesmo valor
+    identifica um único candidato de cada lado entre as sobras. Continua em
+    revisão. Linhas antigas e casos ambíguos podem guardar só uma ponta.
+
     `match_agrupado` (issue #131, ADR-027) é o lançamento que faz parte de um
     grupo N para 1 ou 1 para N cuja soma bate ao centavo com o do outro lado.
     Cada lançamento do grupo é uma linha própria, só com a ponta dele (a do
