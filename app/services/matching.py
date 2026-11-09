@@ -91,14 +91,13 @@ inteira; os outros grupos da mesma chamada continuam usando similaridade
 normalmente (custo O(n·m) da comparação de todas as combinações não escala
 pra grupo gigante — ver docstring da constante).
 
-Classificação de divergências (issue #24, ADR-007 reserva os status desde
-`Conciliacao`, ADR-009 decide o que entra em cada categoria): terceira
-passada, sobre o que sobrou `sem_correspondencia` depois do motor exato e da
-tolerância (quando houver) — nunca sobre `duplicado`, que é decisão exclusiva
-da ADR-006 e não passa por aqui. `classificar_divergencias` sub-classifica
-cada lançamento restante, de cada lado, em uma das 5 categorias de
-divergência (as duas de match, `match_exato`/`match_tolerancia`, não contam
-como divergência):
+Classificação de divergências (issue #24, ADR-007 e ADR-009): passada final,
+sobre o que sobrou `sem_correspondencia` do exato, da tolerância e do
+agrupamento. Se o mesmo valor com sinal aparece uma única vez de cada lado
+em datas diferentes, as duas pontas formam uma linha `divergente_data`.
+Ela continua em revisão e suas pontas saem da classificação das sobras.
+Tarifas bancárias não participam dessa associação. As linhas ainda soltas
+são classificadas assim:
 - `tarifa_bancaria`: descrição normalizada contém algum termo de
   `TERMOS_TARIFA_BANCARIA` — só do lado banco, tarifa não existe do lado
   sistema (ERP não lança tarifa que o banco cobrou).
@@ -107,16 +106,11 @@ como divergência):
 - `divergente_data`: existe lançamento do outro lado com o mesmo valor —
   achou o valor em outro lugar, a data é que não bate.
 - `sem_correspondencia`: nenhum dos anteriores — não achou nada parecido.
-Prioridade fixa (tarifa > divergente_valor > divergente_data): quando um
-lançamento seria elegível pra mais de uma categoria, a primeira da lista
-ganha. Parcelamento e transferência entre contas (ADR-009) não ganham
-categoria própria nesta versão, ficam em `sem_correspondencia` como hoje —
-só tarifa bancária tem tratamento especial. Custo linear: um set de datas e
-um set de valores por lado, montados uma vez antes do loop, então cada
-lançamento é O(1) pra checar os dois lados (nunca compara todos contra
-todos). `regra_aplicada` fica NULL nas 3 categorias novas, igual já era pra
-`sem_correspondencia`/`duplicado` — não é um par decidido por uma regra, é
-classificação de item solto.
+Entre as linhas ainda soltas, a prioridade é tarifa > divergente_valor >
+divergente_data. Um valor repetido em qualquer lado pode sinalizar uma
+divergência, mas não identifica por si só quais pontas devem ser associadas.
+O custo da etapa é linear, por contagens e índices de valor e data.
+As divergências ficam com `regra_aplicada` e `score_confianca` nulos.
 
 Não faz log de descrição, valor nem qualquer dado de lançamento (auditoria
 de log fica pra Sprint 7). O único log do motor é o do teto de trabalho do
@@ -126,7 +120,7 @@ agrupamento, só com id do lançamento e contagem de candidatos.
 import logging
 import uuid
 from bisect import bisect_left, bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -721,10 +715,31 @@ def classificar_divergencias(
     banco_restantes: list[LancamentoParaMatching],
     sistema_restantes: list[LancamentoParaMatching],
 ) -> list[ResultadoMatching]:
-    """Terceira passada (issue #24, ADR-007/ADR-009) sobre o que sobrou
-    `sem_correspondencia` das passadas anteriores. Pura; ver docstring do
-    módulo. `regra_aplicada`/`score_confianca` ficam NULL: classificação de
-    item solto, não um par decidido por regra."""
+    """Associa divergências de data inequívocas por valor e classifica as sobras."""
+    contagem_banco = Counter(item.valor for item in banco_restantes)
+    sistema_por_valor: dict[Decimal, list[LancamentoParaMatching]] = defaultdict(list)
+    for item in sistema_restantes:
+        sistema_por_valor[item.valor].append(item)
+
+    pares: list[ResultadoMatching] = []
+    banco_sem_par = []
+    sistema_associado: set[uuid.UUID] = set()
+    for banco in banco_restantes:
+        candidatos = sistema_por_valor.get(banco.valor, [])
+        if (
+            contagem_banco[banco.valor] == 1
+            and len(candidatos) == 1
+            and banco.data != candidatos[0].data
+            and not _contem_termo_tarifa(_normalizar_descricao(banco.descricao))
+        ):
+            sistema = candidatos[0]
+            pares.append(ResultadoMatching(STATUS_DIVERGENTE_DATA, banco.id, sistema.id))
+            sistema_associado.add(sistema.id)
+        else:
+            banco_sem_par.append(banco)
+    banco_restantes = banco_sem_par
+    sistema_restantes = [item for item in sistema_restantes if item.id not in sistema_associado]
+
     datas_sistema = {item.data for item in sistema_restantes}
     valores_sistema = {item.valor for item in sistema_restantes}
     datas_banco = {item.data for item in banco_restantes}
@@ -746,7 +761,7 @@ def classificar_divergencias(
         )
         for item in sistema_restantes
     ]
-    return resultados
+    return pares + resultados
 
 
 def _carregar_lancamentos(
@@ -814,8 +829,7 @@ def executar_motor(
         resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
         resultados += agrupar_por_soma(banco_sem_par, sistema_sem_par, tolerancia_dias)
 
-    # Terceira passada (issue #24): sub-classifica o que ainda sobrou
-    # sem_correspondencia depois das anteriores.
+    # Associa datas divergentes por valor único e classifica as sobras.
     banco_sem_par, sistema_sem_par = _sobras(resultados, banco_por_id, sistema_por_id)
     resultados = [r for r in resultados if r.status != STATUS_SEM_CORRESPONDENCIA]
     resultados += classificar_divergencias(banco_sem_par, sistema_sem_par)
