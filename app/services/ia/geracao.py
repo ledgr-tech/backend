@@ -15,11 +15,27 @@ automática ao conciliar, para as duas nunca divergirem:
    `empresa_id`; o id cru nunca vai ao provedor.
 5. `ProvedorIAIndisponivel` ou qualquer outra exceção da chamada viram o
    fallback `erro_provedor`, e nada é gravado.
+5b. Filtro do texto (prompt v3), por frase: só ficam as frases em que toda
+   data, todo valor em `R$` e todo número de dias existem nos fatos
+   calculados (`filtrar_texto_pelos_fatos`, app/services/ia/detalhes.py).
+   Sobrando alguma frase, o texto filtrado segue como sucesso normal: é
+   gravado no cache, conta no limite diário e a próxima chamada é cache
+   hit, então um modelo que erre sempre o mesmo número não gera custo sem
+   teto. Frase removida loga só `texto_filtrado frases_removidas=N
+   frases_total=M`. Sem nenhuma frase válida, nada é gravado e volta o
+   fallback com `erro_provedor` (sem valor novo no contrato do front), com
+   o log `texto_rejeitado`; essa chamada paga não entra no cache nem no
+   limite, e a próxima tenta de novo.
 6. Sucesso: `INSERT ... ON CONFLICT (empresa_id, chave) DO NOTHING` e a
    ligação da linha (`conciliacoes.explicacao_chave`), na mesma transação.
    Se gravar falhar, o texto gerado é devolvido assim mesmo. Se a linha
    sumiu (o par foi reconciliado no meio, ADR-007), o texto fica no cache e
    a ligação simplesmente não acontece.
+
+Fallback: o texto determinístico com os números
+(`texto_deterministico`, app/services/ia/detalhes.py), não mais o motivo
+genérico. Todo resultado leva `detalhes`, as linhas formatadas do contexto,
+qualquer que seja o caminho (IA, cache, desligada, limite ou erro).
 
 Os objetos ORM expiram no rollback e no commit, e a linha pode ser apagada
 por uma reconciliação durante a chamada: por isso `preparar` copia o que
@@ -28,7 +44,8 @@ precisa (status e contexto) para um `Preparo` antes de encerrar a leitura.
 Geração automática (`gerar_explicacoes_do_par`, issue #140): roda numa
 `BackgroundTask` do `POST /conciliacoes`, depois da resposta, só com
 `EXPLICACAO_AUTOMATICA_HABILITADA` e `LLM_HABILITADO` ligadas. Abre a própria
-sessão; prepara as linhas divergentes do par em ordem de valor absoluto (do
+sessão; calcula uma vez o que é constante no par (`FatosDoPar`: tolerância e
+períodos) e prepara as linhas divergentes do par em ordem de valor absoluto (do
 lançamento do banco ou, sem ele, do sistema) e chave, liga os cache hits e
 gera até `LLM_TETO_POR_CONCILIACAO` explicações novas, com
 `LLM_CONCORRENCIA_AUTOMATICA` chamadas ao mesmo tempo e uma sessão por thread.
@@ -61,7 +78,18 @@ from app.services.decisoes import chave_da_linha
 from app.services.ia import ProvedorDeIA, ProvedorIAIndisponivel, obter_provedor
 from app.services.ia.base import ContextoDivergencia
 from app.services.ia.cache import chave_cache
-from app.services.ia.contexto import montar_contexto_divergencia
+from app.services.ia.contexto import (
+    FatosDoPar,
+    calcular_fatos_do_par,
+    montar_contexto_divergencia,
+)
+from app.services.ia.detalhes import (
+    DetalheLinha,
+    dividir_frases,
+    filtrar_texto_pelos_fatos,
+    montar_detalhes,
+    texto_deterministico,
+)
 from app.services.ia.prompt import VERSAO_PROMPT
 from app.services.matching import (
     STATUS_DIVERGENTE_DATA,
@@ -112,6 +140,7 @@ class ResultadoGeracao:
     gerada_por_ia: bool
     em_cache: bool
     indisponibilidade: Indisponibilidade | None
+    detalhes: list[DetalheLinha] = field(default_factory=list)
 
 
 def _inicio_do_dia_utc() -> datetime:
@@ -119,10 +148,16 @@ def _inicio_do_dia_utc() -> datetime:
 
 
 def preparar(
-    db: Session, empresa_id: uuid.UUID, conciliacao_id: uuid.UUID, *, com_cache: bool
+    db: Session,
+    empresa_id: uuid.UUID,
+    conciliacao_id: uuid.UUID,
+    *,
+    com_cache: bool,
+    fatos_do_par: FatosDoPar | None = None,
 ) -> Preparo:
     """Lê a linha e monta o contexto (e, `com_cache`, a chave e o texto do
-    cache). `LinhaNaoEncontrada` sem a linha; `ValueError` para match."""
+    cache). `LinhaNaoEncontrada` sem a linha; `ValueError` para match.
+    `fatos_do_par` evita recalcular o que é constante no par."""
     conciliacao = db.execute(
         select(Conciliacao).where(
             Conciliacao.id == conciliacao_id, Conciliacao.empresa_id == empresa_id
@@ -131,7 +166,7 @@ def preparar(
     if conciliacao is None:
         raise LinhaNaoEncontrada
     status = conciliacao.status
-    contexto = montar_contexto_divergencia(db, conciliacao)
+    contexto = montar_contexto_divergencia(db, conciliacao, fatos_do_par)
     if not com_cache:
         return Preparo(empresa_id, conciliacao_id, status, contexto)
     chave = chave_cache(
@@ -153,10 +188,11 @@ def preparar(
 def _fallback(preparo: Preparo, indisponibilidade: Indisponibilidade) -> ResultadoGeracao:
     return ResultadoGeracao(
         status=preparo.status,
-        explicacao=preparo.contexto.motivo,
+        explicacao=texto_deterministico(preparo.contexto),
         gerada_por_ia=False,
         em_cache=False,
         indisponibilidade=indisponibilidade,
+        detalhes=montar_detalhes(preparo.contexto),
     )
 
 
@@ -183,6 +219,7 @@ def usar_cache(db: Session, preparo: Preparo, origem: str = "explicacoes") -> Re
         gerada_por_ia=True,
         em_cache=True,
         indisponibilidade=None,
+        detalhes=montar_detalhes(preparo.contexto),
     )
 
 
@@ -235,6 +272,22 @@ def gerar(
         logger.info("%s erro_inesperado classe=%s", origem, type(exc).__name__)
         return _fallback(preparo, "erro_provedor")
 
+    texto = filtrar_texto_pelos_fatos(resposta.texto, preparo.contexto)
+    if texto is None:
+        # Nenhuma frase com os números dos fatos: descarta. A chamada já foi
+        # paga e não entra no cache; a próxima tentativa chama de novo.
+        logger.info("%s texto_rejeitado", origem)
+        return _fallback(preparo, "erro_provedor")
+    frases_total = len(dividir_frases(resposta.texto))
+    frases_removidas = frases_total - len(dividir_frases(texto))
+    if frases_removidas:
+        logger.info(
+            "%s texto_filtrado frases_removidas=%d frases_total=%d",
+            origem,
+            frases_removidas,
+            frases_total,
+        )
+
     try:
         db.execute(
             pg_insert(ExplicacaoDivergencia.__table__)
@@ -246,7 +299,7 @@ def gerar(
                 provedor=settings.llm_provedor,
                 modelo=settings.openai_modelo,
                 versao_prompt=VERSAO_PROMPT,
-                texto=resposta.texto,
+                texto=texto,
                 tokens_entrada=resposta.tokens_entrada,
                 tokens_saida=resposta.tokens_saida,
             )
@@ -260,10 +313,11 @@ def gerar(
 
     return ResultadoGeracao(
         status=preparo.status,
-        explicacao=resposta.texto,
+        explicacao=texto,
         gerada_por_ia=True,
         em_cache=False,
         indisponibilidade=None,
+        detalhes=montar_detalhes(preparo.contexto),
     )
 
 
@@ -375,11 +429,16 @@ def gerar_explicacoes_do_par(
         return resumo
     try:
         with sessao() as db:
+            fatos_do_par = calcular_fatos_do_par(
+                db, empresa_id, extrato_banco_id, extrato_sistema_id
+            )
             for conciliacao_id in _linhas_em_ordem(
                 db, empresa_id, extrato_banco_id, extrato_sistema_id
             ):
                 try:
-                    preparo = preparar(db, empresa_id, conciliacao_id, com_cache=True)
+                    preparo = preparar(
+                        db, empresa_id, conciliacao_id, com_cache=True, fatos_do_par=fatos_do_par
+                    )
                 except LinhaNaoEncontrada:
                     continue  # o par foi reconciliado no meio: a rodada nova cuida
                 except Exception as exc:  # noqa: BLE001 - só esta linha fica sem

@@ -255,6 +255,12 @@ def _similaridade_descricao(descricao_a: str, descricao_b: str) -> float:
     )
 
 
+# Nome público da mesma função, para a explicação de divergência
+# (app/services/ia/contexto.py) mostrar a similaridade que o motor usa, sem
+# mudar o comportamento do motor.
+similaridade_descricao = _similaridade_descricao
+
+
 def _parear_grupo(
     lado_banco: list[LancamentoParaMatching], lado_sistema: list[LancamentoParaMatching]
 ) -> list[tuple[LancamentoParaMatching, LancamentoParaMatching]]:
