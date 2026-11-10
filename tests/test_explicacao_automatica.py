@@ -501,3 +501,31 @@ def test_texto_filtrado_conta_como_gerado(db_session, conta, ia, caplog):
     )
     resumo = [m for m in mensagens if "geradas=" in m]
     assert resumo == ["explicacao_automatica geradas=3 cache=0 teto=0 limite=0 falhas=0"]
+
+
+def test_tolerancia_e_periodo_sao_consultados_uma_vez_por_par(db_session, conta, ia, monkeypatch):
+    from app.services.ia import contexto as contexto_module
+
+    chamadas = {"tolerancia": 0, "periodo": 0}
+    tolerancia_original = contexto_module._tolerancia_da_rodada
+    periodo_original = contexto_module._periodo_do_extrato
+
+    def tolerancia(*args, **kwargs):
+        chamadas["tolerancia"] += 1
+        return tolerancia_original(*args, **kwargs)
+
+    def periodo(*args, **kwargs):
+        chamadas["periodo"] += 1
+        return periodo_original(*args, **kwargs)
+
+    monkeypatch.setattr(contexto_module, "_tolerancia_da_rodada", tolerancia)
+    monkeypatch.setattr(contexto_module, "_periodo_do_extrato", periodo)
+    c = conta()
+    banco = c.extrato("banco", [("20.00", "b"), ("30.00", "c"), ("40.00", "d")])
+    sistema = c.extrato("sistema", [("99.00", "so sistema"), ("98.00", "outro")])
+
+    c.conciliar(banco, sistema)
+
+    assert len(_divergentes(c.itens(banco))) == 5
+    assert len(ia.chamadas) == 5
+    assert chamadas == {"tolerancia": 1, "periodo": 2}  # um por extrato do par

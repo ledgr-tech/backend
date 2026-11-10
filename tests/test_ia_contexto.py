@@ -12,7 +12,12 @@ import pytest
 from test_conciliacoes import _lancamento_em
 
 from app.models import Conciliacao, Configuracao, ExecucaoConciliacao
-from app.services.ia.contexto import cruza_fim_de_semana, montar_contexto_divergencia
+from app.services.ia.contexto import (
+    FatosDoPar,
+    calcular_fatos_do_par,
+    cruza_fim_de_semana,
+    montar_contexto_divergencia,
+)
 from app.services.ia.prompt import serializar_contexto
 
 
@@ -586,3 +591,57 @@ def test_duplicado_e_tarifa_tem_lado_e_tolerancia(db_session, par):
 )
 def test_cruza_fim_de_semana(data_a, data_b, esperado):
     assert cruza_fim_de_semana(data_a, data_b) is esperado
+
+
+# FatosDoPar: o mesmo contexto com e sem o cálculo por par
+
+
+def test_contexto_igual_com_e_sem_fatos_do_par_em_todos_os_status(db_session, par):
+    empresa, banco, sistema = par
+    sistema.periodo_inicio = date(2026, 9, 1)
+    sistema.periodo_fim = date(2026, 9, 30)
+    db_session.commit()
+    _execucao(db_session, empresa.id, banco.id, sistema.id, 1)
+    d = date(2026, 9, 21)
+    data_b = _lancamento_em(db_session, banco, "-79.61", d, "PIX A")
+    data_s = _lancamento_em(db_session, sistema, "-79.61", d + timedelta(days=3), "PIX A")
+    valor_b = _lancamento_em(db_session, banco, "100.00", date(2026, 9, 10), "Item")
+    _lancamento_em(db_session, sistema, "90.00", date(2026, 9, 10), "Outro")
+    sem_b = _lancamento_em(db_session, banco, "7.00", date(2026, 10, 2), "Sem par")
+    tarifa_b = _lancamento_em(db_session, banco, "-15.00", date(2026, 9, 11), "TARIFA")
+    dup_s = _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 12), "dup")
+    _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 12), "dup 2")
+    _lancamento_em(db_session, banco, "10.00", date(2026, 9, 12), "dup banco")
+    linhas = [
+        _conciliacao(db_session, empresa.id, banco.id, sistema.id, "divergente_data",
+                     data_b.id, data_s.id),
+        _conciliacao(db_session, empresa.id, banco.id, sistema.id, "divergente_valor", valor_b.id),
+        _conciliacao(db_session, empresa.id, banco.id, sistema.id, "sem_correspondencia",
+                     sem_b.id),
+        _conciliacao(db_session, empresa.id, banco.id, sistema.id, "tarifa_bancaria",
+                     tarifa_b.id),
+        _conciliacao(db_session, empresa.id, banco.id, sistema.id, "duplicado", None, dup_s.id),
+    ]  # fmt: skip
+
+    fatos = calcular_fatos_do_par(db_session, empresa.id, banco.id, sistema.id)
+
+    assert fatos.tolerancia_dias == 1
+    assert fatos.periodo_sistema == (date(2026, 9, 1), date(2026, 9, 30))
+    for linha in linhas:
+        sem = montar_contexto_divergencia(db_session, linha)
+        com = montar_contexto_divergencia(db_session, linha, fatos)
+        assert com == sem, linha.status
+        assert serializar_contexto(com) == serializar_contexto(sem)
+
+
+def test_fatos_de_outro_par_sao_ignorados(db_session, par, criar_extrato_da_empresa):
+    empresa, banco, sistema = par
+    _execucao(db_session, empresa.id, banco.id, sistema.id, 2)
+    outro = criar_extrato_da_empresa(empresa.id, "sistema")
+    item = _lancamento_em(db_session, banco, "10.00", date(2026, 9, 20), "Item")
+    linha = _conciliacao(
+        db_session, empresa.id, banco.id, sistema.id, "sem_correspondencia", item.id
+    )
+    errado = FatosDoPar(empresa.id, banco.id, outro.id, 5, None, None)
+
+    assert montar_contexto_divergencia(db_session, linha, errado).tolerancia_dias == 2

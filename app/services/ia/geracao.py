@@ -44,7 +44,8 @@ precisa (status e contexto) para um `Preparo` antes de encerrar a leitura.
 Geração automática (`gerar_explicacoes_do_par`, issue #140): roda numa
 `BackgroundTask` do `POST /conciliacoes`, depois da resposta, só com
 `EXPLICACAO_AUTOMATICA_HABILITADA` e `LLM_HABILITADO` ligadas. Abre a própria
-sessão; prepara as linhas divergentes do par em ordem de valor absoluto (do
+sessão; calcula uma vez o que é constante no par (`FatosDoPar`: tolerância e
+períodos) e prepara as linhas divergentes do par em ordem de valor absoluto (do
 lançamento do banco ou, sem ele, do sistema) e chave, liga os cache hits e
 gera até `LLM_TETO_POR_CONCILIACAO` explicações novas, com
 `LLM_CONCORRENCIA_AUTOMATICA` chamadas ao mesmo tempo e uma sessão por thread.
@@ -77,7 +78,11 @@ from app.services.decisoes import chave_da_linha
 from app.services.ia import ProvedorDeIA, ProvedorIAIndisponivel, obter_provedor
 from app.services.ia.base import ContextoDivergencia
 from app.services.ia.cache import chave_cache
-from app.services.ia.contexto import montar_contexto_divergencia
+from app.services.ia.contexto import (
+    FatosDoPar,
+    calcular_fatos_do_par,
+    montar_contexto_divergencia,
+)
 from app.services.ia.detalhes import (
     DetalheLinha,
     dividir_frases,
@@ -143,10 +148,16 @@ def _inicio_do_dia_utc() -> datetime:
 
 
 def preparar(
-    db: Session, empresa_id: uuid.UUID, conciliacao_id: uuid.UUID, *, com_cache: bool
+    db: Session,
+    empresa_id: uuid.UUID,
+    conciliacao_id: uuid.UUID,
+    *,
+    com_cache: bool,
+    fatos_do_par: FatosDoPar | None = None,
 ) -> Preparo:
     """Lê a linha e monta o contexto (e, `com_cache`, a chave e o texto do
-    cache). `LinhaNaoEncontrada` sem a linha; `ValueError` para match."""
+    cache). `LinhaNaoEncontrada` sem a linha; `ValueError` para match.
+    `fatos_do_par` evita recalcular o que é constante no par."""
     conciliacao = db.execute(
         select(Conciliacao).where(
             Conciliacao.id == conciliacao_id, Conciliacao.empresa_id == empresa_id
@@ -155,7 +166,7 @@ def preparar(
     if conciliacao is None:
         raise LinhaNaoEncontrada
     status = conciliacao.status
-    contexto = montar_contexto_divergencia(db, conciliacao)
+    contexto = montar_contexto_divergencia(db, conciliacao, fatos_do_par)
     if not com_cache:
         return Preparo(empresa_id, conciliacao_id, status, contexto)
     chave = chave_cache(
@@ -418,11 +429,16 @@ def gerar_explicacoes_do_par(
         return resumo
     try:
         with sessao() as db:
+            fatos_do_par = calcular_fatos_do_par(
+                db, empresa_id, extrato_banco_id, extrato_sistema_id
+            )
             for conciliacao_id in _linhas_em_ordem(
                 db, empresa_id, extrato_banco_id, extrato_sistema_id
             ):
                 try:
-                    preparo = preparar(db, empresa_id, conciliacao_id, com_cache=True)
+                    preparo = preparar(
+                        db, empresa_id, conciliacao_id, com_cache=True, fatos_do_par=fatos_do_par
+                    )
                 except LinhaNaoEncontrada:
                     continue  # o par foi reconciliado no meio: a rodada nova cuida
                 except Exception as exc:  # noqa: BLE001 - só esta linha fica sem
