@@ -15,11 +15,24 @@ automática ao conciliar, para as duas nunca divergirem:
    `empresa_id`; o id cru nunca vai ao provedor.
 5. `ProvedorIAIndisponivel` ou qualquer outra exceção da chamada viram o
    fallback `erro_provedor`, e nada é gravado.
+5b. Validação do texto (prompt v3): toda data, todo valor em `R$` e todo
+   número de dias do texto devolvido precisa existir nos fatos calculados
+   (`texto_respeita_fatos`, app/services/ia/detalhes.py). Se algum não
+   existir, o texto é descartado: nada é gravado e volta o fallback com
+   `erro_provedor` (sem valor novo no contrato do front), e o log leva só a
+   categoria `texto_rejeitado`. O descarte já consumiu uma chamada paga ao
+   provedor e não entra no cache nem conta no limite diário (que conta as
+   linhas do cache); a próxima chamada tenta de novo.
 6. Sucesso: `INSERT ... ON CONFLICT (empresa_id, chave) DO NOTHING` e a
    ligação da linha (`conciliacoes.explicacao_chave`), na mesma transação.
    Se gravar falhar, o texto gerado é devolvido assim mesmo. Se a linha
    sumiu (o par foi reconciliado no meio, ADR-007), o texto fica no cache e
    a ligação simplesmente não acontece.
+
+Fallback: o texto determinístico com os números
+(`texto_deterministico`, app/services/ia/detalhes.py), não mais o motivo
+genérico. Todo resultado leva `detalhes`, as linhas formatadas do contexto,
+qualquer que seja o caminho (IA, cache, desligada, limite ou erro).
 
 Os objetos ORM expiram no rollback e no commit, e a linha pode ser apagada
 por uma reconciliação durante a chamada: por isso `preparar` copia o que
@@ -62,6 +75,12 @@ from app.services.ia import ProvedorDeIA, ProvedorIAIndisponivel, obter_provedor
 from app.services.ia.base import ContextoDivergencia
 from app.services.ia.cache import chave_cache
 from app.services.ia.contexto import montar_contexto_divergencia
+from app.services.ia.detalhes import (
+    DetalheLinha,
+    montar_detalhes,
+    texto_deterministico,
+    texto_respeita_fatos,
+)
 from app.services.ia.prompt import VERSAO_PROMPT
 from app.services.matching import (
     STATUS_DIVERGENTE_DATA,
@@ -112,6 +131,7 @@ class ResultadoGeracao:
     gerada_por_ia: bool
     em_cache: bool
     indisponibilidade: Indisponibilidade | None
+    detalhes: list[DetalheLinha] = field(default_factory=list)
 
 
 def _inicio_do_dia_utc() -> datetime:
@@ -153,10 +173,11 @@ def preparar(
 def _fallback(preparo: Preparo, indisponibilidade: Indisponibilidade) -> ResultadoGeracao:
     return ResultadoGeracao(
         status=preparo.status,
-        explicacao=preparo.contexto.motivo,
+        explicacao=texto_deterministico(preparo.contexto),
         gerada_por_ia=False,
         em_cache=False,
         indisponibilidade=indisponibilidade,
+        detalhes=montar_detalhes(preparo.contexto),
     )
 
 
@@ -183,6 +204,7 @@ def usar_cache(db: Session, preparo: Preparo, origem: str = "explicacoes") -> Re
         gerada_por_ia=True,
         em_cache=True,
         indisponibilidade=None,
+        detalhes=montar_detalhes(preparo.contexto),
     )
 
 
@@ -235,6 +257,12 @@ def gerar(
         logger.info("%s erro_inesperado classe=%s", origem, type(exc).__name__)
         return _fallback(preparo, "erro_provedor")
 
+    if not texto_respeita_fatos(resposta.texto, preparo.contexto):
+        # Número ou data fora dos fatos: descarta. A chamada já foi paga e
+        # não entra no cache; a próxima tentativa chama de novo.
+        logger.info("%s texto_rejeitado", origem)
+        return _fallback(preparo, "erro_provedor")
+
     try:
         db.execute(
             pg_insert(ExplicacaoDivergencia.__table__)
@@ -264,6 +292,7 @@ def gerar(
         gerada_por_ia=True,
         em_cache=False,
         indisponibilidade=None,
+        detalhes=montar_detalhes(preparo.contexto),
     )
 
 
