@@ -40,14 +40,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.auth import EmpresaAtiva, obter_empresa_ativa, obter_empresa_id_ativa
+from app.core.configuracao_empresa import TOLERANCIA_DIAS_MAXIMA
 from app.core.database import get_db
 from app.models import Configuracao
 
 router = APIRouter(prefix="/empresa", tags=["empresa"])
 
-# Decisão de Eduardo em 05/10: a tolerância de dias vai de 0 a 5. O limite é
-# regra de produto e fica só aqui (o banco garante apenas o mínimo).
-TOLERANCIA_DIAS_MAXIMA = 5
+# O limite de 0 a 5 dias (decisão de 05/10) mora em app/core/configuracao_empresa.py.
 
 
 class ConfiguracoesResponse(BaseModel):

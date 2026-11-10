@@ -17,6 +17,11 @@ Só afirma o que app/services/matching.py garante:
   passada de tolerância. Com a diferença acima da tolerância, a tolerância é
   a causa; com tolerância igual à diferença, o par entraria na passada de
   tolerância como candidato.
+- A sugestão de tolerância (frase, linha "Tolerância mínima para o par" e o
+  fato `tolerancia_minima_para_o_par`) só aparece quando a diferença cabe
+  na tolerância máxima configurável (`TOLERANCIA_DIAS_MAXIMA`,
+  app/core/configuracao_empresa.py). Acima dela, o texto cita o máximo e
+  aponta a justificativa: nunca recomenda uma configuração impossível.
 - `divergente_data` sem par gravado: os candidatos são lançamentos do outro
   lado com o mesmo valor em outra data, que podem ter ficado de fora da
   passada de tolerância (um `duplicado`, por exemplo). Diferença dentro da
@@ -39,6 +44,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
+from app.core.configuracao_empresa import TOLERANCIA_DIAS_MAXIMA
 from app.services.ia.base import CandidatoContexto, ContextoDivergencia, LancamentoContexto
 
 _CENTAVOS = Decimal("0.01")
@@ -180,7 +186,10 @@ def montar_detalhes(contexto: ContextoDivergencia) -> list[DetalheLinha]:
         linhas.append(DetalheLinha("Tolerância da conciliação", formatar_dias(tolerancia)))
 
     if status == "divergente_data" and candidato is not None:
-        if tolerancia is not None and candidato.diferenca_dias > tolerancia:
+        if (
+            tolerancia is not None
+            and tolerancia < candidato.diferenca_dias <= TOLERANCIA_DIAS_MAXIMA
+        ):
             linhas.append(
                 DetalheLinha(
                     "Tolerância mínima para o par", formatar_dias(candidato.diferenca_dias)
@@ -238,13 +247,14 @@ def _frases_divergente_data(contexto: ContextoDivergencia) -> list[str]:
     diferenca = candidato.diferenca_dias
     if tolerancia is None:
         return frases
+    maximo = formatar_dias(TOLERANCIA_DIAS_MAXIMA)
     if diferenca > tolerancia:
         if contexto.par_gravado:
             frases.append(
                 f"A tolerância desta conciliação era de {formatar_dias(tolerancia)}, "
                 "por isso o par ficou como divergência de data."
             )
-            frases.append(
+            sugestao = (
                 f"Com tolerância de {formatar_dias(diferenca)}, ele passaria a ser "
                 "candidato a match por tolerância."
             )
@@ -253,9 +263,16 @@ def _frases_divergente_data(contexto: ContextoDivergencia) -> list[str]:
                 f"A tolerância desta conciliação era de {formatar_dias(tolerancia)}, "
                 "menor que essa diferença."
             )
-            frases.append(
+            sugestao = (
                 f"Com tolerância de {formatar_dias(diferenca)}, esse lançamento ficaria "
                 "dentro da janela de data."
+            )
+        if diferenca <= TOLERANCIA_DIAS_MAXIMA:
+            frases.append(sugestao)
+        else:
+            frases.append(
+                f"A diferença passa da tolerância máxima configurável, de {maximo}, então "
+                "o caminho é justificar a divergência."
             )
     else:
         frases.append(
@@ -392,7 +409,10 @@ def fatos_formatados(contexto: ContextoDivergencia) -> dict:
         dias = _sistema_menos_banco(contexto)
         fatos["dias_de_diferenca"] = formatar_dias(abs(dias))
         fatos["sentido"] = _sentido(dias)
-        if contexto.tolerancia_dias is not None and abs(dias) > contexto.tolerancia_dias:
+        if (
+            contexto.tolerancia_dias is not None
+            and contexto.tolerancia_dias < abs(dias) <= TOLERANCIA_DIAS_MAXIMA
+        ):
             fatos["tolerancia_minima_para_o_par"] = formatar_dias(abs(dias))
     if contexto.status == "divergente_valor" and candidato is not None:
         fatos["diferenca_valor"] = formatar_valor(candidato.diferenca_valor)
@@ -400,6 +420,7 @@ def fatos_formatados(contexto: ContextoDivergencia) -> dict:
             fatos["diferenca_percentual"] = formatar_percentual(candidato.diferenca_percentual)
     if contexto.tolerancia_dias is not None:
         fatos["tolerancia_dias"] = formatar_dias(contexto.tolerancia_dias)
+    fatos["tolerancia_maxima"] = formatar_dias(TOLERANCIA_DIAS_MAXIMA)
     if contexto.total_candidatos is not None:
         fatos["total_candidatos"] = str(contexto.total_candidatos)
     if contexto.periodo_outro_lado is not None:

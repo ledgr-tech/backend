@@ -4,12 +4,16 @@ validação do texto da IA. Sem banco, sem rede.
 """
 
 import json
-from datetime import date
+import uuid
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
+from app.core.configuracao_empresa import TOLERANCIA_DIAS_MAXIMA
+from app.services.ia import detalhes as detalhes_module
 from app.services.ia.base import CandidatoContexto, ContextoDivergencia, LancamentoContexto
+from app.services.ia.cache import chave_cache
 from app.services.ia.detalhes import (
     DetalheLinha,
     dividir_frases,
@@ -362,7 +366,7 @@ def test_aceita_valor_sem_sinal_e_texto_sem_numeros():
         "O sistema lançou em 03/10/2026.",  # data inventada
         "A diferença é de R$ 80,00.",  # valor inventado
         "O sistema lançou 2 dias depois.",  # dias inventados
-        "Com tolerância de 5 dias o par fecharia.",  # dias inventados
+        "Com tolerância de 4 dias o par fecharia.",  # dias inventados
         "Valor de R$79,6.",  # valor em formato diferente do dos fatos
     ],
 )
@@ -409,3 +413,67 @@ def test_divisao_de_frases_nao_quebra_milhar_nem_data():
         "No sistema: -R$ 1.499,00 em 20/09/2026.",
     ]
     assert filtrar_texto_pelos_fatos(texto, _divergente_valor(4)) == texto
+
+
+# tolerância sugerida nunca acima do máximo configurável
+
+
+def _com_diferenca(dias, par_gravado, tolerancia=0):
+    return _par_de_data(
+        tolerancia=tolerancia,
+        par_gravado=par_gravado,
+        data_outro=date(2026, 10, 1) + timedelta(days=dias),
+    )
+
+
+def test_maximo_e_o_da_configuracao_da_empresa():
+    from app.api import empresa
+
+    assert TOLERANCIA_DIAS_MAXIMA == empresa.TOLERANCIA_DIAS_MAXIMA == 5
+
+
+@pytest.mark.parametrize("par_gravado", [True, False])
+def test_diferenca_igual_ao_maximo_sugere_a_tolerancia(par_gravado):
+    contexto = _com_diferenca(TOLERANCIA_DIAS_MAXIMA, par_gravado)
+
+    texto = texto_deterministico(contexto)
+    assert "Com tolerância de 5 dias," in texto
+    assert "tolerância máxima" not in texto
+    assert DetalheLinha("Tolerância mínima para o par", "5 dias") in montar_detalhes(contexto)
+    assert fatos_formatados(contexto)["tolerancia_minima_para_o_par"] == "5 dias"
+
+
+@pytest.mark.parametrize("par_gravado", [True, False])
+def test_diferenca_acima_do_maximo_nao_sugere_e_cita_o_maximo(par_gravado):
+    contexto = _com_diferenca(TOLERANCIA_DIAS_MAXIMA + 1, par_gravado)
+
+    texto = texto_deterministico(contexto)
+    assert "Com tolerância de" not in texto
+    assert texto.endswith(
+        "A diferença passa da tolerância máxima configurável, de 5 dias, então o caminho é "
+        "justificar a divergência."
+    )
+    rotulos = [linha.rotulo for linha in montar_detalhes(contexto)]
+    assert "Tolerância mínima para o par" not in rotulos
+    assert "tolerancia_minima_para_o_par" not in fatos_formatados(contexto)
+    assert fatos_formatados(contexto)["tolerancia_maxima"] == "5 dias"
+    assert texto_respeita_fatos(texto, contexto)
+
+
+def test_tolerancia_none_acima_do_maximo_continua_sem_frases_de_tolerancia():
+    contexto = _com_diferenca(TOLERANCIA_DIAS_MAXIMA + 3, True, tolerancia=None)
+    texto = texto_deterministico(contexto)
+    assert "tolerância" not in texto.lower()
+    assert not any("Tolerância" in linha.rotulo for linha in montar_detalhes(contexto))
+
+
+def test_tolerancia_maxima_na_serializacao_e_na_chave_do_cache(monkeypatch):
+    contexto = _sem_correspondencia()
+    empresa_id = uuid.uuid4()
+    assert json.loads(serializar_contexto(contexto))["fatos"]["tolerancia_maxima"] == "5 dias"
+    antes = chave_cache(empresa_id, "openai", "m", contexto)
+
+    monkeypatch.setattr(detalhes_module, "TOLERANCIA_DIAS_MAXIMA", 7)
+
+    assert json.loads(serializar_contexto(contexto))["fatos"]["tolerancia_maxima"] == "7 dias"
+    assert chave_cache(empresa_id, "openai", "m", contexto) != antes
