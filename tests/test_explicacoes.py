@@ -813,3 +813,260 @@ def test_log_de_sucesso_nunca_contem_descricao_ou_texto_da_explicacao(
     assert descricao_secreta not in texto_dos_logs
     assert fake.texto not in texto_dos_logs
     assert "sk-" not in texto_dos_logs
+
+
+# detalhes (fix da explicação detalhada)
+
+
+def _detalhes(headers, conciliacao_id):
+    return client.get(f"/explicacoes/{conciliacao_id}/detalhes", headers=headers)
+
+
+DETALHES_DO_CENARIO = [
+    {"rotulo": "Banco", "valor": "R$ 100,00 em 20/09/2026"},
+    {"rotulo": "Sistema", "valor": "R$ 99,00 em 20/09/2026"},
+    {"rotulo": "Diferença de valor", "valor": "R$ 1,00 (1,0%)"},
+    {"rotulo": "Similaridade das descrições", "valor": "38%"},
+]
+
+
+def _linhas_sem_similaridade(detalhes):
+    return [d for d in detalhes if d["rotulo"] != "Similaridade das descrições"]
+
+
+def test_post_desligado_devolve_detalhes_e_texto_com_numeros(cenario, provedor_desabilitado):
+    _empresa, linha, headers = cenario
+
+    corpo = _explicar(headers, linha.id).json()
+
+    assert corpo["indisponibilidade"] == "desabilitado"
+    assert corpo["explicacao"] == (
+        "No banco: R$ 100,00 em 20/09/2026. No sistema: R$ 99,00 em 20/09/2026. "
+        "A data é a mesma e a diferença de valor é de R$ 1,00 (1,0%)."
+    )
+    assert _linhas_sem_similaridade(corpo["detalhes"]) == _linhas_sem_similaridade(
+        DETALHES_DO_CENARIO
+    )
+
+
+def test_post_com_ia_e_com_cache_devolvem_detalhes(cenario, provedor_falso):
+    _empresa, linha, headers = cenario
+
+    gerada = _explicar(headers, linha.id).json()
+    em_cache = _explicar(headers, linha.id).json()
+
+    assert gerada["gerada_por_ia"] is True and gerada["em_cache"] is False
+    assert em_cache["em_cache"] is True
+    assert gerada["explicacao"] == provedor_falso.texto  # o texto da IA, não o determinístico
+    assert gerada["detalhes"] == em_cache["detalhes"]
+    assert gerada["detalhes"][0] == {"rotulo": "Banco", "valor": "R$ 100,00 em 20/09/2026"}
+
+
+def test_post_erro_e_limite_devolvem_detalhes(cenario, monkeypatch):
+    _empresa, linha, headers = cenario
+    fake = ProvedorFalso(excecao=ProvedorIAIndisponivel("timeout"))
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    try:
+        erro = _explicar(headers, linha.id).json()
+        monkeypatch.setattr(settings, "llm_limite_diario_global", 0)
+        limite = _explicar(headers, linha.id).json()
+    finally:
+        app.dependency_overrides.pop(obter_provedor_dependencia, None)
+
+    assert erro["indisponibilidade"] == "erro_provedor"
+    assert limite["indisponibilidade"] == "limite_diario"
+    for corpo in (erro, limite):
+        assert corpo["explicacao"].startswith("No banco: R$ 100,00 em 20/09/2026.")
+        assert corpo["detalhes"][0] == {"rotulo": "Banco", "valor": "R$ 100,00 em 20/09/2026"}
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "O sistema lançou R$ 98,00 na mesma data.",
+        "O lançamento do banco é de 21/09/2026.",
+        "Com tolerância de 3 dias o par fecharia.",
+    ],
+)
+def test_texto_da_ia_com_numero_inventado_e_descartado(db_session, cenario, caplog, texto):
+    empresa, linha, headers = cenario
+    fake = ProvedorFalso(texto=texto)
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    try:
+        with caplog.at_level(logging.INFO, logger="app.services.ia.geracao"):
+            primeira = _explicar(headers, linha.id).json()
+        segunda = _explicar(headers, linha.id).json()
+    finally:
+        app.dependency_overrides.pop(obter_provedor_dependencia, None)
+
+    assert primeira["indisponibilidade"] == "erro_provedor"
+    assert primeira["gerada_por_ia"] is False
+    assert primeira["explicacao"].startswith("No banco: R$ 100,00")
+    assert primeira["detalhes"]
+    assert len(fake.chamadas) == 2  # não entrou no cache: a segunda chama de novo
+    assert segunda["indisponibilidade"] == "erro_provedor"
+    db_session.expire_all()
+    assert db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa.id).count() == 0
+    assert db_session.get(Conciliacao, linha.id).explicacao_chave is None
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "explicacoes texto_rejeitado" in logs
+    assert texto not in logs
+
+
+def test_texto_da_ia_que_copia_os_fatos_e_aceito(db_session, cenario):
+    empresa, linha, headers = cenario
+    fake = ProvedorFalso(
+        texto=(
+            "No banco há R$ 100,00 em 20/09/2026 e no sistema R$ 99,00 na mesma data, uma "
+            "diferença de R$ 1,00 (1,0%). Pode ser um desconto ou uma tarifa descontada. "
+            "Confira o lançamento ou justifique a divergência."
+        )
+    )
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    try:
+        corpo = _explicar(headers, linha.id).json()
+    finally:
+        app.dependency_overrides.pop(obter_provedor_dependencia, None)
+
+    assert corpo["gerada_por_ia"] is True
+    assert corpo["explicacao"] == fake.texto
+    db_session.expire_all()
+    assert db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa.id).count() == 1
+
+
+def test_get_detalhes_sem_token_retorna_401():
+    assert client.get(f"/explicacoes/{uuid.uuid4()}/detalhes").status_code == 401
+
+
+def test_get_detalhes_nao_chama_provedor_nem_grava(
+    db_session, cenario, provedor_falso, monkeypatch
+):
+    monkeypatch.setattr(settings, "llm_habilitado", True)
+    empresa, linha, headers = cenario
+
+    resposta = _detalhes(headers, linha.id)
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo == {
+        "conciliacao_id": str(linha.id),
+        "status": "divergente_valor",
+        "texto": (
+            "No banco: R$ 100,00 em 20/09/2026. No sistema: R$ 99,00 em 20/09/2026. "
+            "A data é a mesma e a diferença de valor é de R$ 1,00 (1,0%)."
+        ),
+        "detalhes": corpo["detalhes"],
+    }
+    assert _linhas_sem_similaridade(corpo["detalhes"]) == _linhas_sem_similaridade(
+        DETALHES_DO_CENARIO
+    )
+    assert provedor_falso.chamadas == []
+    db_session.expire_all()
+    assert db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa.id).count() == 0
+    assert db_session.get(Conciliacao, linha.id).explicacao_chave is None
+
+
+def test_get_detalhes_funciona_com_ia_desligada_e_com_limite_estourado(
+    cenario, provedor_desabilitado, monkeypatch
+):
+    monkeypatch.setattr(settings, "llm_limite_diario_global", 0)
+    _empresa, linha, headers = cenario
+    assert _detalhes(headers, linha.id).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("status", "esperado"),
+    [
+        ("divergente_data", "O valor é o mesmo e o sistema lançou 2 dias depois do banco."),
+        ("divergente_valor", "a diferença de valor é de R$ 0,50"),
+        ("sem_correspondencia", "Nenhum lançamento do sistema que ficou sem par"),
+        ("duplicado", "Os pares possíveis já foram formados"),
+        ("tarifa_bancaria", "termo conhecido de tarifa bancária"),
+    ],
+)
+def test_get_detalhes_200_por_status(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers, status, esperado
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    d = date(2026, 9, 21)
+    item = _lancamento_em(db_session, banco, "-10.00", d, "TARIFA PACOTE")
+    outro = None
+    if status == "divergente_data":
+        outro = _lancamento_em(db_session, sistema, "-10.00", d + timedelta(days=2), "x")
+    elif status == "divergente_valor":
+        _lancamento_em(db_session, sistema, "-9.50", d, "x")
+    elif status == "duplicado":
+        _lancamento_em(db_session, banco, "-10.00", d, "y")
+        _lancamento_em(db_session, sistema, "-10.00", d, "z")
+    linha = _conciliacao(
+        db_session, empresa.id, banco.id, sistema.id, status, item.id, outro.id if outro else None
+    )
+
+    resposta = _detalhes(auth_headers(empresa.id), linha.id)
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["status"] == status
+    assert esperado in corpo["texto"]
+    assert corpo["detalhes"][0] == {"rotulo": "Banco", "valor": "-R$ 10,00 em 21/09/2026"}
+    assert "TARIFA PACOTE" not in resposta.text
+
+
+def test_get_detalhes_404_de_outra_empresa_mesmo_da_mesma_conta(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers
+):
+    dona = criar_empresa()
+    mesma_conta = criar_empresa(conta_id=dona.conta_id)
+    outra_conta = criar_empresa()
+    banco = criar_extrato_da_empresa(dona.id, "banco")
+    sistema = criar_extrato_da_empresa(dona.id, "sistema")
+    item = _lancamento_em(db_session, banco, "10.00", date(2026, 9, 20), "Item")
+    linha = _conciliacao(db_session, dona.id, banco.id, sistema.id, "sem_correspondencia", item.id)
+
+    respostas = [
+        _detalhes(auth_headers(mesma_conta.id), linha.id),
+        _detalhes(auth_headers(outra_conta.id), linha.id),
+        _detalhes(auth_headers(dona.id), uuid.uuid4()),
+    ]
+
+    assert [r.status_code for r in respostas] == [404, 404, 404]
+    assert {r.json()["detail"] for r in respostas} == {"Conciliação não encontrada."}
+    assert _detalhes(auth_headers(dona.id), linha.id).status_code == 200
+
+
+@pytest.mark.parametrize("status", ["match_exato", "match_tolerancia", "match_agrupado"])
+def test_get_detalhes_422_para_match(
+    db_session, criar_empresa, criar_extrato_da_empresa, auth_headers, status
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    item_banco = _lancamento_em(db_session, banco, "10.00", date(2026, 9, 20), "Item")
+    item_sistema = _lancamento_em(db_session, sistema, "10.00", date(2026, 9, 20), "Item")
+    linha = Conciliacao(
+        empresa_id=empresa.id,
+        extrato_banco_id=banco.id,
+        extrato_sistema_id=sistema.id,
+        lancamento_banco_id=item_banco.id,
+        lancamento_sistema_id=None if status == "match_agrupado" else item_sistema.id,
+        status=status,
+        regra_aplicada={"match_exato": "exato", "match_tolerancia": "tolerancia"}.get(
+            status, "agrupamento"
+        ),
+        score_confianca=Decimal("1.000"),
+        grupo_id=uuid.uuid4() if status == "match_agrupado" else None,
+    )
+    db_session.add(linha)
+    db_session.commit()
+
+    resposta = _detalhes(auth_headers(empresa.id), linha.id)
+
+    assert resposta.status_code == 422
+    assert "não é elegível" in resposta.json()["detail"]
+
+
+def test_get_detalhes_uuid_malformado_retorna_422(criar_empresa, auth_headers):
+    empresa = criar_empresa()
+    assert _detalhes(auth_headers(empresa.id), "nao-e-um-uuid").status_code == 422
