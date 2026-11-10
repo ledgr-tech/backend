@@ -74,8 +74,11 @@ Explicação (issue #140): cada item traz `explicacao`, o texto da IA ligado à
 linha (`conciliacoes.explicacao_chave`, pela geração automática ou pelo
 clique no `POST /explicacoes`), e `gerada_por_ia`, `true` só quando há esse
 texto. Sem texto da IA (geração desligada, teto, limite, falha ou ainda não
-gerado), `explicacao` é `null` e `gerada_por_ia` é `false`; o texto fixo por
-categoria não sai aqui, o front tem o dele. Com `LLM_HABILITADO` desligado,
+gerado), `explicacao` é `null` e `gerada_por_ia` é `false`; o texto
+determinístico não sai aqui, para a listagem continuar sem consulta por item.
+O front busca o texto com os números e as linhas de detalhe de um item em
+`GET /explicacoes/{conciliacao_id}/detalhes` (app/api/explicacoes.py), ao
+focar o item, em vez de manter um texto fixo próprio. Com `LLM_HABILITADO` desligado,
 `null` em todos os itens, mesmo com cache (o interruptor de emergência do
 ADR-011). O texto vem num join com o cache, pela empresa da linha: nenhuma
 consulta por item, e a explicação de uma empresa nunca aparece em outra.

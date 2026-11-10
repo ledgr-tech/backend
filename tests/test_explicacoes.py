@@ -24,7 +24,6 @@ from app.services.ia import cache as cache_module
 from app.services.ia import geracao as geracao_module
 from app.services.ia import prompt as prompt_module
 from app.services.ia.base import ProvedorIAIndisponivel, RespostaIA
-from app.services.ia.prompt import motivo_deterministico
 from main import app
 
 client = TestClient(app)
@@ -235,7 +234,7 @@ def test_recurso_desligado_gera_fallback_sem_chamar_provedor(cenario, provedor_d
     assert corpo["em_cache"] is False
     assert corpo["indisponibilidade"] == "desabilitado"
     assert corpo["status"] == "divergente_valor"
-    assert corpo["explicacao"]  # motivo_deterministico, não vazio
+    assert corpo["explicacao"]  # texto_deterministico, não vazio
 
 
 def test_cache_existente_com_recurso_desligado_devolve_fallback_nao_o_cache(
@@ -450,7 +449,7 @@ def test_cota_esgotada_devolve_erro_provedor_e_loga_warning(
     corpo = resposta.json()
     assert corpo["indisponibilidade"] == "erro_provedor"
     assert corpo["gerada_por_ia"] is False
-    assert corpo["explicacao"] == motivo_deterministico("divergente_valor")
+    assert corpo["explicacao"].startswith("No banco: R$ ")  # texto determinístico
     (registro,) = registros
     assert registro.levelno == logging.WARNING
     assert registro.getMessage() == "explicacoes motivo=cota_esgotada status_http=429"
