@@ -1070,3 +1070,38 @@ def test_get_detalhes_422_para_match(
 def test_get_detalhes_uuid_malformado_retorna_422(criar_empresa, auth_headers):
     empresa = criar_empresa()
     assert _detalhes(auth_headers(empresa.id), "nao-e-um-uuid").status_code == 422
+
+
+def test_texto_da_ia_e_filtrado_por_frase_gravado_e_vira_cache_hit(db_session, cenario, caplog):
+    empresa, linha, headers = cenario
+    fake = ProvedorFalso(
+        texto=(
+            "No banco há R$ 100,00 em 20/09/2026 e no sistema R$ 99,00. "
+            "O sistema deve ter lançado R$ 98,00 em 21/09/2026. "
+            "Confira o lançamento ou justifique a divergência."
+        )
+    )
+    app.dependency_overrides[obter_provedor_dependencia] = lambda: fake
+    try:
+        with caplog.at_level(logging.INFO, logger="app.services.ia.geracao"):
+            primeira = _explicar(headers, linha.id).json()
+        segunda = _explicar(headers, linha.id).json()
+    finally:
+        app.dependency_overrides.pop(obter_provedor_dependencia, None)
+
+    filtrado = (
+        "No banco há R$ 100,00 em 20/09/2026 e no sistema R$ 99,00. "
+        "Confira o lançamento ou justifique a divergência."
+    )
+    assert primeira["gerada_por_ia"] is True
+    assert primeira["indisponibilidade"] is None
+    assert primeira["explicacao"] == filtrado
+    assert segunda["em_cache"] is True
+    assert segunda["explicacao"] == filtrado
+    assert len(fake.chamadas) == 1  # a segunda não chamou o provedor
+    db_session.expire_all()
+    (gravada,) = db_session.query(ExplicacaoDivergencia).filter_by(empresa_id=empresa.id).all()
+    assert gravada.texto == filtrado
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "explicacoes texto_filtrado frases_removidas=1 frases_total=3" in logs
+    assert "98,00" not in logs

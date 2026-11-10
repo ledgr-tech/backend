@@ -12,7 +12,9 @@ import pytest
 from app.services.ia.base import CandidatoContexto, ContextoDivergencia, LancamentoContexto
 from app.services.ia.detalhes import (
     DetalheLinha,
+    dividir_frases,
     fatos_formatados,
+    filtrar_texto_pelos_fatos,
     formatar_data,
     formatar_dias,
     formatar_percentual,
@@ -373,3 +375,37 @@ def test_valida_contra_todos_os_candidatos():
     assert texto_respeita_fatos("O mais próximo é de -R$ 1.499,00.", contexto)
     assert texto_respeita_fatos("Diferença de R$ 1,00.", contexto)
     assert not texto_respeita_fatos("Diferença de R$ 2,00.", contexto)
+
+
+# filtro por frase
+
+
+def test_filtro_remove_so_as_frases_com_numero_inventado():
+    texto = (
+        "No banco há -R$ 79,61 em 01/10/2026. O sistema lançou em 03/10/2026. "
+        "A diferença é de R$ 80,00! O sistema lançou 2 dias depois? "
+        "A tolerância era de 0 dias. Justifique a divergência."
+    )
+    assert filtrar_texto_pelos_fatos(texto, _par_de_data()) == (
+        "No banco há -R$ 79,61 em 01/10/2026. A tolerância era de 0 dias. Justifique a divergência."
+    )
+
+
+def test_filtro_sem_nenhuma_frase_valida_devolve_none():
+    texto = "O sistema lançou em 03/10/2026. Diferença de R$ 80,00. Foram 9 dias."
+    assert filtrar_texto_pelos_fatos(texto, _par_de_data()) is None
+    assert filtrar_texto_pelos_fatos("   ", _par_de_data()) is None
+
+
+def test_filtro_mantem_texto_todo_valido_igual():
+    texto = texto_deterministico(_divergente_valor(4))
+    assert filtrar_texto_pelos_fatos(texto, _divergente_valor(4)) == texto
+
+
+def test_divisao_de_frases_nao_quebra_milhar_nem_data():
+    texto = "No banco: -R$ 1.500,00 em 20/09/2026. No sistema: -R$ 1.499,00 em 20/09/2026."
+    assert dividir_frases(texto) == [
+        "No banco: -R$ 1.500,00 em 20/09/2026.",
+        "No sistema: -R$ 1.499,00 em 20/09/2026.",
+    ]
+    assert filtrar_texto_pelos_fatos(texto, _divergente_valor(4)) == texto

@@ -435,12 +435,36 @@ def _numeros(texto: str) -> tuple[set[str], set[Decimal | None], set[int]]:
     return datas, valores, dias
 
 
+# Fim de frase: pontuação seguida de espaço. "R$ 1.234,56" e "01/10/2026" não
+# têm espaço depois do ponto ou da barra, então nunca quebram.
+_RE_FIM_DE_FRASE = re.compile(r"(?<=[.!?])\s+")
+
+
+def dividir_frases(texto: str) -> list[str]:
+    return [frase for frase in _RE_FIM_DE_FRASE.split(texto.strip()) if frase]
+
+
+def _permitidos(contexto: ContextoDivergencia):
+    return _numeros(json.dumps(fatos_formatados(contexto), ensure_ascii=False))
+
+
+def _dentro_dos_fatos(trecho: str, permitidos) -> bool:
+    permitidas, valores_permitidos, dias_permitidos = permitidos
+    datas, valores, dias = _numeros(trecho)
+    return datas <= permitidas and valores <= valores_permitidos and dias <= dias_permitidos
+
+
 def texto_respeita_fatos(texto: str, contexto: ContextoDivergencia) -> bool:
     """Toda data (`dd/mm/aaaa`), todo valor (`R$`, sem olhar o sinal) e todo
     número seguido de "dia"/"dias" do texto precisa existir nos fatos. Um
     número que não está lá foi inventado ou calculado pelo modelo."""
-    permitidas, permitidos, dias_permitidos = _numeros(
-        json.dumps(fatos_formatados(contexto), ensure_ascii=False)
-    )
-    datas, valores, dias = _numeros(texto)
-    return datas <= permitidas and valores <= permitidos and dias <= dias_permitidos
+    return _dentro_dos_fatos(texto, _permitidos(contexto))
+
+
+def filtrar_texto_pelos_fatos(texto: str, contexto: ContextoDivergencia) -> str | None:
+    """O texto só com as frases cujos números estão todos nos fatos (a mesma
+    regra de `texto_respeita_fatos`, aplicada por frase), juntas com um
+    espaço. `None` quando nenhuma frase sobra."""
+    permitidos = _permitidos(contexto)
+    frases = [f for f in dividir_frases(texto) if _dentro_dos_fatos(f, permitidos)]
+    return " ".join(frases) if frases else None

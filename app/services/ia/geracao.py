@@ -15,14 +15,17 @@ automática ao conciliar, para as duas nunca divergirem:
    `empresa_id`; o id cru nunca vai ao provedor.
 5. `ProvedorIAIndisponivel` ou qualquer outra exceção da chamada viram o
    fallback `erro_provedor`, e nada é gravado.
-5b. Validação do texto (prompt v3): toda data, todo valor em `R$` e todo
-   número de dias do texto devolvido precisa existir nos fatos calculados
-   (`texto_respeita_fatos`, app/services/ia/detalhes.py). Se algum não
-   existir, o texto é descartado: nada é gravado e volta o fallback com
-   `erro_provedor` (sem valor novo no contrato do front), e o log leva só a
-   categoria `texto_rejeitado`. O descarte já consumiu uma chamada paga ao
-   provedor e não entra no cache nem conta no limite diário (que conta as
-   linhas do cache); a próxima chamada tenta de novo.
+5b. Filtro do texto (prompt v3), por frase: só ficam as frases em que toda
+   data, todo valor em `R$` e todo número de dias existem nos fatos
+   calculados (`filtrar_texto_pelos_fatos`, app/services/ia/detalhes.py).
+   Sobrando alguma frase, o texto filtrado segue como sucesso normal: é
+   gravado no cache, conta no limite diário e a próxima chamada é cache
+   hit, então um modelo que erre sempre o mesmo número não gera custo sem
+   teto. Frase removida loga só `texto_filtrado frases_removidas=N
+   frases_total=M`. Sem nenhuma frase válida, nada é gravado e volta o
+   fallback com `erro_provedor` (sem valor novo no contrato do front), com
+   o log `texto_rejeitado`; essa chamada paga não entra no cache nem no
+   limite, e a próxima tenta de novo.
 6. Sucesso: `INSERT ... ON CONFLICT (empresa_id, chave) DO NOTHING` e a
    ligação da linha (`conciliacoes.explicacao_chave`), na mesma transação.
    Se gravar falhar, o texto gerado é devolvido assim mesmo. Se a linha
@@ -77,9 +80,10 @@ from app.services.ia.cache import chave_cache
 from app.services.ia.contexto import montar_contexto_divergencia
 from app.services.ia.detalhes import (
     DetalheLinha,
+    dividir_frases,
+    filtrar_texto_pelos_fatos,
     montar_detalhes,
     texto_deterministico,
-    texto_respeita_fatos,
 )
 from app.services.ia.prompt import VERSAO_PROMPT
 from app.services.matching import (
@@ -257,11 +261,21 @@ def gerar(
         logger.info("%s erro_inesperado classe=%s", origem, type(exc).__name__)
         return _fallback(preparo, "erro_provedor")
 
-    if not texto_respeita_fatos(resposta.texto, preparo.contexto):
-        # Número ou data fora dos fatos: descarta. A chamada já foi paga e
-        # não entra no cache; a próxima tentativa chama de novo.
+    texto = filtrar_texto_pelos_fatos(resposta.texto, preparo.contexto)
+    if texto is None:
+        # Nenhuma frase com os números dos fatos: descarta. A chamada já foi
+        # paga e não entra no cache; a próxima tentativa chama de novo.
         logger.info("%s texto_rejeitado", origem)
         return _fallback(preparo, "erro_provedor")
+    frases_total = len(dividir_frases(resposta.texto))
+    frases_removidas = frases_total - len(dividir_frases(texto))
+    if frases_removidas:
+        logger.info(
+            "%s texto_filtrado frases_removidas=%d frases_total=%d",
+            origem,
+            frases_removidas,
+            frases_total,
+        )
 
     try:
         db.execute(
@@ -274,7 +288,7 @@ def gerar(
                 provedor=settings.llm_provedor,
                 modelo=settings.openai_modelo,
                 versao_prompt=VERSAO_PROMPT,
-                texto=resposta.texto,
+                texto=texto,
                 tokens_entrada=resposta.tokens_entrada,
                 tokens_saida=resposta.tokens_saida,
             )
@@ -288,7 +302,7 @@ def gerar(
 
     return ResultadoGeracao(
         status=preparo.status,
-        explicacao=resposta.texto,
+        explicacao=texto,
         gerada_por_ia=True,
         em_cache=False,
         indisponibilidade=None,

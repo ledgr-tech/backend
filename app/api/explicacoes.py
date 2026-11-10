@@ -62,9 +62,10 @@ pt-BR, sem descrição; app/services/ia/detalhes.py), em todos os caminhos:
 IA ligada, desligada, limite, erro e cache. No fallback, `explicacao` é o
 texto determinístico com os números (`texto_deterministico`), não mais o
 motivo genérico; com a IA respondendo, continua o texto da IA. O texto da
-IA é conferido contra os fatos antes de gravar (prompt v3): data, valor ou
-número de dias que não está nos fatos descarta o texto, e a resposta vira o
-fallback com `erro_provedor`.
+IA é filtrado por frase antes de gravar (prompt v3): a frase com data, valor
+ou número de dias que não está nos fatos sai, e o resto é gravado e devolvido
+como texto da IA. Só quando nenhuma frase sobra a resposta vira o fallback
+com `erro_provedor`, sem gravar.
 
 `GET /explicacoes/{conciliacao_id}/detalhes`: somente leitura, devolve
 `{conciliacao_id, status, texto, detalhes}` com o texto determinístico. Não

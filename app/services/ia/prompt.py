@@ -14,8 +14,8 @@ explicação detalhada): o contexto leva os fatos calculados pelo backend
 candidatos) e um bloco `fatos` já formatado em pt-BR
 (app/services/ia/detalhes.py); a instrução pede 3 a 5 frases que copiem
 esses fatos, separem fato de hipótese e terminem com o próximo passo. O
-texto devolvido é conferido contra os fatos antes de entrar no cache
-(`texto_respeita_fatos`, app/services/ia/geracao.py).
+texto devolvido é filtrado por frase contra os fatos antes de entrar no
+cache (`filtrar_texto_pelos_fatos`, app/services/ia/geracao.py).
 """
 
 import json
