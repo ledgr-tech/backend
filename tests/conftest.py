@@ -634,20 +634,18 @@ def cabecalhos(token: str, empresa_id: uuid.UUID | None = None) -> dict[str, str
 
 def apagar_contas_por_cnpj(db_session, cnpjs: list[str]) -> None:
     """Apaga o que o cadastro pela API cria (issue #133): a conta, a primeira
-    empresa, a configuração dela e os usuários da conta, achados pelo CNPJ da
-    conta. Para os testes do `/register` e do `/register/google`, que não
+    empresa, a configuração dela, os extratos e os usuários, achados pelo
+    CNPJ da conta. Para os testes do `/register` e do `/register/google`, que não
     passam pelas fábricas. Sem commit."""
     conta_ids = list(db_session.scalars(select(Conta.id).where(Conta.cnpj.in_(cnpjs))))
     empresa_ids = list(
         db_session.scalars(select(Empresa.id).where(Empresa.conta_id.in_(conta_ids)))
     )
+    for empresa_id in empresa_ids:
+        _apagar_empresa(db_session, empresa_id)
     db_session.query(Usuario).filter(Usuario.conta_id.in_(conta_ids)).delete(
         synchronize_session=False
     )
-    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
     db_session.query(Conta).filter(Conta.id.in_(conta_ids)).delete(synchronize_session=False)
 
 
