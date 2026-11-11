@@ -24,8 +24,10 @@ e só deixa passar quando:
   a sessão dura 7 dias desde o login (ADR-003), mesmo que o front renove o
   token com `iat` e `exp` novos;
 - `auth_time` não é anterior a `usuarios.sessoes_validas_desde`, que
-  `encerrar_sessoes` grava na troca de senha, na redefinição pelo link e na
-  remoção do usuário.
+  `encerrar_sessoes` grava na troca de senha, na redefinição pelo link, na
+  troca de e-mail, na remoção do usuário, na desativação da conta e no
+  `POST /logout` (issue #197, app/api/auth.py), que derruba todos os
+  aparelhos da pessoa.
 
 Um relógio só: o `auth_time` do login, o `sessoes_validas_desde` e o
 "agora" das comparações saem todos de `_agora`, o relógio deste processo.
