@@ -6,6 +6,8 @@ aparelhos. Sem `jti` e sem lista de revogados. Chave de API e conexão MCP não
 são sessão do app e continuam valendo.
 """
 
+# ruff: noqa: F811 - as fixtures importadas de outros testes são parâmetros aqui
+
 import logging
 import time
 import uuid
@@ -42,7 +44,7 @@ def _sair(cabecalho: dict[str, str] | None = None):
 # --- o logout -------------------------------------------------------------------
 
 
-def test_logout_responde_204_sem_corpo_e_encerra_a_sessao(db_session, criar_usuario, token_de):  # noqa: F811
+def test_logout_responde_204_sem_corpo_e_encerra_a_sessao(db_session, criar_usuario, token_de):
     usuario = criar_usuario()
     assert usuario.sessoes_validas_desde is None
     cabecalho = token_de(usuario, auth_time=_login_ha(60))
@@ -60,7 +62,7 @@ def test_logout_responde_204_sem_corpo_e_encerra_a_sessao(db_session, criar_usua
     assert client.get("/extratos", headers=cabecalho).status_code == 401
 
 
-def test_logout_derruba_o_outro_aparelho_e_a_renovacao(db_session, criar_usuario, token_de):  # noqa: F811
+def test_logout_derruba_o_outro_aparelho_e_a_renovacao(db_session, criar_usuario, token_de):
     usuario = criar_usuario()
     login_do_celular = _login_ha(3600)
     celular = token_de(usuario, auth_time=login_do_celular)
@@ -77,7 +79,7 @@ def test_logout_derruba_o_outro_aparelho_e_a_renovacao(db_session, criar_usuario
 def test_login_depois_do_logout_vale_inclusive_no_mesmo_segundo(
     db_session,
     criar_usuario,
-    token_de,  # noqa: F811
+    token_de,
 ):
     usuario = criar_usuario()
     saida = datetime(2026, 11, 11, 15, 0, 0, 200_000, tzinfo=UTC)
@@ -97,7 +99,7 @@ def test_login_depois_do_logout_vale_inclusive_no_mesmo_segundo(
         assert client.get("/me", headers=antigo).status_code == 401
 
 
-def test_repetir_o_logout_com_o_mesmo_token_e_401(db_session, criar_usuario, token_de):  # noqa: F811
+def test_repetir_o_logout_com_o_mesmo_token_e_401(db_session, criar_usuario, token_de):
     usuario = criar_usuario()
     cabecalho = token_de(usuario, auth_time=_login_ha(60))
     assert _sair(cabecalho).status_code == 204
@@ -110,7 +112,7 @@ def test_repetir_o_logout_com_o_mesmo_token_e_401(db_session, criar_usuario, tok
     assert _recarregar(db_session, usuario).sessoes_validas_desde == desde
 
 
-def test_logout_nao_loga_email_nem_token(db_session, criar_usuario, token_de, caplog):  # noqa: F811
+def test_logout_nao_loga_email_nem_token(db_session, criar_usuario, token_de, caplog):
     usuario = criar_usuario()
     cabecalho = token_de(usuario)
 
@@ -141,7 +143,7 @@ def test_logout_com_token_de_outro_segredo_e_401(db_session, criar_usuario, gera
     assert _recarregar(db_session, usuario).sessoes_validas_desde is None
 
 
-def test_logout_com_sessao_vencida_e_401_e_nao_grava(db_session, criar_usuario, token_de):  # noqa: F811
+def test_logout_com_sessao_vencida_e_401_e_nao_grava(db_session, criar_usuario, token_de):
     usuario = criar_usuario()
     vencido = token_de(usuario, auth_time=_login_ha(DURACAO_SESSAO_SEGUNDOS + 60))
 
@@ -149,7 +151,7 @@ def test_logout_com_sessao_vencida_e_401_e_nao_grava(db_session, criar_usuario, 
     assert _recarregar(db_session, usuario).sessoes_validas_desde is None
 
 
-def test_logout_de_usuario_removido_e_401(db_session, criar_usuario, token_de):  # noqa: F811
+def test_logout_de_usuario_removido_e_401(db_session, criar_usuario, token_de):
     admin = criar_usuario()
     convidado = criar_usuario(conta_id=admin.conta_id)
     cabecalho = token_de(convidado, auth_time=_login_ha(60))
@@ -173,7 +175,7 @@ def test_logout_esta_entre_as_escritas_liberadas_da_conta_inativa():
     assert ("POST", "/logout") in conta_inativa.LIBERADAS
 
 
-def test_conta_inativa_sai_e_a_sessao_e_encerrada(db_session, criar_usuario, token_de):  # noqa: F811
+def test_conta_inativa_sai_e_a_sessao_e_encerrada(db_session, criar_usuario, token_de):
     usuario = criar_usuario()
     db_session.execute(
         update(Conta)
@@ -199,7 +201,7 @@ def test_conta_inativa_sai_e_a_sessao_e_encerrada(db_session, criar_usuario, tok
 def test_logout_nao_derruba_outro_usuario_da_conta_nem_de_outra_conta(
     db_session,
     criar_usuario,
-    token_de,  # noqa: F811
+    token_de,
 ):
     usuario = criar_usuario()
     colega = criar_usuario(conta_id=usuario.conta_id)
@@ -219,7 +221,7 @@ def test_logout_nao_derruba_outro_usuario_da_conta_nem_de_outra_conta(
 
 
 @pytest.mark.usefixtures("mcp")
-def test_chave_de_api_e_conexao_mcp_continuam_valendo_depois_do_logout(cenario, gerar_token):  # noqa: F811
+def test_chave_de_api_e_conexao_mcp_continuam_valendo_depois_do_logout(cenario, gerar_token):
     chave = cenario.chave_api()
     token_mcp = cenario.conectar()
     # Login de um minuto atrás: o `cenario.jwt` é do mesmo segundo do logout, e
@@ -238,7 +240,7 @@ def test_chave_de_api_e_conexao_mcp_continuam_valendo_depois_do_logout(cenario, 
 # --- rate limit -----------------------------------------------------------------
 
 
-def test_logout_limita_por_usuario(db_session, criar_usuario, token_de):  # noqa: F811
+def test_logout_limita_por_usuario(db_session, criar_usuario, token_de):
     usuario, outro = criar_usuario(), criar_usuario()
 
     # Um login novo por saída: o token da saída anterior já não vale.
@@ -250,7 +252,7 @@ def test_logout_limita_por_usuario(db_session, criar_usuario, token_de):  # noqa
     assert _sair(token_de(outro)).status_code == 204
 
 
-def test_logout_com_token_recusado_nao_gasta_o_limite(db_session, criar_usuario, token_de):  # noqa: F811
+def test_logout_com_token_recusado_nao_gasta_o_limite(db_session, criar_usuario, token_de):
     usuario = criar_usuario()
     for _ in range(35):
         assert _sair({"Authorization": "Bearer nao-e-um-jwt"}).status_code == 401
