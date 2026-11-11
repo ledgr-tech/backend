@@ -10,6 +10,13 @@ boas-vindas quando o e-mail está ligado (issue #78), e
 #80). O 401 do login é o mesmo pra qualquer falha, pra não revelar quais
 e-mails têm conta.
 
+Logout (issue #197, adendo de 11/11/2026 do ADR-016): `POST /logout` encerra a
+sessão no backend, e não só o cookie no front. Grava
+`usuarios.sessoes_validas_desde` (`encerrar_sessoes`), então derruba todos os
+aparelhos da pessoa: o token não tem `jti`, e não há lista de revogados. Chave
+de API e conexão MCP não são sessão do app e seguem valendo. Liberado para a
+conta inativa (app/core/conta_inativa.py).
+
 Além do rate limit por IP, o login tem bloqueio por conta (issue #67): 5 senhas
 erradas para o mesmo e-mail em 15 minutos bloqueiam esse e-mail por 15 minutos,
 com 429 e `Retry-After`. Ver app/core/bloqueio_login.py.
@@ -73,7 +80,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import bloqueio_login, plano, senha
-from app.core.auth import instante_do_login, normalizar_email
+from app.core.auth import (
+    encerrar_sessoes,
+    instante_do_login,
+    normalizar_email,
+    obter_usuario_autenticado,
+)
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
@@ -82,7 +94,9 @@ from app.core.localizacao import normalizar_cidade, normalizar_uf
 from app.core.rate_limit import (
     LIMITE_CADASTRO,
     LIMITE_LOGIN,
+    LIMITE_LOGOUT_POR_USUARIO,
     LIMITE_VERIFICACAO_CADASTRO,
+    chave_por_usuario,
     limiter,
 )
 from app.models import Configuracao, Conta, Empresa, Usuario
@@ -525,6 +539,37 @@ def registrar_login(db: Session, usuario: Usuario) -> None:
     usuario.ultimo_login_em = func.now()
     db.commit()
     db.refresh(usuario)
+
+
+@router.post(
+    "/logout",
+    status_code=http_status.HTTP_204_NO_CONTENT,
+    summary="Encerra a sessão da pessoa em todos os aparelhos",
+    responses={
+        204: {"description": "Sessão encerrada. Sem corpo."},
+        401: {
+            "description": (
+                "Token ausente, malformado, vencido, já encerrado (inclusive por um "
+                "logout anterior) ou de usuário removido."
+            )
+        },
+        429: {"description": "Limite de requisições por usuário excedido."},
+    },
+)
+@limiter.limit(LIMITE_LOGOUT_POR_USUARIO, key_func=chave_por_usuario)
+def logout(
+    request: Request,
+    usuario: Annotated[Usuario, Depends(obter_usuario_autenticado)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    """Encerra a sessão no backend (issue #197): todo token da pessoa emitido
+    antes de agora deixa de valer, em todos os aparelhos, inclusive o que
+    chamou. Um login novo vale em seguida. Chave de API e conexão MCP não são
+    afetadas. Funciona também com a conta inativa."""
+    usuario_id = usuario.id  # antes do commit, que expira o objeto
+    encerrar_sessoes(usuario)
+    db.commit()
+    logger.info("logout usuario_id=%s", usuario_id)
 
 
 def usuario_pelo_google_sub(db: Session, sub: str) -> Usuario | None:
