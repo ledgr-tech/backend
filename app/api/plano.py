@@ -2,14 +2,15 @@
 
 `POST /empresa/plano` está OBSOLETO (issues #166 e #167, ADR-026) e segue só por
 compatibilidade com o front em produção: o teste de 14 dias começa no
-cadastro, sem plano, e o plano passa a ser escolhido no checkout
+cadastro com TESTE_NO_CADASTRO_HABILITADO, sem plano, e o plano passa a ser
+escolhido no checkout
 (`POST /assinatura/checkout`). A rota escolhe a preferência de plano da CONTA
 (issue #133, ADR-019) e ignora o cabeçalho `X-Ledgr-Empresa`. Só o admin (403
 para os outros, pela dependency `obter_admin_autenticado`, como as rotas de
 equipe da #69). Plano fora de `PLANOS` é 422 no formato do FastAPI, com `loc`
 `["body", "plano"]`.
 
-- Não inicia mais o teste: o cadastro já iniciou. Só grava `contas.plano`.
+- Não inicia mais o teste: o cadastro pode iniciá-lo com a flag ligada. Só grava `contas.plano`.
 - Com assinatura viva (`active`, `trialing`, `past_due` ou `incomplete`), 409:
   a troca de plano de quem assina é a rota do PR 2.
 - O mesmo plano de novo é 200 sem mudar nada.

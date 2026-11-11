@@ -24,8 +24,10 @@ class Conta(Base, TimestampMixin):
     indisponível e nas contas cadastradas antes da #119.
 
     Plano e teste (issue #122, regra em app/core/plano.py), vindos de
-    `empresas` na #133: `teste_termina_em` é o cadastro mais 14 dias (issues
-    #166 e #167: o teste começa no cadastro, sem plano e sem cartão) e não muda
+    `empresas` na #133: `teste_termina_em` é nulo até o teste começar. Com
+    TESTE_NO_CADASTRO_HABILITADO, é o cadastro mais 14 dias (issues #166 e
+    #167, sem plano e sem cartão); contas existentes recebem o teste pelo
+    script de lançamento da cobrança. O fim não muda
     quando o plano é trocado; `plano` é só a preferência gravada pelo
     `POST /empresa/plano` (obsoleto): o plano que vale é o da assinatura
     quando ela existe (`plano_vigente`); `assinatura_ativa` marca o piloto, que

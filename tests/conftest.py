@@ -153,6 +153,8 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # produção; quem testa liga e troca a fonte do conteúdo por uma falsa.
     monkeypatch.setattr(settings, "assistente_habilitado", False)
     monkeypatch.setattr(settings, "ajuda_conteudo_url", "")
+    # Teste no cadastro (ADR-026): só os testes da flag ligada o iniciam.
+    monkeypatch.setattr(settings, "teste_no_cadastro_habilitado", False)
     # Bloqueio da conciliação pelo plano (issue #122): desligado, como em
     # produção até o gateway; quem testa o bloqueio liga no próprio teste.
     monkeypatch.setattr(settings, "plano_bloqueio_habilitado", False)

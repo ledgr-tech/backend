@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     cnpj_consulta_url: str = "https://brasilapi.com.br/api/cnpj/v1"
     cnpj_consulta_chave: str = ""
 
+    # Teste no cadastro (ADR-026): só começa os 14 dias com esta flag ligada.
+    # Falsa por padrão enquanto preços e planos não estiverem definidos e a
+    # cobrança estiver desligada. Contas existentes recebem o teste pelo
+    # scripts/iniciar_teste_das_contas.py, no lançamento da cobrança.
+    teste_no_cadastro_habilitado: bool = False
+
     # Plano e teste (issue #122): com esta variável ligada, o POST /conciliacoes
     # responde 402 na primeira conciliação de um extrato do banco quando a
     # empresa está sem plano ou com o teste encerrado (app/services/plano.py).

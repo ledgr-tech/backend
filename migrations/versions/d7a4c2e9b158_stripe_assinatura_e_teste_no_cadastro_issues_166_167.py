@@ -7,8 +7,8 @@
 - `eventos_stripe`: id, tipo e datas dos eventos do webhook, para idempotência
   e auditoria. Nunca o payload.
 - `pagamentos_stripe`: uma linha por fatura, base da issue #169.
-- Dados: a conta sem plano e sem teste ganha `teste_termina_em` = agora + 14
-  dias. Contas com plano e teste ficam como estão.
+- Dados: o teste das contas existentes é dado pelo script
+  `scripts/iniciar_teste_das_contas.py`, no lançamento da cobrança.
 
 Downgrade: volta o CHECK, o que exige plano e fim do teste juntos. A conta com
 teste e sem plano (as criadas depois desta migração) perde o fim do teste e
@@ -107,13 +107,6 @@ def upgrade() -> None:
         "pagamentos_stripe",
         ["conta_id", "ocorrido_em"],
         unique=False,
-    )
-
-    # O cadastro passa a começar o teste: as contas que ainda não escolheram
-    # plano (e por isso não têm teste) ganham os 14 dias a partir de agora.
-    op.execute(
-        "UPDATE contas SET teste_termina_em = now() + interval '14 days' "
-        "WHERE plano IS NULL AND teste_termina_em IS NULL"
     )
 
 

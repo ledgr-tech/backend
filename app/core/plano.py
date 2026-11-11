@@ -8,7 +8,8 @@ não está aqui: é contato comercial. Nenhum preço mora no backend.
 `situacao_da_conta` é a única conta da situação, usada pelo `GET /me`, pelo
 `POST /empresa/plano`, pelo `/admin` e pelo bloqueio do `POST /conciliacoes`,
 para nunca divergirem. É calculada, nunca gravada. Desde as issues #166 e #167
-(ADR-026), o cadastro começa o teste de 14 dias sem plano e sem cartão, e a
+(ADR-026), o cadastro, com TESTE_NO_CADASTRO_HABILITADO, começa o teste de 14 dias
+sem plano e sem cartão, e a
 cobrança é a assinatura da Stripe (`assinaturas_stripe`, mantida só pelo
 webhook). Na ordem:
 

@@ -69,6 +69,7 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "plano": None,
         "teste_termina_em": None,
         "situacao": "sem_plano",
+        "cobranca_habilitada": False,
         # Ainda não assinou pela Stripe (issues #166 e #167).
         "assinatura": None,
         # Sem limite configurado (issue #133): só o uso.
@@ -295,3 +296,21 @@ def test_me_com_endpoint_do_r2_invalido_continua_200(
 
     assert response.status_code == 200
     assert response.json()["guarda_arquivo_original"] is False
+
+
+@pytest.mark.parametrize(
+    ("habilitada", "chave", "esperado"),
+    [
+        (True, "sk_test_chave", True),
+        (True, "", False),
+        (True, "   ", False),
+        (False, "sk_test_chave", False),
+        (False, "", False),
+    ],
+)
+def test_sinal_de_cobranca(criar_usuario, cabecalho_de, monkeypatch, habilitada, chave, esperado):
+    monkeypatch.setattr(settings, "stripe_habilitado", habilitada)
+    monkeypatch.setattr(settings, "stripe_secret_key", chave)
+    resposta = _me(cabecalho_de(criar_usuario()))
+    assert resposta.status_code == 200
+    assert resposta.json()["cobranca_habilitada"] is esperado
