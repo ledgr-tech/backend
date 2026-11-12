@@ -117,6 +117,7 @@ from app.core.auth import (
     obter_sessao_autenticada,
     obter_usuario_autenticado,
 )
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.plano import Situacao, limite_da_conta
 from app.core.rate_limit import (
@@ -243,6 +244,7 @@ class MeResponse(BaseModel):
     plano: str | None
     teste_termina_em: datetime | None
     situacao: Situacao
+    cobranca_habilitada: bool
     assinatura: AssinaturaDaConta | None
     limites: Limites
     preferencias: Preferencias
@@ -290,6 +292,7 @@ def obter_dados_da_conta(
         ],
         metodos_login=_metodos_login(usuario),
         **resposta_do_plano(conta).model_dump(),
+        cobranca_habilitada=settings.stripe_disponivel(),
         assinatura=_assinatura(conta),
         limites=Limites(
             empresas=LimiteEmpresas(

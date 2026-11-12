@@ -87,6 +87,7 @@ from app.core.auth import (
     obter_usuario_autenticado,
 )
 from app.core.cnpj import normalizar as normalizar_cnpj
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.frontend_url import frontend_url_para_link
 from app.core.google import IdentidadeGoogle, identidade_ou_erro_http
@@ -343,9 +344,9 @@ def nova_conta(
 ) -> tuple[Conta, Empresa, Configuracao]:
     """A conta, a primeira empresa cliente dela, com o mesmo CNPJ e a mesma
     razão social, e a configuração dessa empresa (issue #133). A consulta na
-    Receita vale para as duas. O cadastro (pelo e-mail e pelo Google) começa o
-    teste de 14 dias, sem plano e sem cartão (issues #166 e #167, ADR-026): o
-    plano é escolhido no checkout. `cidade` e `uf` são os do cadastro, já
+    Receita vale para as duas. Com TESTE_NO_CADASTRO_HABILITADO, o cadastro
+    (pelo e-mail e pelo Google) começa o teste de 14 dias, sem plano e sem
+    cartão (issues #166 e #167, ADR-026): o plano é escolhido no checkout. `cidade` e `uf` são os do cadastro, já
     validados; ver `localizacao_da_conta` para o que a consulta completa."""
     verificado_em = cnpj_verificado_em(receita)
     cidade, uf = localizacao_da_conta(cidade, uf, receita)
@@ -356,7 +357,9 @@ def nova_conta(
         cidade=cidade,
         uf=uf,
         cnpj_verificado_em=verificado_em,
-        teste_termina_em=plano.agora() + plano.DURACAO_TESTE,
+        teste_termina_em=(
+            plano.agora() + plano.DURACAO_TESTE if settings.teste_no_cadastro_habilitado else None
+        ),
     )
     empresa = Empresa(
         id=uuid.uuid4(),

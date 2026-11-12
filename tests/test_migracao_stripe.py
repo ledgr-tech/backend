@@ -2,14 +2,14 @@
 
 Sai o CHECK que exigia plano e fim do teste juntos; entram `contas.stripe_customer_id`
 e as tabelas `assinaturas_stripe`, `eventos_stripe` e `pagamentos_stripe`. A conta
-sem plano e sem teste ganha o teste de 14 dias; as com plano e teste ficam como
+sem plano e sem teste continua sem teste; as com plano e teste ficam como
 estão. O downgrade volta o CHECK, ajustando as linhas que ele recusaria.
 
 Mesmo esquema de banco descartável de tests/test_migracao_painel_admin.py.
 """
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from conftest import alembic_cli
@@ -91,17 +91,13 @@ def test_upgrade_cria_as_tabelas_e_a_coluna_sem_o_check_e_o_downgrade_desfaz(ban
     assert TABELAS <= set(inspect(engine).get_table_names())
 
 
-def test_a_conta_sem_plano_e_sem_teste_ganha_14_dias_e_as_outras_ficam(banco):
+def test_upgrade_nao_inicia_teste_das_contas_existentes(banco):
     url, engine, contas = banco
-    antes = datetime.now(UTC)
-
     alembic_cli(url, "upgrade", REVISAO)
-
-    depois = datetime.now(UTC)
     with engine.connect() as conn:
         plano, teste = _plano_e_teste(conn, contas["sem_plano"])
         assert plano is None
-        assert antes + timedelta(days=14) <= teste <= depois + timedelta(days=14)
+        assert teste is None
         assert _plano_e_teste(conn, contas["com_teste"]) == ("padrao", FIM)
 
 
