@@ -5,62 +5,16 @@
 #    pip-compile --strip-extras requirements.in
 #
 anyio==4.15.1
-    # via
-    #   -c ../requirements.txt
-    #   httpx
 boto3==1.43.118
-    # via
-    #   -c ../requirements.txt
-    #   -r requirements.in
 botocore==1.43.118
-    # via
-    #   -c ../requirements.txt
-    #   boto3
-    #   s3transfer
-certifi==2026.7.22
-    # via
-    #   -c ../requirements.txt
-    #   httpcore
-    #   httpx
+certifi==2026.10.18
 h11==0.16.0
-    # via
-    #   -c ../requirements.txt
-    #   httpcore
 httpcore==1.0.9
-    # via
-    #   -c ../requirements.txt
-    #   httpx
 httpx==0.28.1
-    # via
-    #   -c ../requirements.txt
-    #   -r requirements.in
 idna==3.20
-    # via
-    #   -c ../requirements.txt
-    #   anyio
-    #   httpx
 jmespath==1.1.0
-    # via
-    #   -c ../requirements.txt
-    #   boto3
-    #   botocore
 python-dateutil==2.9.0.post0
-    # via
-    #   -c ../requirements.txt
-    #   botocore
 s3transfer==0.19.3
-    # via
-    #   -c ../requirements.txt
-    #   boto3
 six==1.17.0
-    # via
-    #   -c ../requirements.txt
-    #   python-dateutil
 typing-extensions==4.16.0
-    # via
-    #   -c ../requirements.txt
-    #   anyio
 urllib3==2.8.0
-    # via
-    #   -c ../requirements.txt
-    #   botocore
