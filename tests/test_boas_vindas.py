@@ -246,12 +246,15 @@ def test_texto_puro_completo(monkeypatch):
         "suporte.\n\n"
         "Equipe Ledgr"
     )
-    # sem script nem recurso de terceiro (issue #188): só links do site e as imagens do front
+    # sem script nem recurso de terceiro (issues #188 e #204): só links do site (o do
+    # rodapé é a própria base), as imagens e as fontes do front
     assert "<script" not in mensagem.html
     enderecos = re.findall(r'(?:src|href)="(https?://[^"]+)"', mensagem.html)
+    enderecos += re.findall(r"url\('([^']+)'\)", mensagem.html)
     assert enderecos
     assert all(
-        e.startswith((f"{FRONTEND_URL_TESTE}/email/", "https://ledgrfinance.com.br/"))
+        e == FRONTEND_URL_TESTE
+        or e.startswith((f"{FRONTEND_URL_TESTE}/email/", "https://ledgrfinance.com.br/"))
         for e in enderecos
     )
 
