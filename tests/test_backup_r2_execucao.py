@@ -256,3 +256,36 @@ def test_main_com_falha_ao_criar_cliente_r2_manda_fail_sem_vazar(monkeypatch, ca
     assert hc.chamadas == ["inicio", "falha"]
     assert "ValueError" in caplog.text
     assert "cloudflarestorage" not in caplog.text
+
+
+# --- saída do processo (06/11: o Railway perdia o log da falha) -------------
+
+
+def test_rodar_com_falha_espera_antes_de_sair():
+    # Em 06/11 a falha de configuração saiu em 1 s e o deploy no Railway mostrou
+    # só "Crashed", sem a linha do log que dizia quais variáveis faltavam.
+    esperas: list[float] = []
+
+    assert b.rodar(lambda: 1, dormir=esperas.append) == 1
+    assert esperas == [b.ESPERA_ANTES_DE_SAIR_COM_ERRO_SEGUNDOS]
+    assert b.ESPERA_ANTES_DE_SAIR_COM_ERRO_SEGUNDOS >= 10
+
+
+def test_rodar_com_sucesso_sai_sem_esperar():
+    esperas: list[float] = []
+
+    assert b.rodar(lambda: 0, dormir=esperas.append) == 0
+    assert esperas == []
+
+
+def test_rodar_com_excecao_inesperada_loga_so_a_classe_e_espera(caplog):
+    esperas: list[float] = []
+
+    def explode():
+        raise RuntimeError("Could not connect to https://abc.r2.cloudflarestorage.com")
+
+    with caplog.at_level(logging.DEBUG, logger="backup"):
+        assert b.rodar(explode, dormir=esperas.append) == 1
+    assert esperas == [b.ESPERA_ANTES_DE_SAIR_COM_ERRO_SEGUNDOS]
+    assert "RuntimeError" in caplog.text
+    assert "cloudflarestorage" not in caplog.text
