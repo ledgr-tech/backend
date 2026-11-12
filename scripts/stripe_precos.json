@@ -1,0 +1,28 @@
+{
+  "_aviso": "VALORES PROVISÓRIOS, só para a homologação em modo de teste. Os preços reais ainda não foram decididos; ajuste aqui e rode scripts/stripe_catalogo.py de novo (o Price é imutável na Stripe: o script cria um novo, transfere a lookup_key e arquiva o antigo).",
+  "provisorio": true,
+  "moeda": "brl",
+  "planos": {
+    "essencial": {
+      "nome": "Ledgr Essencial",
+      "mensal": 14900,
+      "trimestral": 42500,
+      "semestral": 80500,
+      "anual": 152000
+    },
+    "padrao": {
+      "nome": "Ledgr Padrão",
+      "mensal": 29900,
+      "trimestral": 85500,
+      "semestral": 161500,
+      "anual": 305000
+    },
+    "avancado": {
+      "nome": "Ledgr Avançado",
+      "mensal": 59900,
+      "trimestral": 171000,
+      "semestral": 323000,
+      "anual": 610000
+    }
+  }
+}

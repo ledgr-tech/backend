@@ -124,7 +124,9 @@ def test_modo_desconhecido_levanta():
 
 
 # Saída de serializar_contexto na develop antes da issue #87, para o mesmo
-# contexto: o modo "mascarada" tem de reproduzi-la byte a byte.
+# contexto: o modo "mascarada" tem de reproduzir os mesmos campos (a máscara
+# das descrições igual). O prompt v3 acrescentou os fatos calculados, que
+# saem do recorte antes da comparação.
 SERIALIZACAO_ANTES_DA_87 = (
     '{"candidatos":[{"diferenca_dias":2,"diferenca_valor":null,"lancamento":{"data":'
     '"2026-09-22","descricao":"Pagto boleto Fornecedor X Ltda [CNPJ] [EMAIL] nf [NUMERO]",'
@@ -139,8 +141,23 @@ CONTEXTO_COM_DADOS = _contexto(
 )
 
 
+_CAMPOS_V3 = {"lado_do_item", "tolerancia_dias", "total_candidatos", "periodo_outro_lado"}
+_CAMPOS_V3 |= {"par_gravado", "fatos"}
+_CAMPOS_V3_CANDIDATO = {
+    "dias_assinados",
+    "diferenca_percentual",
+    "similaridade_descricao",
+    "cruza_fim_de_semana",
+}
+
+
 def test_modo_mascarada_serializa_igual_a_antes():
-    assert serializar_contexto(CONTEXTO_COM_DADOS, modo=MODO_MASCARADA) == SERIALIZACAO_ANTES_DA_87
+    corpo = json.loads(serializar_contexto(CONTEXTO_COM_DADOS, modo=MODO_MASCARADA))
+    recorte = {k: v for k, v in corpo.items() if k not in _CAMPOS_V3}
+    recorte["candidatos"] = [
+        {k: v for k, v in c.items() if k not in _CAMPOS_V3_CANDIDATO} for c in corpo["candidatos"]
+    ]
+    assert recorte == json.loads(SERIALIZACAO_ANTES_DA_87)
 
 
 def test_modo_termos_e_o_padrao_da_serializacao():

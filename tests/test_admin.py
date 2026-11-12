@@ -6,10 +6,10 @@ import io
 import secrets
 import uuid
 from datetime import UTC, date, datetime, timedelta
-from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
-from conftest import SENHA_USUARIO_TESTE, cabecalhos, empresa_unica
+from conftest import SENHA_USUARIO_TESTE
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text, update
 
@@ -38,55 +38,6 @@ OFX = (__import__("pathlib").Path(__file__).parent / "fixtures" / "extrato_valid
 
 def _agora_em_segundos() -> int:
     return int(datetime.now(UTC).timestamp())
-
-
-@pytest.fixture
-def operador(db_session, criar_usuario, gerar_token):
-    """`operador()` cria um usuário numa conta própria (a do Ledgr) e o inclui
-    como operador; `auth_time` muda a idade do login."""
-
-    def _novo(nome: str = "Olga Operadora", auth_time: int | None = None):
-        usuario = criar_usuario(nome=nome)
-        registro = OperadorLedgr(usuario_id=usuario.id, incluido_por="teste")
-        db_session.add(registro)
-        db_session.commit()
-        extra = {} if auth_time is None else {"auth_time": auth_time}
-        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, **extra)
-        return SimpleNamespace(usuario=usuario, registro=registro, headers=cabecalhos(token))
-
-    return _novo
-
-
-@pytest.fixture
-def cliente(db_session, criar_usuario, criar_empresa, gerar_token):
-    """`cliente()` cria uma conta cliente com admin, gestor e analista, e uma
-    empresa cliente a mais com dado que o painel nunca pode mostrar."""
-
-    def _nova(razao_social: str = "Escritório Cliente Ltda", email: str | None = None):
-        admin_da_conta = criar_usuario(nome="Ana Admin")
-        conta_id = admin_da_conta.conta_id
-        db_session.execute(
-            update(Conta).where(Conta.id == conta_id).values(razao_social=razao_social)
-        )
-        if email:
-            admin_da_conta.email = email
-        db_session.commit()
-        usuarios = {
-            "admin": admin_da_conta,
-            "gestor": criar_usuario(conta_id=conta_id, nome="Gil Gestor", papel="gestor"),
-            "analista": criar_usuario(conta_id=conta_id, nome="Ada Analista", papel="analista"),
-        }
-        empresa_id = empresa_unica(db_session, conta_id)
-        criar_empresa("Padaria Segredo do Cliente", conta_id=conta_id)
-        headers = {
-            papel: cabecalhos(gerar_token(u.conta_id, usuario_id=u.id), empresa_id)
-            for papel, u in usuarios.items()
-        }
-        return SimpleNamespace(
-            conta_id=conta_id, usuarios=usuarios, empresa_id=empresa_id, headers=headers
-        )
-
-    return _nova
 
 
 def _contas(headers, **params):
@@ -376,7 +327,8 @@ def test_detalhe_com_o_contato_e_o_uso(
 ):
     o = operador()
     c = cliente("Escritório Uso Ltda", email="contato.uso@escritorio.com.br")
-    agora = datetime.now(UTC)
+    # O mês é o civil de São Paulo, o da franquia (issues #166 e #167).
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
     mes_atual, neste_mes = _mes(agora, 0)
     mes_passado, no_mes_passado = _mes(agora, 1)
     _, ha_quatro_meses = _mes(agora, 4)
@@ -437,6 +389,8 @@ def test_nenhum_dado_do_cliente_no_painel(
         "id",
         "razao_social",
         "cnpj",
+        "cidade",
+        "uf",
         "plano",
         "situacao",
         "teste_termina_em",
@@ -447,12 +401,17 @@ def test_nenhum_dado_do_cliente_no_painel(
         "inativacao",
         "ultimo_login_em",
         "uso",
+        "assinatura",
+        "pagamentos",
+        "cupons",
         "eventos",
     }
     assert set(lista.json()["itens"][0]) == {
         "id",
         "razao_social",
         "cnpj",
+        "cidade",
+        "uf",
         "plano",
         "situacao",
         "teste_termina_em",

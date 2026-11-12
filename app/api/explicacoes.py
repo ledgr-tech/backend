@@ -12,7 +12,7 @@ inexistente ou de outra empresa devolve 404 com a MESMA mensagem (sem
 confirmar a existência do id de outra empresa, mesmo padrão de
 app/api/conciliacoes.py). (b)/(c) `montar_contexto_divergencia`
 (app/services/ia/contexto.py) já valida elegibilidade (levanta
-`ValueError` pra `match_exato`/`match_tolerancia`/desconhecido, traduzido
+`ValueError` pra `match_exato`/`match_tolerancia`/`match_agrupado`/desconhecido, traduzido
 aqui pra 422) e monta o contexto. (d) Provedor indisponível
 (`obter_provedor()` devolveu `None`: recurso desligado, sem chave ou
 provedor desconhecido) — 200 com o fallback determinístico,
@@ -56,6 +56,24 @@ variável local logo após a leitura, antes do primeiro `rollback()` — nada
 mais no corpo da função lê atributo de `conciliacao`/`cache_existente`
 depois disso.
 
+Detalhes (fix da explicação detalhada): a resposta do POST leva
+`detalhes`, as linhas já formatadas do contexto (`rotulo` e `valor`, em
+pt-BR, sem descrição; app/services/ia/detalhes.py), em todos os caminhos:
+IA ligada, desligada, limite, erro e cache. No fallback, `explicacao` é o
+texto determinístico com os números (`texto_deterministico`), não mais o
+motivo genérico; com a IA respondendo, continua o texto da IA. O texto da
+IA é filtrado por frase antes de gravar (prompt v3): a frase com data, valor
+ou número de dias que não está nos fatos sai, e o resto é gravado e devolvido
+como texto da IA. Só quando nenhuma frase sobra a resposta vira o fallback
+com `erro_provedor`, sem gravar.
+
+`GET /explicacoes/{conciliacao_id}/detalhes`: somente leitura, devolve
+`{conciliacao_id, status, texto, detalhes}` com o texto determinístico. Não
+chama o provedor, não conta no limite diário, não grava nada (nem a ligação
+da linha) e funciona com `LLM_HABILITADO` desligado. Mesmas dependências,
+mesmo 404 (inexistente ou de outra empresa) e mesmo 422 (match) do POST.
+Sem rate limit próprio, como o POST e as rotas de conciliação.
+
 O provedor entra por dependência do FastAPI (`obter_provedor_dependencia`)
 pra testes substituírem por um provedor falso via
 `app.dependency_overrides`, sem chamar a API real.
@@ -78,10 +96,12 @@ from sqlalchemy.orm import Session
 from app.core.auth import obter_empresa_id_ativa
 from app.core.database import get_db
 from app.services.ia import ProvedorDeIA
+from app.services.ia.detalhes import DetalheLinha, montar_detalhes, texto_deterministico
 from app.services.ia.geracao import (
     LinhaNaoEncontrada,
     explicar_linha,
     obter_provedor_dependencia,
+    preparar,
 )
 
 __all__ = ["obter_provedor_dependencia", "router"]
@@ -101,6 +121,17 @@ class ExplicacaoResponse(BaseModel):
     gerada_por_ia: bool
     em_cache: bool
     indisponibilidade: Literal["desabilitado", "erro_provedor", "limite_diario"] | None
+    detalhes: list[DetalheLinha]
+
+
+class DetalhesResponse(BaseModel):
+    conciliacao_id: uuid.UUID
+    status: str
+    texto: str
+    detalhes: list[DetalheLinha]
+
+
+_NAO_ENCONTRADA = "Conciliação não encontrada."
 
 
 @router.post("", response_model=ExplicacaoResponse)
@@ -115,7 +146,7 @@ def criar_explicacao(
     except LinhaNaoEncontrada as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="Conciliação não encontrada.",
+            detail=_NAO_ENCONTRADA,
         ) from exc
     except ValueError as exc:
         raise HTTPException(
@@ -123,3 +154,29 @@ def criar_explicacao(
             detail=str(exc),
         ) from exc
     return ExplicacaoResponse(conciliacao_id=corpo.conciliacao_id, **vars(resultado))
+
+
+@router.get("/{conciliacao_id}/detalhes", response_model=DetalhesResponse)
+def obter_detalhes(
+    conciliacao_id: uuid.UUID,
+    empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
+    db: Annotated[Session, Depends(get_db)],
+) -> DetalhesResponse:
+    try:
+        preparo = preparar(db, empresa_id, conciliacao_id, com_cache=False)
+    except LinhaNaoEncontrada as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail=_NAO_ENCONTRADA
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    finally:
+        db.rollback()  # só leitura
+    return DetalhesResponse(
+        conciliacao_id=conciliacao_id,
+        status=preparo.status,
+        texto=texto_deterministico(preparo.contexto),
+        detalhes=montar_detalhes(preparo.contexto),
+    )

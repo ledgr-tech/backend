@@ -25,12 +25,17 @@ Resumo congelado gravado em cada fechamento:
     {
       "pares": [{"extrato_banco_id", "extrato_sistema_id", "execucao_id",
                  "rodada", "nome_arquivo_banco", "nome_arquivo_sistema"}],
-      "contagens": {"total", "match_exato", "match_tolerancia", "duplicado",
+      "contagens": {"total", "match_exato", "match_tolerancia", "match_agrupado",
+                    "agrupamentos", "duplicado",
                     "sem_correspondencia", "tarifa_bancaria",
                     "divergente_valor", "divergente_data"},
       "justificadas": int, "aguardando_aprovacao": int, "pendentes": int,
       "linhas_nao_lidas": int, "valor_em_aberto": "0.00"
     }
+
+`match_agrupado` (linhas) e `agrupamentos` (grupos) vêm da issue #131; os
+resumos congelados antes dela não têm as duas chaves, que saem 0 na resposta
+(`agrupamentos` fica fora da soma de `total`).
 
 `justificadas` são só as aprovadas desde a issue #132. Os resumos congelados
 antes dela não têm `aguardando_aprovacao`, que sai 0 na resposta; o
@@ -85,11 +90,14 @@ class ContagensResumoResponse(BaseModel):
     total: int
     match_exato: int
     match_tolerancia: int
+    # Ausentes nos resumos congelados antes da issue #131 (agrupamento): saem 0.
+    match_agrupado: int = 0
     duplicado: int
     sem_correspondencia: int
     tarifa_bancaria: int
     divergente_valor: int
     divergente_data: int
+    agrupamentos: int = 0
 
 
 class ResumoResponse(BaseModel):

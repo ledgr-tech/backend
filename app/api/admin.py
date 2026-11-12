@@ -15,22 +15,39 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
 
 - `GET /admin/contas`: busca (razão social sem acento, CNPJ com ou sem
   máscara, e-mail do admin), filtro por `situacao` (`sem_plano`, `teste`,
-  `teste_encerrado` e `ativo` entre as contas não inativas; `inativa`, as
-  inativas), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
+  `teste_encerrado`, `ativo`, `pagamento_pendente` e `assinatura_encerrada`
+  entre as contas não inativas; `inativa`, as inativas), `uf` (uma das 27
+  siglas, ou `nao_informada`; issue #184), `ordem` (`criada_em`, mais novas primeiro; `teste_termina_em`,
   o fim mais próximo primeiro, sem teste no fim), `limit` e `offset`.
+- `GET /admin/contas/por-uf` (issue #184): as contas por UF, com o total de
+  contas e quantas estão assinando, mais o grupo das sem UF informada
+  (`nao_informada`: as anteriores à #184 e as que não a informaram). "Assinando"
+  é a situação `ativo` do painel, a mesma do filtro `situacao=ativo` e de
+  `plano.situacao_da_conta`: conta não inativa com piloto ligado
+  (`assinatura_ativa`) ou assinatura da Stripe `active` ou `trialing`. O total
+  conta todas as contas, inclusive as inativas. Rota antes da do detalhe, que
+  de outro modo a pegaria como `conta_id`.
 - `GET /admin/contas/{conta_id}`: o item, o admin (nome e e-mail, o contato
-  comercial), a inativação, o último login, o uso e os últimos eventos.
+  comercial), a inativação, o último login, o uso, a assinatura (com o motivo e
+  a origem do cancelamento), os últimos 12 pagamentos, os cupons enviados e os
+  últimos eventos.
 - `POST /admin/contas/{conta_id}/inativar` e `/reativar` (`motivo`) e
   `/piloto` (`ativo` e `motivo`): gravam o estado em `contas` e um evento em
   `eventos_conta`. Repetir dá 409.
 
+Pagamentos, cancelamentos, vencimentos e cupons (issue #169) ficam em
+app/api/admin_assinaturas.py, no mesmo prefixo e com a mesma guarda.
+
 O uso são só contagens: empresas, usuários ativos, convites pendentes,
 conciliações no total, extratos do banco conciliados pela primeira vez em
-cada um dos últimos 3 meses (a unidade de cobrança da #122, mês em UTC),
+cada um dos últimos 3 meses (a unidade de cobrança da #122; mês civil de São
+Paulo, o da franquia das issues #166 e #167),
 chaves de API, conexões MCP e links públicos ativos. Nunca lançamento,
 descrição, justificativa, nome de arquivo nem dado das empresas clientes.
 
-Logs só com ids e o resultado, nunca nome, e-mail nem o termo buscado.
+Cidade e UF (issue #184) vêm no item da lista e no detalhe, `null` quando a
+conta não os informou. Logs só com ids e o resultado, nunca nome, e-mail,
+cidade, UF nem o termo buscado.
 """
 
 import logging
@@ -49,6 +66,7 @@ from app.api.empresas import _MASCARA_CNPJ, _SEM_ACENTO_PYTHON, _nome_normalizad
 from app.core import plano
 from app.core.auth import SessaoAutenticada, _agora, obter_sessao_autenticada
 from app.core.database import SessionLocal, get_db
+from app.core.localizacao import UFS
 from app.core.rate_limit import (
     LIMITE_ADMIN_ACAO_POR_USUARIO,
     LIMITE_ADMIN_LEITURA_POR_USUARIO,
@@ -57,19 +75,23 @@ from app.core.rate_limit import (
 )
 from app.models import (
     AcessoAdmin,
+    AssinaturaStripe,
     ChaveApi,
     ConexaoMcp,
     Conta,
     Convite,
+    CupomEnviado,
     Empresa,
     EventoConta,
     ExecucaoConciliacao,
     Fechamento,
     LinkRelatorio,
     OperadorLedgr,
+    PagamentoStripe,
     Usuario,
 )
 from app.services.convites import condicoes_pendente
+from app.services.plano import FUSO_DA_FRANQUIA
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +102,25 @@ RETENCAO_ACESSOS = timedelta(days=365)
 LIMPEZA_POR_ACESSO = 500
 MESES_DE_USO = 3
 EVENTOS_NO_DETALHE = 20
+PAGAMENTOS_NO_DETALHE = 12
+CUPONS_NO_DETALHE = 20
 SO_OPERADOR = "Acesso restrito à equipe do Ledgr."
 LOGIN_ANTIGO = "Entre de novo para usar o painel."
 CONTA_NAO_ENCONTRADA = "Conta não encontrada."
 
-SituacaoDoFiltro = Literal["sem_plano", "teste", "teste_encerrado", "ativo", "inativa"]
+SituacaoDoFiltro = Literal[
+    "sem_plano",
+    "teste",
+    "teste_encerrado",
+    "ativo",
+    "pagamento_pendente",
+    "assinatura_encerrada",
+    "inativa",
+]
 Ordem = Literal["criada_em", "teste_termina_em"]
+UF_NAO_INFORMADA = "nao_informada"
+# As 27 siglas (app/core/localizacao.py) ou "nao_informada", para o filtro `uf`.
+UfDoFiltro = Literal[*UFS, "nao_informada"]
 
 
 @dataclass(frozen=True)
@@ -163,6 +198,8 @@ class ContaItemResponse(BaseModel):
     id: uuid.UUID
     razao_social: str
     cnpj: str
+    cidade: str | None
+    uf: str | None
     plano: str | None
     situacao: plano.Situacao
     teste_termina_em: datetime | None
@@ -176,6 +213,22 @@ class ContaListaResponse(BaseModel):
     limit: int
     offset: int
     itens: list[ContaItemResponse]
+
+
+class ContasDaUfResponse(BaseModel):
+    contas: int
+    assinando: int
+
+
+class ContasPorUfItemResponse(ContasDaUfResponse):
+    uf: str
+
+
+class ContasPorUfResponse(BaseModel):
+    contas: int
+    assinando: int
+    ufs: list[ContasPorUfItemResponse]
+    nao_informada: ContasDaUfResponse
 
 
 class AdminDaContaResponse(BaseModel):
@@ -212,11 +265,48 @@ class EventoResponse(BaseModel):
     em: datetime
 
 
+class AssinaturaResponse(BaseModel):
+    status: str
+    plano: str
+    periodo: str
+    periodo_atual_fim: datetime | None
+    cancelar_no_fim_do_periodo: bool
+    cancelada_em: datetime | None
+    motivo_cancelamento: str | None
+    origem_cancelamento: str | None
+
+
+class PagamentoResponse(BaseModel):
+    id: uuid.UUID
+    valor_centavos: int
+    moeda: str
+    status: str
+    periodo_inicio: datetime | None
+    periodo_fim: datetime | None
+    ocorrido_em: datetime
+
+
+class CupomEnviadoResponse(BaseModel):
+    id: uuid.UUID
+    cupom: str
+    desconto: str
+    forma: str
+    codigo: str | None
+    expira_em: datetime | None
+    email_enviado: bool
+    usado_em: datetime | None
+    operador: str | None
+    em: datetime
+
+
 class ContaDetalheResponse(ContaItemResponse):
     admin: AdminDaContaResponse | None
     inativacao: InativacaoResponse | None
     ultimo_login_em: datetime | None
     uso: UsoResponse
+    assinatura: AssinaturaResponse | None
+    pagamentos: list[PagamentoResponse]
+    cupons: list[CupomEnviadoResponse]
     eventos: list[EventoResponse]
 
 
@@ -243,9 +333,17 @@ class PilotoRequest(MotivoRequest):
 
 def _situacao(agora: datetime):
     """A situação comercial em SQL, pela mesma regra de `situacao_da_conta`."""
+    status = (
+        select(AssinaturaStripe.status)
+        .where(AssinaturaStripe.conta_id == Conta.id)
+        .scalar_subquery()
+    )
     return case(
         (Conta.assinatura_ativa, "ativo"),
-        (Conta.plano.is_(None), "sem_plano"),
+        (status.in_(plano.STATUS_ATIVOS), "ativo"),
+        (status.in_(plano.STATUS_PAGAMENTO_PENDENTE), "pagamento_pendente"),
+        (status.in_(plano.STATUS_ENCERRADOS), "assinatura_encerrada"),
+        (Conta.teste_termina_em.is_(None), "sem_plano"),
         (Conta.teste_termina_em > agora, "teste"),
         else_="teste_encerrado",
     )
@@ -285,6 +383,8 @@ def _item(conta: Conta, situacao: str) -> dict:
         "id": conta.id,
         "razao_social": conta.razao_social,
         "cnpj": conta.cnpj,
+        "cidade": conta.cidade,
+        "uf": conta.uf,
         "plano": conta.plano,
         "situacao": situacao,
         "teste_termina_em": conta.teste_termina_em,
@@ -295,7 +395,8 @@ def _item(conta: Conta, situacao: str) -> dict:
 
 
 def _meses(agora: datetime) -> list[str]:
-    ano, mes = agora.year, agora.month
+    local = agora.astimezone(FUSO_DA_FRANQUIA)
+    ano, mes = local.year, local.month
     meses = []
     for _ in range(MESES_DE_USO):
         meses.append(f"{ano:04d}-{mes:02d}")
@@ -318,7 +419,7 @@ def _uso(db: Session, conta_id: uuid.UUID, agora: datetime) -> UsoResponse:
         .group_by(ExecucaoConciliacao.extrato_banco_id)
         .subquery()
     )
-    mes = func.to_char(primeiras.c.primeira, "YYYY-MM")
+    mes = func.to_char(func.timezone(FUSO_DA_FRANQUIA.key, primeiras.c.primeira), "YYYY-MM")
     meses = _meses(agora)
     por_mes = dict(db.execute(select(mes, func.count()).where(mes.in_(meses)).group_by(mes)).all())
     return UsoResponse(
@@ -363,6 +464,49 @@ def _conta(db: Session, conta_id: uuid.UUID, *, travar: bool = False) -> Conta:
     return conta
 
 
+def _assinatura_da_conta(conta: Conta) -> AssinaturaResponse | None:
+    assinatura = conta.assinatura_stripe
+    if assinatura is None:
+        return None
+    return AssinaturaResponse(
+        status=assinatura.status,
+        plano=assinatura.plano,
+        periodo=assinatura.periodo,
+        periodo_atual_fim=assinatura.periodo_atual_fim,
+        cancelar_no_fim_do_periodo=assinatura.cancelar_no_fim_do_periodo,
+        cancelada_em=assinatura.cancelada_em,
+        motivo_cancelamento=assinatura.motivo_cancelamento,
+        origem_cancelamento=assinatura.origem_cancelamento,
+    )
+
+
+def _pagamento(pagamento: PagamentoStripe) -> PagamentoResponse:
+    return PagamentoResponse(
+        id=pagamento.id,
+        valor_centavos=pagamento.valor_centavos,
+        moeda=pagamento.moeda,
+        status=pagamento.status,
+        periodo_inicio=pagamento.periodo_inicio,
+        periodo_fim=pagamento.periodo_fim,
+        ocorrido_em=pagamento.ocorrido_em,
+    )
+
+
+def _cupom_enviado(cupom: CupomEnviado) -> CupomEnviadoResponse:
+    return CupomEnviadoResponse(
+        id=cupom.id,
+        cupom=cupom.cupom_nome,
+        desconto=cupom.desconto,
+        forma=cupom.forma,
+        codigo=cupom.codigo,
+        expira_em=cupom.expira_em,
+        email_enviado=cupom.email_enviado,
+        usado_em=cupom.usado_em,
+        operador=cupom.operador_nome,
+        em=cupom.em,
+    )
+
+
 def _detalhe(db: Session, conta: Conta) -> ContaDetalheResponse:
     agora = plano.agora()
     admin = db.execute(
@@ -388,6 +532,25 @@ def _detalhe(db: Session, conta: Conta) -> ContaDetalheResponse:
             select(func.max(Usuario.ultimo_login_em)).where(Usuario.conta_id == conta.id)
         ),
         uso=_uso(db, conta.id, agora),
+        assinatura=_assinatura_da_conta(conta),
+        pagamentos=[
+            _pagamento(pagamento)
+            for pagamento in db.scalars(
+                select(PagamentoStripe)
+                .where(PagamentoStripe.conta_id == conta.id)
+                .order_by(PagamentoStripe.ocorrido_em.desc(), PagamentoStripe.id.desc())
+                .limit(PAGAMENTOS_NO_DETALHE)
+            )
+        ],
+        cupons=[
+            _cupom_enviado(cupom)
+            for cupom in db.scalars(
+                select(CupomEnviado)
+                .where(CupomEnviado.conta_id == conta.id)
+                .order_by(CupomEnviado.em.desc(), CupomEnviado.id.desc())
+                .limit(CUPONS_NO_DETALHE)
+            )
+        ],
         eventos=[
             EventoResponse(
                 tipo=evento.tipo,
@@ -429,6 +592,7 @@ def listar_contas(
     db: Annotated[Session, Depends(get_db)],
     busca: Annotated[str | None, Query(max_length=100)] = None,
     situacao: Annotated[SituacaoDoFiltro | None, Query()] = None,
+    uf: Annotated[UfDoFiltro | None, Query()] = None,
     ordem: Annotated[Ordem, Query()] = "criada_em",
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -442,6 +606,10 @@ def listar_contas(
         consulta = consulta.where(Conta.inativada_em.is_not(None))
     elif situacao is not None:
         consulta = consulta.where(Conta.inativada_em.is_(None), situacao_sql == situacao)
+    if uf == UF_NAO_INFORMADA:
+        consulta = consulta.where(Conta.uf.is_(None))
+    elif uf is not None:
+        consulta = consulta.where(Conta.uf == uf)
     if ordem == "teste_termina_em":
         consulta = consulta.order_by(Conta.teste_termina_em.asc().nulls_last(), Conta.id)
     else:
@@ -452,6 +620,42 @@ def listar_contas(
         limit=limit,
         offset=offset,
         itens=[ContaItemResponse(**_item(linha.Conta, linha.situacao)) for linha in linhas],
+    )
+
+
+@router.get("/contas/por-uf", response_model=ContasPorUfResponse)
+@limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+def contar_contas_por_uf(
+    request: Request,
+    _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ContasPorUfResponse:
+    """Onde estão os clientes e onde estão assinando (issue #184). "Assinando"
+    é a situação `ativo` do painel, de conta não inativa (`_situacao`)."""
+    assinando = and_(Conta.inativada_em.is_(None), _situacao(plano.agora()) == "ativo")
+    linhas = db.execute(
+        select(
+            Conta.uf,
+            func.count().label("contas"),
+            func.count().filter(assinando).label("assinando"),
+        ).group_by(Conta.uf)
+    ).all()
+    por_uf = {linha.uf: linha for linha in linhas}
+    sem_uf = por_uf.pop(None, None)
+    itens = sorted(
+        (
+            ContasPorUfItemResponse(uf=linha.uf, contas=linha.contas, assinando=linha.assinando)
+            for linha in por_uf.values()
+        ),
+        key=lambda item: (-item.contas, item.uf),
+    )
+    return ContasPorUfResponse(
+        contas=sum(linha.contas for linha in linhas),
+        assinando=sum(linha.assinando for linha in linhas),
+        ufs=itens,
+        nao_informada=ContasDaUfResponse(
+            contas=sem_uf.contas if sem_uf else 0, assinando=sem_uf.assinando if sem_uf else 0
+        ),
     )
 
 

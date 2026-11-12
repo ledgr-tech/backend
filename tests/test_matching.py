@@ -17,6 +17,7 @@ from app.services.matching import (
     ResultadoMatching,
     _similaridade_descricao,
     classificar_divergencias,
+    executar_motor,
     parear_lancamentos,
     parear_por_tolerancia,
 )
@@ -345,11 +346,7 @@ def test_classificar_divergente_data_quando_valor_bate_e_data_nao():
 
     resultados = classificar_divergencias([banco], [sistema])
 
-    assert {r.status for r in resultados} == {"divergente_data"}
-    assert {(r.lancamento_banco_id, r.lancamento_sistema_id) for r in resultados} == {
-        (banco.id, None),
-        (None, sistema.id),
-    }
+    assert resultados == [ResultadoMatching("divergente_data", banco.id, sistema.id)]
 
 
 def test_classificar_sem_correspondencia_quando_nada_parece_dos_dois_lados():
@@ -361,18 +358,34 @@ def test_classificar_sem_correspondencia_quando_nada_parece_dos_dois_lados():
     assert {r.status for r in resultados} == {"sem_correspondencia"}
 
 
-def test_classificar_prioridade_divergente_valor_sobre_divergente_data():
-    dia_banco = date(2026, 9, 5)
-    banco = _lanc("10.00", data=dia_banco)
-    # mesma data do banco, valor diferente -> elegível a divergente_valor
-    sistema_mesma_data = _lanc("20.00", data=dia_banco)
-    # mesmo valor do banco, data bem diferente -> elegível a divergente_data
-    sistema_mesmo_valor = _lanc("10.00", data=date(2026, 10, 20))
+def test_mesmo_valor_unico_tem_prioridade_sobre_sobras_do_mesmo_dia():
+    dia_banco = date(2026, 10, 5)
+    banco = _lanc("1854.00", data=dia_banco)
+    mesma_data = [_lanc("957.72", data=dia_banco), _lanc("3563.23", data=dia_banco)]
+    mesmo_valor = _lanc("1854.00", data=date(2026, 10, 3))
 
-    resultados = classificar_divergencias([banco], [sistema_mesma_data, sistema_mesmo_valor])
+    resultados = executar_motor([banco], [*mesma_data, mesmo_valor], 0, agrupar=True)
 
-    resultado_banco = next(r for r in resultados if r.lancamento_banco_id == banco.id)
-    assert resultado_banco.status == "divergente_valor"
+    assert resultados == [
+        ResultadoMatching("divergente_data", banco.id, mesmo_valor.id),
+        *[ResultadoMatching("sem_correspondencia", None, item.id) for item in mesma_data],
+    ]
+
+
+def test_valor_repetido_ou_tarifa_nao_forma_par_de_data():
+    banco = _lanc("100.00", data=date(2026, 10, 5))
+    tarifa = _lanc("15.00", data=banco.data, descricao="TARIFA BANCÁRIA")
+    sistema = [
+        _lanc("100.00", data=date(2026, 10, 3)),
+        _lanc("100.00", data=date(2026, 10, 4)),
+        _lanc("15.00", data=date(2026, 10, 4)),
+    ]
+
+    resultados = classificar_divergencias([banco, tarifa], sistema)
+
+    assert len(resultados) == 5
+    assert all(r.lancamento_banco_id is None or r.lancamento_sistema_id is None for r in resultados)
+    assert ResultadoMatching("tarifa_bancaria", tarifa.id, None) in resultados
 
 
 def test_classificar_regra_aplicada_e_score_confianca_ficam_none():

@@ -102,7 +102,8 @@ def test_cadastro_enfileira_uma_mensagem_de_boas_vindas(db_session, provedor, ca
     assert f"Olá, {NOME}." in mensagem.texto
     assert f"para a empresa {RAZAO_SOCIAL}." in mensagem.texto
     assert f"na tela de login ({FRONTEND_URL_TESTE}/login)" in mensagem.texto
-    assert f'<a href="{FRONTEND_URL_TESTE}/login">tela de login</a>' in mensagem.html
+    assert f'<a href="{FRONTEND_URL_TESTE}/login"' in mensagem.html
+    assert ">tela de login</a>" in mensagem.html
 
 
 def test_chave_de_idempotencia_e_boas_vindas_id_do_usuario(db_session, provedor, cadastro):
@@ -225,7 +226,8 @@ def test_com_frontend_url_recusada_a_mensagem_sai_sem_link(
     assert "<a " not in mensagem.html
 
 
-def test_texto_puro_completo():
+def test_texto_puro_completo(monkeypatch):
+    monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
     mensagem = mensagem_boas_vindas(
         para="ana@teste.com",
         nome="Ana",
@@ -244,7 +246,14 @@ def test_texto_puro_completo():
         "suporte.\n\n"
         "Equipe Ledgr"
     )
-    assert not re.search(r"<img|<script|https?://(?!ledgrfinance)", mensagem.html)
+    # sem script nem recurso de terceiro (issue #188): só links do site e as imagens do front
+    assert "<script" not in mensagem.html
+    enderecos = re.findall(r'(?:src|href)="(https?://[^"]+)"', mensagem.html)
+    assert enderecos
+    assert all(
+        e.startswith((f"{FRONTEND_URL_TESTE}/email/", "https://ledgrfinance.com.br/"))
+        for e in enderecos
+    )
 
 
 # --- logs ------------------------------------------------------------------------

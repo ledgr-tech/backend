@@ -46,6 +46,21 @@ class CandidatoContexto:
     lancamento: LancamentoContexto
     diferenca_valor: Decimal | None
     diferenca_dias: int | None
+    # Fatos calculados pelo backend (fix da explicação detalhada). Defaults
+    # `None` para não quebrar quem monta o contexto à mão.
+    # `dias_assinados`: data do candidato menos data do item (positivo = o
+    # candidato é depois), só em `divergente_data`; `diferenca_dias` continua
+    # em valor absoluto.
+    dias_assinados: int | None = None
+    # |diferença| / |valor do item| * 100, uma casa, só em `divergente_valor`
+    # (e só com valor do item diferente de zero).
+    diferenca_percentual: Decimal | None = None
+    # 0 a 100, pela mesma função de similaridade do motor
+    # (`matching.similaridade_descricao`).
+    similaridade_descricao: int | None = None
+    # Alguma data do intervalo fechado entre as duas é sábado ou domingo
+    # (sem feriados). Só em `divergente_data`.
+    cruza_fim_de_semana: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,22 @@ class ContextoDivergencia:
     candidatos: tuple[CandidatoContexto, ...]
     quantidade_mesmo_lado: int | None
     quantidade_outro_lado: int | None
+    # Fatos calculados pelo backend (fix da explicação detalhada), todos com
+    # default `None` no fim para não quebrar quem monta o contexto à mão.
+    # `lado_do_item`: "banco" ou "sistema" (com duas pontas, o banco).
+    lado_do_item: str | None = None
+    # A tolerância da execução mais recente do par; sem execução, a da
+    # configuração da empresa; sem nenhuma, `None`.
+    tolerancia_dias: int | None = None
+    # Candidatos elegíveis antes do corte de `MAXIMO_CANDIDATOS`. `None` nos
+    # status sem candidatos (duplicado, tarifa, sem correspondência).
+    total_candidatos: int | None = None
+    # (início, fim) do extrato do outro lado: o período gravado ou, sem ele,
+    # a menor e a maior data dos lançamentos. `None` sem nenhum dos dois.
+    periodo_outro_lado: tuple[date, date] | None = None
+    # `True` quando a linha é um par `divergente_data` gravado pelo motor
+    # (as duas pontas na mesma linha): o candidato é a ponta gravada.
+    par_gravado: bool | None = None
 
 
 @dataclass(frozen=True)

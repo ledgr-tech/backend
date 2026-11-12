@@ -1,9 +1,12 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 
 from app.api.admin import router as admin_router
+from app.api.admin_assinaturas import router as admin_assinaturas_router
+from app.api.assinatura import router as assinatura_router
 from app.api.assistente import router as assistente_router
 from app.api.auth import router as auth_router
 from app.api.chaves_api import router as chaves_api_router
@@ -28,10 +31,12 @@ from app.api.me import router as me_router
 from app.api.oauth import router as oauth_router
 from app.api.plano import router as plano_router
 from app.api.senha import router as senha_router
+from app.api.stripe_webhook import router as stripe_webhook_router
 from app.api.troca_email import router as troca_email_router
 from app.api.v1 import router as v1_router
 from app.core import conta_inativa
 from app.core.config import settings
+from app.core.erros_validacao import tratar_validacao
 from app.core.frontend_url import avisar_frontend_url_no_startup
 from app.core.logging import configurar_logs
 from app.core.rate_limit import limite_excedido, limiter
@@ -68,6 +73,7 @@ else:
 app.state.limiter = limiter
 app.middleware("http")(registrar_acesso)
 app.add_exception_handler(RateLimitExceeded, limite_excedido)
+app.add_exception_handler(RequestValidationError, tratar_validacao)
 app.add_exception_handler(conta_inativa.ContaInativaError, conta_inativa.tratar)
 
 app.include_router(auth_router)
@@ -78,6 +84,8 @@ app.include_router(empresa_router)
 app.include_router(empresas_router)
 app.include_router(equipe_router)
 app.include_router(plano_router)
+app.include_router(assinatura_router)
+app.include_router(stripe_webhook_router)
 app.include_router(convites_router)
 app.include_router(extratos_router)
 app.include_router(importacoes_ia_router)
@@ -95,6 +103,7 @@ app.include_router(documentacao_publica_router)
 app.include_router(oauth_router)
 app.include_router(conexoes_mcp_router)
 app.include_router(admin_router)
+app.include_router(admin_assinaturas_router)
 # Rota exata, sem Mount: um Mount redirecionaria /mcp para /mcp/.
 app.router.add_route(caminho_do_mcp(), PortaDoMcp(), include_in_schema=False)
 

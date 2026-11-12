@@ -11,13 +11,16 @@ import logging
 import math
 import time
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from conftest import apagar_contas_por_cnpj
 from fastapi.testclient import TestClient
 
+from app.core import auth
 from app.core.config import settings
 from app.core.database import engine
+from app.core.plano import DURACAO_TESTE
 from app.models import Configuracao, Conta, Usuario
 from app.services.usuarios import remover_usuario
 from main import app
@@ -272,6 +275,26 @@ def test_cadastro_google_cria_empresa_e_administrador_sem_senha(
     assert _login_google(corpo["id_token"]).json()["id"] == resposta["id"]
 
 
+def test_cadastro_google_comeca_o_teste_de_14_dias_sem_plano(
+    db_session, cadastro_google, gerar_token, monkeypatch
+):
+    """Issues #166 e #167: o mesmo teste do `/register`, sem plano e sem cartão."""
+    monkeypatch.setattr(settings, "teste_no_cadastro_habilitado", True)
+    instante = datetime.now(UTC)
+    monkeypatch.setattr(auth, "_agora", lambda: instante)
+
+    resposta = client.post("/register/google", json=cadastro_google()).json()
+
+    conta = db_session.get(Conta, uuid.UUID(resposta["conta_id"]))
+    assert conta.plano is None
+    assert conta.teste_termina_em == instante + DURACAO_TESTE
+    token = gerar_token(
+        conta.id, usuario_id=resposta["id"], auth_time=math.floor(instante.timestamp())
+    )
+    me = client.get("/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert (me["plano"], me["situacao"], me["assinatura"]) == (None, "teste", None)
+
+
 def test_cadastro_google_usa_o_nome_do_corpo(db_session, cadastro_google):
     response = client.post("/register/google", json=cadastro_google(nome="  Maria Silva  "))
 
@@ -387,3 +410,39 @@ def test_logs_nao_tem_id_token_email_nem_sub(
     ]
     for texto in proibidos:
         assert texto not in caplog.text
+
+
+def test_cadastro_google_sem_teste_por_padrao(
+    db_session,
+    cadastro_google,
+    gerar_token,
+    criar_extrato_da_empresa,
+    inserir_lancamentos,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "teste_no_cadastro_habilitado", False)
+    monkeypatch.setattr(settings, "stripe_habilitado", False)
+    resposta = client.post("/register/google", json=cadastro_google())
+    assert resposta.status_code == 201
+    corpo = resposta.json()
+    conta = db_session.get(Conta, uuid.UUID(corpo["conta_id"]))
+    assert conta.teste_termina_em is None
+    token = gerar_token(conta.id, usuario_id=corpo["id"])
+    me = client.get("/me", headers={"Authorization": f"Bearer {token}"}).json()
+    assert (me["situacao"], me["cobranca_habilitada"]) == ("sem_plano", False)
+    empresa = conta.empresas[0]
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    for extrato in (banco, sistema):
+        inserir_lancamentos(extrato, [("10.00", "a")])
+    assert (
+        client.post(
+            "/conciliacoes",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "extrato_banco_id": str(banco.id),
+                "extrato_sistema_id": str(sistema.id),
+            },
+        ).status_code
+        == 201
+    )

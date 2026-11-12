@@ -191,13 +191,13 @@ def test_mensagem_de_sistema_explica_os_marcadores():
 # Hash da instrução da versão atual do prompt. Mudou a instrução? Suba
 # VERSAO_PROMPT (o cache das explicações antigas deixa de valer) e atualize
 # os dois valores aqui.
-VERSAO_ESPERADA = "v2"
-SHA256_INSTRUCAO_V2 = "1f73439acab8c05f999d7aacc7b7d2385399f42b203b469b5d3951389ffe613e"
+VERSAO_ESPERADA = "v3"
+SHA256_INSTRUCAO_V3 = "c8f254773646337a061ae4ea590e54d7200d4f3e2e6188b00d6251950848f727"
 
 
 def test_versao_do_prompt_acompanha_a_instrucao():
     assert VERSAO_PROMPT == VERSAO_ESPERADA
-    assert hashlib.sha256(_INSTRUCAO_SISTEMA.encode()).hexdigest() == SHA256_INSTRUCAO_V2
+    assert hashlib.sha256(_INSTRUCAO_SISTEMA.encode()).hexdigest() == SHA256_INSTRUCAO_V3
 
 
 def test_cnpj_e_email_crus_nunca_aparecem_nas_mensagens_montadas():

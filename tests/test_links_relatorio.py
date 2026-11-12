@@ -477,6 +477,7 @@ def test_relatorio_traz_o_que_o_pdf_mostra(db_session, conta):
     assert corpo["resumo"] == {
         "total": 3,
         "conciliadas": 1,
+        "agrupamentos": 0,
         "justificadas": 1,
         "pendentes": 1,
         "linhas_nao_lidas": 0,

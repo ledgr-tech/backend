@@ -252,7 +252,8 @@ def meses_com_conciliacao(ctx: Context) -> Annotated[CallToolResult, MesesV1]:
         "dela), se está pronto para fechar e quantas linhas há em cada categoria da conciliação "
         "e em cada situação (justificadas, aguardando aprovação, pendentes, linhas não lidas). "
         "Use para responder 'como está setembro?' ou 'quantas divergências tive?'. "
-        "Divergências são as linhas fora de match_exato e match_tolerancia."
+        "Divergências são as linhas fora de match_exato, match_tolerancia e match_agrupado "
+        "(um lote que fechou ao centavo: um lançamento contra vários do outro lado)."
     ),
     annotations=SO_LEITURA,
 )
@@ -265,7 +266,7 @@ def resumo_do_mes(
     with SessionLocal() as db:
         modelo = api_publica.resumo_do_mes(db, conexao.empresa_id, competencia)
     c = modelo.contagens
-    divergencias = c.total - c.match_exato - c.match_tolerancia
+    divergencias = c.total - c.match_exato - c.match_tolerancia - c.match_agrupado
     if modelo.fechado:
         estado = "mês fechado com ressalva" if modelo.com_ressalva else "mês fechado"
     elif modelo.pronto_para_fechar:

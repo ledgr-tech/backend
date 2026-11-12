@@ -26,13 +26,15 @@
 ## Rotas
 
 - `GET /v1/empresas`: as empresas que a chave enxerga (`id`, `razao_social`, `cnpj`).
-- `GET /v1/empresas/{empresa_id}/resumo?competencia=AAAA-MM`: a situação do mês: `fechado`, `fechado_em`, `com_ressalva`, `pronto_para_fechar` e `contagens` (total por categoria, `justificadas`, `aguardando_aprovacao`, `pendentes`, `linhas_nao_lidas`).
+- `GET /v1/empresas/{empresa_id}/resumo?competencia=AAAA-MM`: a situação do mês: `fechado`, `fechado_em`, `com_ressalva`, `pronto_para_fechar` e `contagens` (total por categoria, incluindo `match_agrupado` e `agrupamentos`, mais `justificadas`, `aguardando_aprovacao`, `pendentes`, `linhas_nao_lidas`).
 - `GET /v1/empresas/{empresa_id}/conciliacoes?competencia=AAAA-MM`: os pares vigentes do mês (a conciliação mais recente de cada extrato do banco), com `extrato_banco_id`, `extrato_sistema_id`, `rodada`, `executada_em`, `periodo_inicio`, `periodo_fim` e `contagens`.
 - `GET /v1/empresas/{empresa_id}/divergencias?competencia=AAAA-MM&categoria=&situacao=&limit=&offset=`: as linhas divergentes do mês, com `extrato_banco_id`, `chave`, `categoria`, `data`, `valor`, `lado` (`banco`, `sistema` ou `ambos`) e `situacao`. `limit` até 200 (padrão 50); a resposta traz `total`.
 - `GET /v1/empresas/{empresa_id}/fechamentos?competencia=`: os fechamentos (`competencia`, `fechado_em`, `com_ressalva`, `reaberto_em`) com as contagens congeladas.
 
 ## Categorias e situações
 
+- Linhas conciliadas (não são divergência): `match_exato` (mesmo valor e data), `match_tolerancia` (mesmo valor, data dentro da tolerância da empresa) e `match_agrupado`.
+- `match_agrupado`: pagamento em lote. Um lançamento de um lado cuja soma bate, ao centavo, com a de vários do outro lado (por exemplo, um lançamento do banco de R$ 150.000,00 contra 10 do sistema), com datas dentro da tolerância da empresa. Cada lançamento do grupo é uma linha, então `match_agrupado` conta lançamentos; `agrupamentos` conta os grupos e não entra na soma de `total`. O que não fecha ao centavo, ou fecha de mais de um jeito, continua como divergência.
 - Categorias de divergência: `divergente_valor` (mesma data, valor diferente), `divergente_data` (mesmo valor, outra data), `sem_correspondencia` (nada parecido do outro lado), `duplicado` (excedente de um grupo que já formou par) e `tarifa_bancaria` (tarifa reconhecida no banco).
 - Situações de uma divergência: `sem_justificativa`, `aguardando_aprovacao` (justificada, falta um admin ou gestor aprovar), `justificada` (aprovada) e `conferida`.
 - O mês fica `pronto_para_fechar` quando está aberto, tem conciliação e não tem divergência sem justificativa, justificativa aguardando aprovação nem linha não lida.

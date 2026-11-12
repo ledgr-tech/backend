@@ -132,6 +132,17 @@ LIMITE_REVISAO_IMPORTACAO_POR_USUARIO = "60/minute"
 # pelo front com o segredo), contra a tentativa de adivinhar tokens.
 LIMITE_LINKS_RELATORIO_POR_USUARIO = "10/minute"
 LIMITE_RELATORIO_PUBLICO = "30/minute"
+# Checkout da assinatura (issues #166 e #167): cada chamada pode criar cliente e
+# sessão na Stripe, então o limite é por conta, não por IP. O webhook da Stripe
+# não tem limite: quem chama é a Stripe, e a assinatura do corpo é a proteção.
+LIMITE_CHECKOUT_POR_CONTA = "10/minute"
+# Preços públicos dos planos (GET /assinatura/precos): sem login, por IP; a
+# resposta vem do cache de 10 minutos na maioria das visitas.
+LIMITE_PRECOS_POR_IP = "30/minute"
+# POST /logout (issue #197): o front chama em todo "Sair", então o limite é
+# folgado. Só o logout que passou pela autenticação conta: o slowapi confere o
+# limite depois das dependencies, e o token recusado já saiu com 401.
+LIMITE_LOGOUT_POR_USUARIO = "30/minute"
 # Painel administrativo interno (issue #156, ADR-025): por operador (o usuário
 # do token), leituras e ações em contadores separados.
 LIMITE_ADMIN_LEITURA_POR_USUARIO = "60/minute"

@@ -38,11 +38,12 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
@@ -55,6 +56,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.rate_limit import limiter
 from app.models import (
+    AssinaturaStripe,
     ChaveApi,
     CodigoOAuth,
     Conciliacao,
@@ -62,6 +64,7 @@ from app.models import (
     Configuracao,
     Conta,
     Convite,
+    CupomEnviado,
     DecisaoLinha,
     Empresa,
     EventoConta,
@@ -73,6 +76,7 @@ from app.models import (
     LinhaInvalida,
     LinkRelatorio,
     OperadorLedgr,
+    PagamentoStripe,
     PedidoAutorizacaoOAuth,
     TokenOAuth,
     UsoAssistente,
@@ -149,12 +153,17 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # produção; quem testa liga e troca a fonte do conteúdo por uma falsa.
     monkeypatch.setattr(settings, "assistente_habilitado", False)
     monkeypatch.setattr(settings, "ajuda_conteudo_url", "")
+    # Teste no cadastro (ADR-026): só os testes da flag ligada o iniciam.
+    monkeypatch.setattr(settings, "teste_no_cadastro_habilitado", False)
     # Bloqueio da conciliação pelo plano (issue #122): desligado, como em
     # produção até o gateway; quem testa o bloqueio liga no próprio teste.
     monkeypatch.setattr(settings, "plano_bloqueio_habilitado", False)
     # Aprovação de justificativas (issue #132): desligada, como em produção
     # até o front aprovar; quem testa a aprovação liga no próprio teste.
     monkeypatch.setattr(settings, "aprovacao_justificativas_habilitada", False)
+    # Agrupamento N para 1 (issue #131): desligado, como em produção; quem
+    # testa liga no próprio teste.
+    monkeypatch.setattr(settings, "agrupamento_habilitado", False)
     # Conexão MCP (issue #136): desligada e sem URLs, como em produção; quem
     # testa liga e configura no próprio teste.
     monkeypatch.setattr(settings, "mcp_habilitado", False)
@@ -165,6 +174,22 @@ def _email_e_ia_de_verdade_desligados(monkeypatch):
     # produção; nenhum teste fala com o R2 de verdade. Quem testa usa a
     # fixture `arquivo_original`, com o armazenamento em memória.
     monkeypatch.setattr(settings, "arquivo_original_habilitado", False)
+    # Cobrança pela Stripe (issues #166 e #167): desligada e sem chaves, como
+    # em produção até a homologação; nenhum teste fala com a Stripe de verdade.
+    # Quem testa usa a fixture `stripe_falso`.
+    monkeypatch.setattr(settings, "stripe_habilitado", False)
+    monkeypatch.setattr(settings, "stripe_secret_key", "")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "")
+    monkeypatch.setattr(settings, "stripe_modo_live", False)
+    # O cache dos preços públicos (GET /assinatura/precos) é por processo.
+    from app.services.assinatura import precos as precos_publicos
+
+    precos_publicos.limpar_cache()
+    from app.services.assinatura import cupons as cupons_da_stripe
+
+    cupons_da_stripe.limpar_cache()
+    for plano in ("essencial", "padrao", "avancado"):
+        monkeypatch.setattr(settings, f"limite_conciliacoes_{plano}", None)
     for variavel in (
         "arquivo_original_r2_endpoint",
         "arquivo_original_r2_bucket",
@@ -543,7 +568,11 @@ def criar_conta(db_session):
         _apagar_conexoes_mcp(db_session, ConexaoMcp.conta_id == conta_id)
         db_session.query(PedidoAutorizacaoOAuth).filter_by(conta_id=conta_id).delete()
         # Painel administrativo (issue #156).
+        db_session.query(CupomEnviado).filter_by(conta_id=conta_id).delete()
         db_session.query(EventoConta).filter_by(conta_id=conta_id).delete()
+        # Cobrança pela Stripe (issues #166 e #167).
+        db_session.query(PagamentoStripe).filter_by(conta_id=conta_id).delete()
+        db_session.query(AssinaturaStripe).filter_by(conta_id=conta_id).delete()
         db_session.query(OperadorLedgr).filter(
             OperadorLedgr.usuario_id.in_(select(Usuario.id).where(Usuario.conta_id == conta_id))
         ).delete(synchronize_session=False)
@@ -605,20 +634,18 @@ def cabecalhos(token: str, empresa_id: uuid.UUID | None = None) -> dict[str, str
 
 def apagar_contas_por_cnpj(db_session, cnpjs: list[str]) -> None:
     """Apaga o que o cadastro pela API cria (issue #133): a conta, a primeira
-    empresa, a configuração dela e os usuários da conta, achados pelo CNPJ da
-    conta. Para os testes do `/register` e do `/register/google`, que não
+    empresa, a configuração dela, os extratos e os usuários, achados pelo
+    CNPJ da conta. Para os testes do `/register` e do `/register/google`, que não
     passam pelas fábricas. Sem commit."""
     conta_ids = list(db_session.scalars(select(Conta.id).where(Conta.cnpj.in_(cnpjs))))
     empresa_ids = list(
         db_session.scalars(select(Empresa.id).where(Empresa.conta_id.in_(conta_ids)))
     )
+    for empresa_id in empresa_ids:
+        _apagar_empresa(db_session, empresa_id)
     db_session.query(Usuario).filter(Usuario.conta_id.in_(conta_ids)).delete(
         synchronize_session=False
     )
-    db_session.query(Configuracao).filter(Configuracao.empresa_id.in_(empresa_ids)).delete(
-        synchronize_session=False
-    )
-    db_session.query(Empresa).filter(Empresa.id.in_(empresa_ids)).delete(synchronize_session=False)
     db_session.query(Conta).filter(Conta.id.in_(conta_ids)).delete(synchronize_session=False)
 
 
@@ -648,6 +675,76 @@ def provedor(monkeypatch):
     monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
     yield falso
     app.dependency_overrides.pop(obter_provedor_email_dependencia, None)
+
+
+# --- painel administrativo (issues #156 e #169) -----------------------------------
+
+
+@pytest.fixture
+def operador(db_session, criar_usuario, gerar_token):
+    """`operador()` cria um usuário numa conta própria (a do Ledgr) e o inclui
+    como operador; `auth_time` muda a idade do login."""
+
+    def _novo(nome: str = "Olga Operadora", auth_time: int | None = None):
+        usuario = criar_usuario(nome=nome)
+        registro = OperadorLedgr(usuario_id=usuario.id, incluido_por="teste")
+        db_session.add(registro)
+        db_session.commit()
+        extra = {} if auth_time is None else {"auth_time": auth_time}
+        token = gerar_token(usuario.conta_id, usuario_id=usuario.id, **extra)
+        return SimpleNamespace(usuario=usuario, registro=registro, headers=cabecalhos(token))
+
+    return _novo
+
+
+@pytest.fixture
+def cliente(db_session, criar_usuario, criar_empresa, gerar_token):
+    """`cliente()` cria uma conta cliente com admin, gestor e analista, e uma
+    empresa cliente a mais com dado que o painel nunca pode mostrar."""
+
+    def _nova(razao_social: str = "Escritório Cliente Ltda", email: str | None = None):
+        admin_da_conta = criar_usuario(nome="Ana Admin")
+        conta_id = admin_da_conta.conta_id
+        db_session.execute(
+            update(Conta).where(Conta.id == conta_id).values(razao_social=razao_social)
+        )
+        if email:
+            admin_da_conta.email = email
+        db_session.commit()
+        usuarios = {
+            "admin": admin_da_conta,
+            "gestor": criar_usuario(conta_id=conta_id, nome="Gil Gestor", papel="gestor"),
+            "analista": criar_usuario(conta_id=conta_id, nome="Ada Analista", papel="analista"),
+        }
+        empresa_id = empresa_unica(db_session, conta_id)
+        criar_empresa("Padaria Segredo do Cliente", conta_id=conta_id)
+        headers = {
+            papel: cabecalhos(gerar_token(u.conta_id, usuario_id=u.id), empresa_id)
+            for papel, u in usuarios.items()
+        }
+        return SimpleNamespace(
+            conta_id=conta_id, usuarios=usuarios, empresa_id=empresa_id, headers=headers
+        )
+
+    return _nova
+
+
+SEGREDO_WEBHOOK_TESTE = "whsec_segredo_de_teste"
+
+
+@pytest.fixture
+def stripe_falso(monkeypatch):
+    """A Stripe em memória (tests/stripe_falso.py), com a cobrança ligada, uma
+    chave de teste, o segredo do webhook e o FRONTEND_URL fixados."""
+    from stripe_falso import StripeFalso
+
+    falso = StripeFalso()
+    falso.instalar(monkeypatch)
+    monkeypatch.setattr(settings, "stripe_habilitado", True)
+    monkeypatch.setattr(settings, "stripe_secret_key", "sk_test_falsa")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SEGREDO_WEBHOOK_TESTE)
+    monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
+    return falso
 
 
 CHAVE_CIFRA_TESTE = bytes(range(32))

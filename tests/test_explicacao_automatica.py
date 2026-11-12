@@ -38,8 +38,9 @@ class ProvedorContador:
     """Provedor falso, seguro entre threads: responde um texto por valor do
     lançamento e conta as chamadas. `falhar_em` são valores que levantam."""
 
-    def __init__(self, falhar_em=(), eventos=None) -> None:
+    def __init__(self, falhar_em=(), eventos=None, frase_extra="") -> None:
         self._trava = threading.Lock()
+        self.frase_extra = frase_extra
         self.chamadas: list[tuple[Decimal, str | None]] = []
         self.falhar_em = {Decimal(v) for v in falhar_em}
         self.eventos = eventos
@@ -53,7 +54,7 @@ class ProvedorContador:
         if valor in self.falhar_em:
             raise ProvedorIAIndisponivel("http", status_http=500)
         return RespostaIA(
-            texto=f"Explicação do lançamento de {valor}.",
+            texto=f"Explicação do lançamento de {valor}.{self.frase_extra}",
             tokens_entrada=10,
             tokens_saida=5,
             modelo="falso",
@@ -479,3 +480,52 @@ def test_explicacao_de_uma_empresa_nunca_aparece_em_outra(db_session, conta, ia)
     assert any(item["gerada_por_ia"] for item in a.itens(banco_a))
     nao_achou = client.get(f"/conciliacoes/{banco_a.id}", headers=b.headers)
     assert nao_achou.status_code == 404
+
+
+def test_texto_filtrado_conta_como_gerado(db_session, conta, ia, caplog):
+    ia.frase_extra = " Com tolerância de 9 dias o par fecharia."
+    c = conta()
+    banco = c.extrato("banco", [("20.00", "b"), ("30.00", "c")])
+    sistema = c.extrato("sistema", [("99.00", "so sistema")])
+
+    with caplog.at_level(logging.INFO, logger="app.services.ia.geracao"):
+        c.conciliar(banco, sistema)
+
+    for item in _divergentes(c.itens(banco)):
+        assert item["explicacao"] == f"Explicação do lançamento de {_valor(item)}."
+        assert item["gerada_por_ia"] is True
+    mensagens = [r.getMessage() for r in caplog.records]
+    assert (
+        mensagens.count("explicacao_automatica texto_filtrado frases_removidas=1 frases_total=2")
+        == 3
+    )
+    resumo = [m for m in mensagens if "geradas=" in m]
+    assert resumo == ["explicacao_automatica geradas=3 cache=0 teto=0 limite=0 falhas=0"]
+
+
+def test_tolerancia_e_periodo_sao_consultados_uma_vez_por_par(db_session, conta, ia, monkeypatch):
+    from app.services.ia import contexto as contexto_module
+
+    chamadas = {"tolerancia": 0, "periodo": 0}
+    tolerancia_original = contexto_module._tolerancia_da_rodada
+    periodo_original = contexto_module._periodo_do_extrato
+
+    def tolerancia(*args, **kwargs):
+        chamadas["tolerancia"] += 1
+        return tolerancia_original(*args, **kwargs)
+
+    def periodo(*args, **kwargs):
+        chamadas["periodo"] += 1
+        return periodo_original(*args, **kwargs)
+
+    monkeypatch.setattr(contexto_module, "_tolerancia_da_rodada", tolerancia)
+    monkeypatch.setattr(contexto_module, "_periodo_do_extrato", periodo)
+    c = conta()
+    banco = c.extrato("banco", [("20.00", "b"), ("30.00", "c"), ("40.00", "d")])
+    sistema = c.extrato("sistema", [("99.00", "so sistema"), ("98.00", "outro")])
+
+    c.conciliar(banco, sistema)
+
+    assert len(_divergentes(c.itens(banco))) == 5
+    assert len(ia.chamadas) == 5
+    assert chamadas == {"tolerancia": 1, "periodo": 2}  # um por extrato do par

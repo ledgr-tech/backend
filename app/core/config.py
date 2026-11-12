@@ -5,12 +5,14 @@ Ver .env.example para a lista completa de variáveis esperadas.
 
 from typing import Literal
 
-from pydantic import AliasChoices, Field, PositiveInt, field_validator
+from pydantic import AliasChoices, Field, PositiveInt, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # `hide_input_in_errors`: um erro de validação do boot não imprime os valores
+    # recebidos, que incluem as chaves (Stripe, OpenAI, Resend...) e o banco.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str
     nextauth_secret: str = ""  # vazio não bloqueia o boot; ver exigir_nextauth_secret()
@@ -115,6 +117,12 @@ class Settings(BaseSettings):
     cnpj_consulta_url: str = "https://brasilapi.com.br/api/cnpj/v1"
     cnpj_consulta_chave: str = ""
 
+    # Teste no cadastro (ADR-026): só começa os 14 dias com esta flag ligada.
+    # Falsa por padrão enquanto preços e planos não estiverem definidos e a
+    # cobrança estiver desligada. Contas existentes recebem o teste pelo
+    # scripts/iniciar_teste_das_contas.py, no lançamento da cobrança.
+    teste_no_cadastro_habilitado: bool = False
+
     # Plano e teste (issue #122): com esta variável ligada, o POST /conciliacoes
     # responde 402 na primeira conciliação de um extrato do banco quando a
     # empresa está sem plano ou com o teste encerrado (app/services/plano.py).
@@ -147,6 +155,37 @@ class Settings(BaseSettings):
     limite_usuarios_essencial: PositiveInt | None = None
     limite_usuarios_padrao: PositiveInt | None = None
     limite_usuarios_avancado: PositiveInt | None = None
+
+    # Franquia de conciliações (issues #166 e #167): quantas conciliações por
+    # mês civil (fuso America/Sao_Paulo) o plano dá à conta, todas as empresas
+    # dela somadas. A unidade é a primeira conciliação de cada extrato do banco.
+    # Mesmo padrão dos limites acima: vazio é sem limite. Só barra com
+    # PLANO_BLOQUEIO_HABILITADO ligada (app/services/plano.py).
+    limite_conciliacoes_essencial: PositiveInt | None = None
+    limite_conciliacoes_padrao: PositiveInt | None = None
+    limite_conciliacoes_avancado: PositiveInt | None = None
+
+    # Cobrança pela Stripe (issues #166 e #167, ADR-026): checkout em modo
+    # assinatura e webhook. Desligada por padrão, como as outras flags: sem ela,
+    # ou sem a chave, as rotas novas respondem 503, e o boot e os testes não
+    # dependem da Stripe. O webhook é a única fonte de confirmação do pagamento.
+    # `stripe_secret_key` aceita chave de teste (sk_test_) ou restrita; chave
+    # live (sk_live_, rk_live_) derruba o boot enquanto `stripe_modo_live` não
+    # for true, para ninguém subir chave live por engano durante a homologação.
+    # `stripe_webhook_secret` é o whsec_ do endpoint (ou do `stripe listen`).
+    stripe_habilitado: bool = False
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_modo_live: bool = False
+
+    # Agrupamento N para 1 e 1 para N no motor de matching (issue #131,
+    # ADR-027): ligado, a etapa depois do exato e da tolerância agrupa os
+    # lançamentos sem par cuja soma bate ao centavo com um do outro lado
+    # (`match_agrupado`). Desligado por padrão, como as outras flags: desligado,
+    # o motor se comporta como antes. Depende da tolerância de data da empresa
+    # (`Configuracao.tolerancia_dias_default`), que é a janela do grupo. Só se
+    # cria no Railway quando for ligar (07-tecnico/stack-e-deploy.md).
+    agrupamento_habilitado: bool = False
 
     # Logs (issue #102): nível do logger `app`, configurado em app/core/logging.py.
     # Aceita minúsculas, e vazio vale INFO. Um valor fora da lista derruba o
@@ -199,6 +238,9 @@ class Settings(BaseSettings):
         "limite_usuarios_essencial",
         "limite_usuarios_padrao",
         "limite_usuarios_avancado",
+        "limite_conciliacoes_essencial",
+        "limite_conciliacoes_padrao",
+        "limite_conciliacoes_avancado",
         mode="before",
     )
     @classmethod
@@ -210,6 +252,21 @@ class Settings(BaseSettings):
     @classmethod
     def _normalizar_llm_modo_descricao(cls, valor: object) -> object:
         return (valor.strip().lower() or "termos") if isinstance(valor, str) else valor
+
+    @model_validator(mode="after")
+    def _recusar_chave_live_sem_modo_live(self) -> "Settings":
+        chave = self.stripe_secret_key.strip()
+        if chave.startswith(("sk_live_", "rk_live_")) and not self.stripe_modo_live:
+            raise ValueError(
+                "STRIPE_SECRET_KEY é uma chave live (sk_live_ ou rk_live_), e STRIPE_MODO_LIVE "
+                "não é true. Chave live só com STRIPE_MODO_LIVE=true, de propósito."
+            )
+        return self
+
+    def stripe_disponivel(self) -> bool:
+        """A flag está ligada e há chave: as rotas de cobrança podem falar com a
+        Stripe. Senão, respondem 503."""
+        return self.stripe_habilitado and bool(self.stripe_secret_key.strip())
 
     def exigir_nextauth_secret(self) -> str:
         """Devolve o secret de assinatura do JWT ou falha explicitamente.

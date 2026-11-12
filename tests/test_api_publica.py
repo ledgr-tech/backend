@@ -20,7 +20,7 @@ from app.api import chaves_api
 from app.core import auth
 from app.core.config import settings
 from app.core.database import engine
-from app.models import ChaveApi, Fechamento
+from app.models import ChaveApi, Conta, Fechamento
 from main import app
 
 client = TestClient(app)
@@ -30,6 +30,7 @@ NOME_DA_PESSOA = "Joana Pessoa Secreta"
 DESCRICAO_SECRETA = "PAGAMENTO FORNECEDOR SIGILOSO"
 JUSTIFICATIVA_SECRETA = "Texto confidencial da justificativa"
 RESSALVA_SECRETA = "Ressalva confidencial do fechamento"
+CIDADE_SECRETA = "Cidade Sigilosa Da Conta"  # issue #184
 
 
 def _bearer(token: str) -> dict[str, str]:
@@ -50,6 +51,10 @@ def conta(
 
     def _nova():
         admin = criar_usuario(nome=NOME_DA_PESSOA)
+        # Cidade e UF da conta (issue #184) não podem aparecer na /v1.
+        conta = db_session.get(Conta, admin.conta_id)
+        conta.cidade, conta.uf = CIDADE_SECRETA, "AM"
+        db_session.commit()
         empresa_id = empresa_unica(db_session, admin.conta_id)
         headers = cabecalhos(gerar_token(admin.conta_id, usuario_id=admin.id), empresa_id)
 
@@ -441,6 +446,9 @@ def test_respostas_da_v1_nao_tem_descricao_justificativa_ressalva_nem_nomes(cont
             JUSTIFICATIVA_SECRETA,
             RESSALVA_SECRETA,
             NOME_DA_PESSOA,
+            CIDADE_SECRETA,
+            '"cidade"',
+            '"uf"',
             "extrato.csv",
         ):
             assert proibido not in resposta.text, (resposta.url, proibido)
@@ -470,11 +478,13 @@ def test_resumo_conciliacoes_e_fechamentos_do_mes(conta):
         "total",
         "match_exato",
         "match_tolerancia",
+        "match_agrupado",
         "duplicado",
         "sem_correspondencia",
         "tarifa_bancaria",
         "divergente_valor",
         "divergente_data",
+        "agrupamentos",
         "justificadas",
         "aguardando_aprovacao",
         "pendentes",
@@ -531,7 +541,7 @@ def test_divergencias_iguais_as_do_app_com_situacao_lado_e_valor(conta):
     do_app = {
         (i["chave"], i["status"])
         for i in c.itens_do_app(banco)
-        if i["status"] not in ("match_exato", "match_tolerancia")
+        if i["status"] not in ("match_exato", "match_tolerancia", "match_agrupado")
     }
     assert {(d["chave"], d["categoria"]) for d in corpo["itens"]} == do_app
     assert corpo["total"] == len(do_app) == 4

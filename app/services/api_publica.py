@@ -173,10 +173,22 @@ class EmpresasV1(BaseModel):
 class ContagensV1(BaseModel):
     """Quantas linhas caíram em cada categoria da conciliação."""
 
-    total: int = Field(description="Total de linhas dos pares conciliados.")
+    total: int = Field(
+        description=(
+            "Total de linhas dos pares conciliados: a soma das categorias, sem `agrupamentos`."
+        )
+    )
     match_exato: int = Field(description="Linhas que bateram em valor e data.")
     match_tolerancia: int = Field(
         description="Linhas que bateram em valor, com a data dentro da tolerância de dias."
+    )
+    match_agrupado: int = Field(
+        default=0,
+        description=(
+            "Linhas (lançamentos) que fecharam um grupo: um lançamento de um lado cuja soma bate, "
+            "ao centavo, com a de vários do outro (pagamento em lote). Contam como conciliadas, "
+            "não são divergência. Zero nos meses anteriores ao agrupamento."
+        ),
     )
     duplicado: int = Field(description="Lançamentos excedentes de um grupo que já formou par.")
     sem_correspondencia: int = Field(description="Lançamentos sem nada parecido do outro lado.")
@@ -186,6 +198,12 @@ class ContagensV1(BaseModel):
     )
     divergente_data: int = Field(
         description="Há lançamento do outro lado com o mesmo valor, em outra data."
+    )
+    agrupamentos: int = Field(
+        default=0,
+        description=(
+            "Quantos grupos as linhas de `match_agrupado` formam. Não entra na soma de `total`."
+        ),
     )
 
 
