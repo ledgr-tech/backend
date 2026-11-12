@@ -6,9 +6,12 @@ script, e o logo e o mascote só aparecem quando `FRONTEND_URL` serve (a mesma
 regra que já vale para os links dos e-mails).
 """
 
+import json
 import re
+from pathlib import Path
 
 import pytest
+from casos_email import TODOS
 from conftest import FRONTEND_URL_TESTE
 
 from app.core.config import settings
@@ -99,3 +102,24 @@ def test_dado_do_usuario_continua_escapado_no_molde(frontend_valida):
     assert "<b>Ana</b>" not in mensagem.html
     assert "&lt;b&gt;Ana&lt;/b&gt;" in mensagem.html
     assert "&lt;i&gt;Telha&lt;/i&gt; &amp; &quot;Cia&quot;" in mensagem.html
+
+
+# --- texto e assunto fixados (issue #204) ---------------------------------------------
+
+TEXTOS_FIXADOS = json.loads(
+    (Path(__file__).parent / "fixtures" / "emails_texto.json").read_text(encoding="utf-8")
+)
+
+
+def test_o_arquivo_de_textos_cobre_todos_os_casos():
+    assert set(TEXTOS_FIXADOS) == set(TODOS)
+
+
+@pytest.mark.parametrize("nome", TODOS)
+def test_texto_e_assunto_nao_mudam(nome):
+    """O texto puro e o assunto foram gravados antes do molde v5: mexer no visual
+    do HTML não pode mudar nenhum dos dois."""
+    mensagem = TODOS[nome]()
+
+    assert mensagem.assunto == TEXTOS_FIXADOS[nome]["assunto"]
+    assert mensagem.texto == TEXTOS_FIXADOS[nome]["texto"]
