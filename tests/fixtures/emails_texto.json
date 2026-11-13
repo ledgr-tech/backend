@@ -1,0 +1,62 @@
+{
+  "recuperacao_senha": {
+    "assunto": "Redefinição de senha da sua conta Ledgr",
+    "texto": "Olá, Ana.\n\nRecebemos um pedido para redefinir a senha da sua conta na Ledgr. Para criar uma senha nova, abra o link abaixo:\n\nhttps://app.ledgr.com.br/redefinir-senha#token=abc&v=1\n\nO link vale por 60 minutos e só pode ser usado uma vez.\n\nSe não foi você, ignore este e-mail: sua senha atual continua valendo.\n\nEquipe Ledgr"
+  },
+  "senha_alterada": {
+    "assunto": "Sua senha da Ledgr foi alterada",
+    "texto": "Olá, Ana.\n\nA senha da sua conta na Ledgr acabou de ser alterada.\n\nSe foi você, não precisa fazer nada.\n\nSe não foi você, alguém pode ter acesso à sua conta. Use o \"Esqueci a senha\" na tela de login (https://app.ledgr.com.br/login) para criar uma senha nova agora e avise o nosso suporte.\n\nEquipe Ledgr"
+  },
+  "boas_vindas": {
+    "assunto": "Boas-vindas à Ledgr",
+    "texto": "Olá, Ana.\n\nSua conta na Ledgr foi criada para a empresa Telha Certa Ltda.\n\nPara começar, entre na tela de login (https://app.ledgr.com.br/login) e envie o extrato do banco e o extrato do seu sistema de gestão do mesmo período. A Ledgr cruza os dois e mostra o que bate e o que precisa da sua atenção.\n\nSe não foi você quem criou esta conta, ignore este e-mail e avise o nosso suporte.\n\nEquipe Ledgr"
+  },
+  "convite": {
+    "assunto": "Convite para usar a Ledgr",
+    "texto": "Olá.\n\nAna convidou você para usar a Ledgr na empresa Telha Certa Ltda.\n\nPara aceitar, abra o link abaixo e crie a sua senha:\n\nhttps://app.ledgr.com.br/redefinir-senha#token=abc&v=1\n\nO convite vale por 7 dias e só pode ser usado uma vez.\n\nSe você não esperava este convite, ignore este e-mail: nenhuma conta é criada sem o aceite.\n\nEquipe Ledgr"
+  },
+  "conta_desativada": {
+    "assunto": "Sua conta da Ledgr foi desativada",
+    "texto": "Olá, Ana.\n\nA sua conta na Ledgr foi desativada a seu pedido. Ela não entra mais, e este e-mail fica livre para um cadastro novo.\n\nOs dados da empresa Telha Certa Ltda continuam guardados, sem acesso de ninguém. Para pedir a exclusão deles, escreva ao nosso suporte.\n\nSe não foi você, avise o nosso suporte agora.\n\nEquipe Ledgr"
+  },
+  "confirmacao_troca_email": {
+    "assunto": "Confirme o seu e-mail novo na Ledgr",
+    "texto": "Olá, Ana.\n\nRecebemos um pedido para usar este e-mail na sua conta da Ledgr. Para confirmar a troca, abra o link abaixo:\n\nhttps://app.ledgr.com.br/redefinir-senha#token=abc&v=1\n\nO link vale por 60 minutos e só pode ser usado uma vez. Depois da confirmação, você entra na Ledgr com este e-mail.\n\nSe não foi você, ignore este e-mail: nada muda na conta.\n\nEquipe Ledgr"
+  },
+  "troca_email_pedida": {
+    "assunto": "Pedido de troca do e-mail da sua conta Ledgr",
+    "texto": "Olá, Ana.\n\nPediram a troca do e-mail da sua conta na Ledgr para n***@telhacerta.com.br. A troca só vale depois que alguém confirmar pelo link enviado ao e-mail novo.\n\nSe foi você, não precisa fazer nada aqui.\n\nSe não foi você, alguém sabe a sua senha: troque a senha agora e fale com o nosso suporte.\n\nEquipe Ledgr"
+  },
+  "troca_email_concluida": {
+    "assunto": "O e-mail da sua conta Ledgr foi trocado",
+    "texto": "Olá, Ana.\n\nO e-mail da sua conta na Ledgr foi trocado para n***@telhacerta.com.br. A partir de agora, o login é com o e-mail novo, e as sessões abertas foram encerradas.\n\nSe foi você, não precisa fazer nada.\n\nSe não foi você, fale com o nosso suporte agora.\n\nEquipe Ledgr"
+  },
+  "cupom": {
+    "assunto": "Um desconto para a sua conta Ledgr",
+    "texto": "Olá, Ana.\n\nA equipe da Ledgr liberou um desconto para a conta da empresa Telha Certa Ltda: 20% por 3 meses.\n\nPara usar, abra a tela Assinatura (https://app.ledgr.com.br/assinatura), escolha o plano e, na página de pagamento, informe o código:\n\nAURORA-7K2M\n\nO código vale até 30/11/2026, só funciona nesta conta e pode ser usado uma vez.\n\nEquipe Ledgr"
+  },
+  "senha_alterada_sem_link": {
+    "assunto": "Sua senha da Ledgr foi alterada",
+    "texto": "Olá, Ana.\n\nA senha da sua conta na Ledgr acabou de ser alterada.\n\nSe foi você, não precisa fazer nada.\n\nSe não foi você, alguém pode ter acesso à sua conta. Use o \"Esqueci a senha\" na tela de login para criar uma senha nova agora e avise o nosso suporte.\n\nEquipe Ledgr"
+  },
+  "boas_vindas_sem_link": {
+    "assunto": "Boas-vindas à Ledgr",
+    "texto": "Olá, Ana.\n\nSua conta na Ledgr foi criada para a empresa Telha Certa Ltda.\n\nPara começar, entre na tela de login e envie o extrato do banco e o extrato do seu sistema de gestão do mesmo período. A Ledgr cruza os dois e mostra o que bate e o que precisa da sua atenção.\n\nSe não foi você quem criou esta conta, ignore este e-mail e avise o nosso suporte.\n\nEquipe Ledgr"
+  },
+  "conta_desativada_sem_empresa": {
+    "assunto": "Sua conta da Ledgr foi desativada",
+    "texto": "Olá, Ana.\n\nA sua conta na Ledgr foi desativada a seu pedido. Ela não entra mais, e este e-mail fica livre para um cadastro novo.\n\nSe não foi você, avise o nosso suporte agora.\n\nEquipe Ledgr"
+  },
+  "cupom_com_codigo_sem_link": {
+    "assunto": "Um desconto para a sua conta Ledgr",
+    "texto": "Olá, Ana.\n\nA equipe da Ledgr liberou um desconto para a conta da empresa Telha Certa Ltda: 20% por 3 meses.\n\nPara usar, abra a tela Assinatura, escolha o plano e, na página de pagamento, informe o código:\n\nAURORA-7K2M\n\nO código vale até 30/11/2026, só funciona nesta conta e pode ser usado uma vez.\n\nEquipe Ledgr"
+  },
+  "cupom_sem_codigo": {
+    "assunto": "Um desconto para a sua conta Ledgr",
+    "texto": "Olá, Ana.\n\nA equipe da Ledgr aplicou um desconto na assinatura da empresa Telha Certa Ltda: 20% por 3 meses.\n\nEle aparece nas próximas faturas, e você não precisa fazer nada. Os detalhes ficam na tela Assinatura (https://app.ledgr.com.br/assinatura).\n\nEquipe Ledgr"
+  },
+  "cupom_sem_codigo_sem_link": {
+    "assunto": "Um desconto para a sua conta Ledgr",
+    "texto": "Olá, Ana.\n\nA equipe da Ledgr aplicou um desconto na assinatura da empresa Telha Certa Ltda: 20% por 3 meses.\n\nEle aparece nas próximas faturas, e você não precisa fazer nada. Os detalhes ficam na tela Assinatura.\n\nEquipe Ledgr"
+  }
+}
