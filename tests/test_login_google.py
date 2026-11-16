@@ -80,6 +80,7 @@ def _cabecalho(gerar_token, resposta: dict) -> dict[str, str]:
 def _corpos_das_rotas(id_token: str, gerar_cnpj) -> dict[str, dict]:
     return {
         "/login/google": {"id_token": id_token},
+        "/login/google/vincular": {"id_token": id_token, "senha": "senha-atual-123"},
         "/register/google": {
             "id_token": id_token,
             "razao_social": "Empresa",
@@ -89,7 +90,12 @@ def _corpos_das_rotas(id_token: str, gerar_cnpj) -> dict[str, dict]:
     }
 
 
-ROTAS_GOOGLE = ["/login/google", "/register/google", "/convites/aceitar/google"]
+ROTAS_GOOGLE = [
+    "/login/google",
+    "/login/google/vincular",
+    "/register/google",
+    "/convites/aceitar/google",
+]
 
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
@@ -118,7 +124,7 @@ def test_falha_ao_buscar_as_chaves_e_503(db_session, google, gerar_cnpj, rota):
 
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
-def test_token_invalido_e_401_nas_tres_rotas(db_session, google, gerar_cnpj, rota):
+def test_token_invalido_e_401_nas_rotas_google(db_session, google, gerar_cnpj, rota):
     corpo = _corpos_das_rotas(google.id_token(email_verified=False), gerar_cnpj)[rota]
 
     response = client.post(rota, json=corpo)
@@ -142,7 +148,7 @@ def test_chaves_buscadas_sem_conexao_do_banco_em_uso(db_session, google, gerar_c
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
 def test_rate_limit_por_ip(db_session, google, gerar_cnpj, rota):
-    limite = 10 if rota == "/login/google" else 5
+    limite = 10 if rota.startswith("/login/") else 5
     corpo = _corpos_das_rotas("token-invalido", gerar_cnpj)[rota]
 
     for _ in range(limite):

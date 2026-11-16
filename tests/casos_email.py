@@ -1,6 +1,6 @@
 """Os e-mails transacionais montados com dados fixos, para os testes do molde.
 
-`CASOS` tem um caso por mensagem de `app/services/email/mensagens.py` (os 9
+`CASOS` tem um caso por mensagem de `app/services/email/mensagens.py` (os 10
 e-mails); `VARIANTES` cobre os ramos que mudam o texto: sem link, com a
 empresa sem acesso, cupom sem código. O texto e o assunto de todos estão
 fixados em `tests/fixtures/emails_texto.json`.
@@ -16,6 +16,9 @@ EMAIL_NOVO = "novo@telhacerta.com.br"
 CODIGO = "AURORA-7K2M"
 
 CASOS = {
+    "google_conectado": lambda nome=NOME, razao=RAZAO_SOCIAL: m.mensagem_google_conectado(
+        para="a@x.com", nome=nome, chave_idempotencia="google-conectado-teste"
+    ),
     "recuperacao_senha": lambda nome=NOME, razao=RAZAO_SOCIAL: m.mensagem_recuperacao_senha(
         para="a@x.com", nome=nome, link=LINK, validade_minutos=60
     ),

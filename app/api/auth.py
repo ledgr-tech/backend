@@ -31,6 +31,10 @@ confirma e-mail, e vincular entregaria a conta criada antes por outra pessoa
 com o e-mail da vítima. As duas respondem com `LoginResponse`, com o
 `auth_time` do `instante_do_login`.
 
+Vínculo explícito (issue #218): `POST /login/google/vincular` exige o token
+Google e a senha atual da conta do mesmo e-mail. Preserva os dois métodos,
+faz login e avisa por e-mail só ao efetivar um vínculo novo.
+
 Verificação do CNPJ na Receita (issue #119, app/services/consulta_cnpj/): o
 `/register` e o `/register/google` consultam (ou usam o cache de 24 horas)
 depois das validações locais e antes de gravar, com a transação de leitura já
@@ -110,7 +114,7 @@ from app.services.consulta_cnpj import (
 from app.services.consulta_cnpj.base import INDISPONIVEL
 from app.services.email import ProvedorDeEmail
 from app.services.email.envio import enviar_e_registrar, obter_provedor_email_dependencia
-from app.services.email.mensagens import mensagem_boas_vindas
+from app.services.email.mensagens import mensagem_boas_vindas, mensagem_google_conectado
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +264,10 @@ class CadastroGoogleRequest(BaseModel):
 
 class LoginGoogleRequest(BaseModel):
     id_token: IdToken
+
+
+class VinculoGoogleRequest(LoginGoogleRequest):
+    senha: str = Field(min_length=1)
 
 
 def nome_da_conta(nome_do_corpo: str | None, identidade: IdentidadeGoogle) -> str:
@@ -503,7 +511,19 @@ def login(
     db: Annotated[Session, Depends(get_db)],
 ) -> LoginResponse:
     email = normalizar_email(dados.email)
+    verificar_bloqueio_login(email)
 
+    # O removido cai no mesmo 401 das credenciais inválidas.
+    usuario = db.scalar(
+        select(Usuario).where(Usuario.email == email, Usuario.removido_em.is_(None))
+    )
+    conferir_senha_login(email, dados.senha, usuario)
+    auth_time = instante_do_login()  # depois de a senha ser conferida
+    registrar_login(db, usuario)
+    return LoginResponse(**resposta_de_usuario(usuario).model_dump(), auth_time=auth_time)
+
+
+def verificar_bloqueio_login(email: str) -> None:
     # Bloqueio por conta (issue #67): antes do banco e do bcrypt, igual para
     # e-mail com e sem conta. Não loga o e-mail nem o hash dele.
     ate = bloqueio_login.bloqueado_ate(email)
@@ -516,14 +536,12 @@ def login(
             headers={"Retry-After": str(segundos)},
         )
 
-    # Usuário removido (issue #69) cai no mesmo caminho de senha errada: sem
-    # hash, o bcrypt roda contra o hash fictício e a resposta é o mesmo 401.
-    usuario = db.scalar(
-        select(Usuario).where(Usuario.email == email, Usuario.removido_em.is_(None))
-    )
+
+def conferir_senha_login(email: str, senha_recebida: str, usuario: Usuario | None) -> None:
+    # Sem conta com senha, roda contra o hash fictício: mesmo custo e 401.
     senha_hash = usuario.senha_hash if usuario else None
 
-    if not senha.verificar(dados.senha, senha_hash):
+    if not senha.verificar(senha_recebida, senha_hash):
         if bloqueio_login.registrar_falha(email):
             logger.info("login_bloqueado motivo=limite_de_falhas")
         raise HTTPException(
@@ -531,10 +549,7 @@ def login(
             detail="E-mail ou senha inválidos.",
         )
 
-    auth_time = instante_do_login()  # depois de a senha ser conferida
     bloqueio_login.limpar(email)
-    registrar_login(db, usuario)
-    return LoginResponse(**resposta_de_usuario(usuario).model_dump(), auth_time=auth_time)
 
 
 def registrar_login(db: Session, usuario: Usuario) -> None:
@@ -609,6 +624,67 @@ def login_google(
         status_code=http_status.HTTP_404_NOT_FOUND,
         detail="Não há conta no Ledgr para esta conta Google.",
     )
+
+
+@router.post("/login/google/vincular", response_model=LoginResponse)
+@limiter.limit(LIMITE_LOGIN)
+def vincular_google(
+    request: Request,
+    dados: VinculoGoogleRequest,
+    tarefas: BackgroundTasks,
+    db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
+) -> LoginResponse:
+    """Conecta o Google mediante a senha atual (issue #218).
+
+    Mesmo 401 e bloqueio por e-mail do `/login`. Repetir o mesmo vínculo
+    exige a senha novamente, faz login e não repete o aviso. Outro vínculo
+    dá 409. O `/login/google` continua sem vincular automaticamente.
+    """
+    identidade = identidade_ou_erro_http(dados.id_token, logger, "vinculo_google")
+    verificar_bloqueio_login(identidade.email)
+    # Serializa vínculos para a mesma conta e confere a senha sob a trava:
+    # uma troca/redefinição/remoção concorrente não deixa usar um hash antigo.
+    usuario = db.scalar(
+        select(Usuario)
+        .where(Usuario.email == identidade.email, Usuario.removido_em.is_(None))
+        .with_for_update()
+    )
+    conferir_senha_login(identidade.email, dados.senha, usuario)
+    auth_time = instante_do_login()
+    if usuario.google_sub is not None and usuario.google_sub != identidade.sub:
+        logger.info("vinculo_google resultado=conta_com_outro_google")
+        raise _conflito("Esta conta já está conectada a outra conta Google.")
+    if db.scalar(
+        select(Usuario.id).where(Usuario.google_sub == identidade.sub, Usuario.id != usuario.id)
+    ):
+        logger.info("vinculo_google resultado=google_em_outra_conta")
+        raise _conflito(CONTA_GOOGLE_JA_CADASTRADA)
+
+    novo_vinculo = usuario.google_sub is None
+    usuario.google_sub = identidade.sub
+    try:
+        # Vínculo e ultimo_login_em na mesma transação. A UNIQUE de google_sub
+        # resolve a corrida do mesmo Google entre usuários diferentes.
+        registrar_login(db, usuario)
+    except IntegrityError:
+        db.rollback()
+        logger.info("vinculo_google resultado=conflito_concorrente")
+        # Não encadear a exceção SQL, que contém parâmetros sensíveis.
+        raise _conflito(CONTA_GOOGLE_JA_CADASTRADA) from None
+
+    logger.info("vinculo_google resultado=%s", "conectado" if novo_vinculo else "ja_conectado")
+    if novo_vinculo:
+        if provedor is None:
+            logger.info("aviso_google_conectado resultado=desabilitado")
+        else:
+            mensagem = mensagem_google_conectado(
+                para=usuario.email,
+                nome=usuario.nome,
+                chave_idempotencia=f"google-conectado-{usuario.id}",
+            )
+            tarefas.add_task(enviar_e_registrar, provedor, mensagem, "aviso_google_conectado")
+    return LoginResponse(**resposta_de_usuario(usuario).model_dump(), auth_time=auth_time)
 
 
 @router.post(

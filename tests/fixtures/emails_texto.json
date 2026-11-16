@@ -58,5 +58,9 @@
   "cupom_sem_codigo_sem_link": {
     "assunto": "Um desconto para a sua conta Ledgr",
     "texto": "Olá, Ana.\n\nA equipe da Ledgr aplicou um desconto na assinatura da empresa Telha Certa Ltda: 20% por 3 meses.\n\nEle aparece nas próximas faturas, e você não precisa fazer nada. Os detalhes ficam na tela Assinatura.\n\nEquipe Ledgr"
+  },
+  "google_conectado": {
+    "assunto": "O Google foi conectado à sua conta do Ledgr",
+    "texto": "Olá, Ana.\n\nO Google foi conectado à sua conta do Ledgr.\n\nAgora você pode entrar com o Google ou continuar usando seu e-mail e senha.\n\nSe não foi você quem conectou o Google, avise o nosso suporte imediatamente.\n\nEquipe Ledgr"
   }
 }
