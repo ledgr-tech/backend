@@ -65,6 +65,10 @@ class Divergencia:
     valor: Decimal
     lado: Lado
     situacao: Situacao
+    # O valor do lançamento do sistema quando a linha tem os dois lados (o
+    # `valor` acima é o do banco): o "em aberto" do assistente (issue #223)
+    # usa a diferença, como a Visão geral do front. Fora da `DivergenciaV1`.
+    valor_sistema: Decimal | None = None
 
 
 def linhas_divergentes(
@@ -135,6 +139,7 @@ def linhas_divergentes(
                 situacao=situacao_da_linha(
                     decisoes.decisao_vigente(eventos.get((linha.extrato_banco_id, chave), []))
                 ),
+                valor_sistema=linha.sistema_valor if tem_banco and tem_sistema else None,
             )
         )
     return sorted(resultado, key=lambda d: (d.data, d.valor, str(d.extrato_banco_id), d.chave))

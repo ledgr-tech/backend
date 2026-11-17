@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from app.services.ia.base import (
     CandidatoContexto,
+    ConsultaDeDados,
     ContextoDivergencia,
     LancamentoContexto,
     MensagemHistorico,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CandidatoContexto",
+    "ConsultaDeDados",
     "ContextoDivergencia",
     "LancamentoContexto",
     "MensagemHistorico",

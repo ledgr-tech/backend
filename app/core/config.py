@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # pergunta (a Central inteira na entrada), uns US$ 7 por mês no pior caso
     # do limite global.
     assistente_habilitado: bool = False
+    # Dados da empresa no assistente (issue #223, ADR-028): com esta flag e uma
+    # empresa ativa, o assistente também responde consultas simples (meses,
+    # resumo, divergências, em aberto e saldo). O modelo só interpreta a
+    # pergunta; nenhum dado da empresa vai ao provedor. Desligada por padrão.
+    assistente_dados_habilitado: bool = False
     ajuda_conteudo_url: str = ""
     assistente_maximo_conteudo_caracteres: PositiveInt = 60000
     assistente_limite_diario_conta: PositiveInt = 100

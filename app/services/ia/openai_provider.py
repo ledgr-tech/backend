@@ -31,6 +31,7 @@ mensagens de app/services/ia/prompt_ajuda.py e saída estruturada
 
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -44,7 +45,13 @@ from app.services.ia.base import (
 )
 from app.services.ia.mascaramento import MODO_TERMOS, ModoDescricao
 from app.services.ia.prompt import montar_mensagens
-from app.services.ia.prompt_ajuda import SCHEMA_RESPOSTA, ler_resposta, montar_mensagens_ajuda
+from app.services.ia.prompt_ajuda import (
+    SCHEMA_RESPOSTA,
+    SCHEMA_RESPOSTA_DADOS,
+    ler_resposta,
+    ler_resposta_dados,
+    montar_mensagens_ajuda,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,21 +168,32 @@ class ProvedorOpenAI:
     def responder_ajuda(
         self, pergunta: PerguntaAjuda, *, identificador_anonimo: str | None = None
     ) -> RespostaAjuda:
+        nome, schema = (
+            ("resposta_do_assistente_com_dados", SCHEMA_RESPOSTA_DADOS)
+            if pergunta.dados
+            else ("resposta_da_central_de_ajuda", SCHEMA_RESPOSTA)
+        )
         bruta = self._chamar(
             {
                 "messages": montar_mensagens_ajuda(pergunta),
                 "response_format": {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "resposta_da_central_de_ajuda",
-                        "strict": True,
-                        "schema": SCHEMA_RESPOSTA,
-                    },
+                    "json_schema": {"name": nome, "strict": True, "schema": schema},
                 },
             },
             max_tokens=self._max_tokens_ajuda,
             identificador_anonimo=identificador_anonimo,
         )
+        if pergunta.dados:
+            lida_dados = ler_resposta_dados(bruta.texto)
+            if lida_dados is None:
+                raise ProvedorIAIndisponivel("resposta_invalida")
+            return replace(
+                lida_dados,
+                tokens_entrada=bruta.tokens_entrada,
+                tokens_saida=bruta.tokens_saida,
+                modelo=bruta.modelo,
+            )
         lida = ler_resposta(bruta.texto)
         if lida is None:
             raise ProvedorIAIndisponivel("resposta_invalida")

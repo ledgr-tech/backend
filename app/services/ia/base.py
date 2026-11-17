@@ -125,13 +125,36 @@ class PerguntaAjuda:
     pergunta: str
     historico: tuple[MensagemHistorico, ...]
     tela: str | None
+    # Modo com dados (issue #223, ADR-028): o modelo só interpreta a pergunta.
+    # Com `dados`, a pergunta e o histórico já vêm com os marcadores de valor e
+    # data, e `mes_atual` (AAAA-MM, fuso de São Paulo) é o único dado a mais.
+    dados: bool = False
+    mes_atual: str | None = None
+
+
+TipoDeResposta = Literal["uso", "dados", "acao", "fora"]
+
+
+@dataclass(frozen=True)
+class ConsultaDeDados:
+    """A consulta que o modelo escolheu para uma pergunta de dados (issue
+    #223, ADR-028). Quem chama valida tudo antes de consultar o banco."""
+
+    intencao: str
+    competencia: str | None
+    meses_atras: int | None
+    categoria: str | None
 
 
 @dataclass(frozen=True)
 class RespostaAjuda:
     """A saída estruturada do modelo, já conferida no formato. `citacoes` são
     pares (pagina, funcao) como o modelo devolveu; quem chama confere se
-    existem no conteúdo atual."""
+    existem no conteúdo atual.
+
+    No modo com dados (issue #223), `tipo` diz o que a pergunta é. Só "uso"
+    traz texto do modelo; "dados" traz `consulta`, e "acao" traz `tela`, onde
+    a pessoa faz o que pediu."""
 
     resposta: str
     respondida: bool
@@ -139,6 +162,9 @@ class RespostaAjuda:
     tokens_entrada: int
     tokens_saida: int
     modelo: str
+    tipo: TipoDeResposta = "uso"
+    consulta: ConsultaDeDados | None = None
+    tela: str | None = None
 
 
 class ProvedorDeIA(Protocol):

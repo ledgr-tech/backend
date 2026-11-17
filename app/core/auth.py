@@ -308,6 +308,13 @@ def _empresa_ativa(db: Session, usuario: Usuario, cabecalho: str | None) -> Empr
     return empresa
 
 
+def empresa_do_cabecalho(db: Session, usuario: Usuario, cabecalho: str) -> Empresa:
+    """A empresa de um `X-Ledgr-Empresa` presente, com as mesmas regras e
+    erros de `obter_empresa_ativa`. Para a rota que só usa a empresa quando o
+    cabeçalho vem (o assistente com dados, issue #223)."""
+    return _empresa_ativa(db, usuario, cabecalho)
+
+
 @dataclass(frozen=True)
 class EmpresaAtiva:
     usuario: Usuario

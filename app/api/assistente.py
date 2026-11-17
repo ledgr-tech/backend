@@ -29,24 +29,44 @@ Ordem:
 O backend não guarda conversa: o histórico vem do front a cada pergunta.
 Rate limit de `LIMITE_ASSISTENTE_POR_USUARIO` por usuário. Nunca loga a
 pergunta, o histórico nem a resposta: só o resultado categorizado.
+
+Dados da empresa (issue #223, ADR-028). Com `ASSISTENTE_DADOS_HABILITADO` e um
+`X-Ledgr-Empresa` (validado como nas outras rotas: 400 ou 404), o assistente
+também responde consultas simples sobre a empresa ativa. Duas regras:
+
+- nenhum dado sensível vai à IA. A pergunta e o histórico saem com marcadores
+  de valor e data (app/services/ajuda/marcadores.py), além da máscara, e nos
+  turnos do assistente todo número vira `[N]`. O modelo só devolve o tipo da
+  pergunta e, nas de dados, a consulta; o backend responde com o banco e
+  textos prontos (app/services/ajuda/consultas.py), e o resultado nunca volta
+  ao provedor. Uma chamada ao provedor por pergunta, como antes;
+- o assistente nunca grava dados. Pedido de gravar ("acao") recebe a recusa
+  fixa com a tela onde a pessoa faz aquilo, e a consulta roda numa transação
+  `READ ONLY` do Postgres. Falha da consulta: 503, sem gravar uso.
+
+Os links passam a ter `tipo`: "ajuda" (seção da Central) ou "tela" (caminho
+do app sem o prefixo `/e/<empresa>`, de uma lista fechada). Sem a flag, ou sem
+o cabeçalho, a rota é a do ADR-020: ignora a empresa e manda a pergunta só
+com a máscara.
 """
 
 import hashlib
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from app.core.auth import obter_usuario_autenticado
+from app.core.auth import CABECALHO_EMPRESA, empresa_do_cabecalho, obter_usuario_autenticado
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import LIMITE_ASSISTENTE_POR_USUARIO, chave_por_usuario, limiter
 from app.models import Usuario
-from app.services.ajuda import uso
+from app.services.ajuda import consultas, uso
 from app.services.ajuda.conteudo import (
     ConteudoGrandeDemais,
     ConteudoIndisponivel,
@@ -55,6 +75,7 @@ from app.services.ajuda.conteudo import (
     obter_fonte_da_ajuda,
     serializar,
 )
+from app.services.ajuda.marcadores import marcar_conversa
 from app.services.ia import MensagemHistorico, PerguntaAjuda, ProvedorDeIA, ProvedorIAIndisponivel
 from app.services.ia.geracao import obter_provedor_dependencia
 from app.services.ia.mascaramento import mascarar_texto
@@ -71,6 +92,8 @@ TAMANHO_MAXIMO_PERGUNTA = 500
 TAMANHO_MAXIMO_TURNO = 1000
 MAXIMO_TURNOS = 6
 MAXIMO_LINKS = 3
+RECUSA_DE_ACAO = "Pelo assistente eu só consulto e não gravo nada."
+FORA_DO_QUE_SEI = "Ainda não sei responder isso. Consulte a Central de ajuda."
 
 
 class TurnoHistorico(BaseModel):
@@ -97,6 +120,9 @@ class PerguntaRequest(BaseModel):
 class LinkAjuda(BaseModel):
     titulo: str
     caminho: str
+    # "ajuda": seção da Central (`/ajuda/<pagina>#<funcao>`); "tela": caminho
+    # do app sem o prefixo `/e/<empresa>`, que o front acrescenta (issue #223).
+    tipo: Literal["ajuda", "tela"] = "ajuda"
 
 
 class RespostaAssistente(BaseModel):
@@ -118,6 +144,29 @@ def _texto_puro(resposta: str) -> str:
     return _TITULO_DE_MARKDOWN.sub("", _MARCAS_DE_MARKDOWN.sub("", resposta)).strip()
 
 
+def _links_da_central(central, citacoes) -> list[LinkAjuda]:
+    links: list[LinkAjuda] = []
+    for pagina_id, funcao_id in citacoes:
+        funcao = central.funcao(pagina_id, funcao_id)
+        link = (
+            LinkAjuda(titulo=funcao.titulo, caminho=caminho(pagina_id, funcao_id))
+            if funcao
+            else None
+        )
+        if link is not None and link not in links:
+            links.append(link)
+        if len(links) == MAXIMO_LINKS:
+            break
+    return links
+
+
+def _links_de_tela(links: tuple[consultas.LinkDeTela, ...]) -> list[LinkAjuda]:
+    return [
+        LinkAjuda(titulo=link.titulo, caminho=link.caminho, tipo="tela")
+        for link in links[:MAXIMO_LINKS]
+    ]
+
+
 @router.post("/perguntas", response_model=RespostaAssistente)
 @limiter.limit(LIMITE_ASSISTENTE_POR_USUARIO, key_func=chave_por_usuario)
 def perguntar(
@@ -127,10 +176,18 @@ def perguntar(
     db: Annotated[Session, Depends(get_db)],
     provedor: Annotated[ProvedorDeIA | None, Depends(obter_provedor_dependencia)],
     fonte: Annotated[FonteDaAjuda, Depends(obter_fonte_da_ajuda)],
+    x_ledgr_empresa: Annotated[str | None, Header(alias=CABECALHO_EMPRESA)] = None,
 ) -> RespostaAssistente:
     if not (settings.assistente_habilitado and settings.llm_habilitado) or provedor is None:
         logger.info("assistente resultado=desligado")
         raise _indisponivel()
+
+    empresa = (
+        empresa_do_cabecalho(db, usuario, x_ledgr_empresa)
+        if settings.assistente_dados_habilitado and x_ledgr_empresa is not None
+        else None
+    )
+    empresa_id = empresa.id if empresa is not None else None
 
     conta_id = usuario.conta_id
     limite = uso.limite_atingido(db, conta_id)
@@ -150,15 +207,27 @@ def perguntar(
         logger.info("assistente resultado=sem_conteudo motivo=%s", type(exc).__name__)
         raise _indisponivel() from exc
 
-    pergunta_mascarada = mascarar_texto(corpo.pergunta)
-    pergunta = PerguntaAjuda(
-        central=central_serializada,
-        pergunta=pergunta_mascarada,
-        historico=tuple(
+    tela = corpo.tela if corpo.tela and central.tem_pagina(corpo.tela) else None
+    mes_atual = None
+    if empresa_id is not None:
+        mes_atual = consultas.mes_atual_de_sao_paulo(datetime.now(UTC))
+        marcada = marcar_conversa(
+            corpo.pergunta, [(turno.papel, turno.texto) for turno in corpo.historico]
+        )
+        pergunta_enviada, historico = marcada.pergunta, marcada.historico
+    else:
+        pergunta_enviada = mascarar_texto(corpo.pergunta)
+        historico = tuple(
             MensagemHistorico(papel=turno.papel, texto=mascarar_texto(turno.texto))
             for turno in corpo.historico
-        ),
-        tela=corpo.tela if corpo.tela and central.tem_pagina(corpo.tela) else None,
+        )
+    pergunta = PerguntaAjuda(
+        central=central_serializada,
+        pergunta=pergunta_enviada,
+        historico=historico,
+        tela=tela,
+        dados=empresa_id is not None,
+        mes_atual=mes_atual,
     )
     try:
         resposta = provedor.responder_ajuda(
@@ -172,33 +241,42 @@ def perguntar(
         logger.info("assistente resultado=erro_inesperado classe=%s", type(exc).__name__)
         raise _indisponivel() from exc
 
-    links: list[LinkAjuda] = []
-    for pagina_id, funcao_id in resposta.citacoes:
-        funcao = central.funcao(pagina_id, funcao_id)
-        link = (
-            LinkAjuda(titulo=funcao.titulo, caminho=caminho(pagina_id, funcao_id))
-            if funcao
-            else None
-        )
-        if link is not None and link not in links:
-            links.append(link)
-        if len(links) == MAXIMO_LINKS:
-            break
+    if resposta.tipo == "dados" and empresa_id is not None and resposta.consulta is not None:
+        consulta = resposta.consulta
+        try:
+            resultado = consultas.executar_somente_leitura(
+                db, lambda: consultas.responder(db, empresa_id, consulta, mes_atual)
+            )
+        except Exception as exc:
+            logger.info("assistente resultado=erro_consulta classe=%s", type(exc).__name__)
+            raise _indisponivel() from exc
+        texto, respondida = resultado.texto, True
+        links = _links_de_tela(resultado.links)
+        categoria_do_log = f"dados intencao={consulta.intencao}"
+    elif resposta.tipo == "acao":
+        destino = consultas.TELAS_DE_ACAO.get(resposta.tela or "")
+        texto, respondida = RECUSA_DE_ACAO, True
+        links = []
+        if destino is not None:
+            texto += f" Para isso, use a tela {destino.titulo}."
+            links = _links_de_tela((destino,))
+        categoria_do_log = "acao_recusada"
+    elif resposta.tipo in ("dados", "fora"):
+        texto, respondida, links = FORA_DO_QUE_SEI, False, []
+        categoria_do_log = "fora"
+    else:
+        texto, respondida = _texto_puro(resposta.resposta), resposta.respondida
+        links = _links_da_central(central, resposta.citacoes)
+        categoria_do_log = "respondida" if respondida else "nao_respondida"
 
     try:
         uso.registrar_uso(db, conta_id)
-        if not resposta.respondida:
-            uso.registrar_sem_resposta(db, pergunta_mascarada, corpo.tela)
+        if not respondida:
+            uso.registrar_sem_resposta(db, pergunta_enviada, corpo.tela)
         db.commit()
     except Exception as exc:  # noqa: BLE001 - a resposta já foi paga: entrega mesmo assim
         db.rollback()
         logger.info("assistente registro_falhou classe=%s", type(exc).__name__)
 
-    logger.info(
-        "assistente resultado=%s links=%d",
-        "respondida" if resposta.respondida else "nao_respondida",
-        len(links),
-    )
-    return RespostaAssistente(
-        resposta=_texto_puro(resposta.resposta), respondida=resposta.respondida, links=links
-    )
+    logger.info("assistente resultado=%s links=%d", categoria_do_log, len(links))
+    return RespostaAssistente(resposta=texto, respondida=respondida, links=links)
