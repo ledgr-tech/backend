@@ -292,6 +292,33 @@ def mensagem_senha_alterada(*, para: str, nome: str, link_login: str | None) -> 
     )
 
 
+def mensagem_google_conectado(*, para: str, nome: str, chave_idempotencia: str) -> MensagemEmail:
+    """Aviso após efetivar o vínculo com o Google (issue #218)."""
+    aviso = "Se não foi você quem conectou o Google, avise o nosso suporte imediatamente."
+    texto = (
+        f"Olá, {nome}.\n\n"
+        "O Google foi conectado à sua conta do Ledgr.\n\n"
+        "Agora você pode entrar com o Google ou continuar usando seu e-mail e senha.\n\n"
+        f"{aviso}\n\nEquipe Ledgr"
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="O Google foi conectado à sua conta do Ledgr",
+        texto=texto,
+        html=_pagina(
+            olho="Acesso · Google",
+            titulo="O Google foi",
+            destaque="conectado.",
+            mascote="joinha",
+            corpo=_p(f"Olá, {escape(nome)}.")
+            + _p("O Google foi conectado à sua conta do Ledgr.")
+            + _p("Agora você pode entrar com o Google ou continuar usando seu e-mail e senha.")
+            + _aviso(aviso),
+        ),
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
 def mensagem_boas_vindas(
     *,
     para: str,

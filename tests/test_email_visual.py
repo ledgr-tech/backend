@@ -42,6 +42,11 @@ VALE_60_MINUTOS = [("Vale por", "60 minutos"), ("Uso", "Uma vez só")]
 
 # A tabela "Cada e-mail" do documento do front, como ficou no backend.
 ESPERADO = {
+    "google_conectado": {
+        "olho": "Acesso · Google",
+        "titulo": ("O Google foi", "conectado."),
+        "mascote": "joinha",
+    },
     "recuperacao_senha": {
         "olho": "Acesso · senha",
         "titulo": ("Redefinir sua", "senha."),
@@ -161,7 +166,7 @@ def frontend_valida(monkeypatch):
     monkeypatch.setattr(settings, "frontend_url", FRONTEND_URL_TESTE)
 
 
-def test_os_casos_cobrem_os_nove_emails():
+def test_os_casos_cobrem_todos_os_emails():
     funcoes = {nome for nome in dir(m) if nome.startswith("mensagem_")}
 
     assert {f"mensagem_{nome}" for nome in CASOS} == funcoes
