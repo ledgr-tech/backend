@@ -54,7 +54,9 @@ def test_aceite_em_sequencia(db_session, cadastrado_com_senha, google, gerar_tok
     provedor.enviadas.clear()
     hash_antes = usuario.senha_hash
     token = google.id_token(email=usuario.email.upper(), sub="google-aceite-218")
-    assert client.post("/login/google", json={"id_token": token}).status_code == 409
+    recusa = client.post("/login/google", json={"id_token": token})
+    assert recusa.status_code == 409
+    assert recusa.json()["codigo"] == "email_com_senha"
     db_session.refresh(usuario)
     assert usuario.google_sub is None
     antes = time.time()
