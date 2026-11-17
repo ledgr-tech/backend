@@ -26,14 +26,17 @@ Login e cadastro pelo Google (issue #73, adendo de 13/10 do ADR-004):
 que o backend confere sozinho (app/core/google.py) antes de tocar no banco.
 O login acha o usuário pelo `google_sub`; sem conta, 404, e o front leva ao
 cadastro, que pede CNPJ e razão social como o `/register`. Um e-mail do Google
-que já tem conta com senha não é vinculado (409): o cadastro do Ledgr não
-confirma e-mail, e vincular entregaria a conta criada antes por outra pessoa
-com o e-mail da vítima. As duas respondem com `LoginResponse`, com o
+que já tem conta não é vinculado (409): o cadastro do Ledgr não confirma
+e-mail, e vincular entregaria a conta criada antes por outra pessoa com o
+e-mail da vítima. As duas respondem com `LoginResponse`, com o
 `auth_time` do `instante_do_login`.
 
 Vínculo explícito (issue #218): `POST /login/google/vincular` exige o token
 Google e a senha atual da conta do mesmo e-mail. Preserva os dois métodos,
-faz login e avisa por e-mail só ao efetivar um vínculo novo.
+faz login e avisa por e-mail só ao efetivar um vínculo novo. O 409 do
+`/login/google` traz `codigo` ao lado do `detail`: `email_com_senha` (conta com
+senha e sem Google, a que o vínculo atende) ou `email_com_outro_google` (conta
+já conectada a outro Google, em que a senha não ajuda).
 
 Verificação do CNPJ na Receita (issue #119, app/services/consulta_cnpj/): o
 `/register` e o `/register/google` consultam (ou usam o cache de 24 horas)
@@ -78,6 +81,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi import status as http_status
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -293,6 +297,13 @@ def _conflito(detalhe: str) -> HTTPException:
 
 
 CONTA_GOOGLE_JA_CADASTRADA = "Já existe uma conta no Ledgr para esta conta Google."
+CONTA_COM_OUTRO_GOOGLE = "Esta conta já está conectada a outra conta Google."
+
+# 409 do `/login/google` (issue #218): `codigo` ao lado do `detail`, como o 403 da
+# conta inativa (app/core/conta_inativa.py), para o front não depender do status.
+CODIGO_EMAIL_COM_SENHA = "email_com_senha"
+CODIGO_EMAIL_COM_OUTRO_GOOGLE = "email_com_outro_google"
+EMAIL_COM_SENHA = "Já existe uma conta com este e-mail. Entre com e-mail e senha."
 
 # 422 do cadastro pela situação do CNPJ na Receita (issue #119).
 CNPJ_RECUSADO_PELA_RECEITA = {
@@ -597,16 +608,58 @@ def usuario_pelo_google_sub(db: Session, sub: str) -> Usuario | None:
     )
 
 
-@router.post("/login/google", response_model=LoginResponse)
+def _conflito_de_login_google(codigo: str, detalhe: str) -> JSONResponse:
+    """409 do `/login/google` com `codigo` no corpo. Uma `HTTPException` com
+    `detail` em dicionário aninharia o corpo (`{"detail": {...}}`); a resposta
+    direta segue o precedente da conta inativa."""
+    return JSONResponse(
+        status_code=http_status.HTTP_409_CONFLICT,
+        content={"detail": detalhe, "codigo": codigo},
+    )
+
+
+@router.post(
+    "/login/google",
+    response_model=LoginResponse,
+    responses={
+        404: {"description": "Não há conta no Ledgr para este e-mail nem para este Google."},
+        409: {
+            "description": (
+                "O e-mail do Google já tem conta no Ledgr. O `codigo` diz o que o front faz: "
+                "`email_com_senha` leva ao passo de digitar a senha e chamar "
+                "`POST /login/google/vincular`; `email_com_outro_google` só mostra o `detail`."
+            ),
+            "content": {
+                "application/json": {
+                    "examples": {
+                        CODIGO_EMAIL_COM_SENHA: {
+                            "summary": "Conta com senha, sem Google: dá para vincular",
+                            "value": {"detail": EMAIL_COM_SENHA, "codigo": CODIGO_EMAIL_COM_SENHA},
+                        },
+                        CODIGO_EMAIL_COM_OUTRO_GOOGLE: {
+                            "summary": "Conta já conectada a outro Google: não há vínculo",
+                            "value": {
+                                "detail": CONTA_COM_OUTRO_GOOGLE,
+                                "codigo": CODIGO_EMAIL_COM_OUTRO_GOOGLE,
+                            },
+                        },
+                    }
+                }
+            },
+        },
+    },
+)
 @limiter.limit(LIMITE_LOGIN)
 def login_google(
     request: Request,
     dados: LoginGoogleRequest,
     db: Annotated[Session, Depends(get_db)],
-) -> LoginResponse:
+) -> LoginResponse | JSONResponse:
     """Login pelo Google (issue #73). 404 sem conta, para o front levar ao
-    cadastro; 409 quando o e-mail já tem conta com senha (sem vínculo
-    automático). Não loga o token, o e-mail nem o `sub`."""
+    cadastro. 409 quando o e-mail já tem conta (sem vínculo automático), com
+    `codigo` no corpo: `email_com_senha` (conta com senha e sem Google, a única
+    que o `/login/google/vincular` atende) ou `email_com_outro_google` (já tem
+    outro Google, com ou sem senha). Não loga o token, o e-mail nem o `sub`."""
     # Antes do banco: a busca das chaves não pode segurar uma transação.
     identidade = identidade_ou_erro_http(dados.id_token, logger, "login_google")
 
@@ -616,9 +669,22 @@ def login_google(
         registrar_login(db, usuario)
         return resposta_de_login(usuario)
 
-    if db.scalar(select(Usuario.id).where(Usuario.email == identidade.email)):
-        logger.info("login_google resultado=email_com_outra_conta")
-        raise _conflito("Já existe uma conta com este e-mail. Entre com e-mail e senha.")
+    # Só os dois fatos da decisão, sem carregar o hash.
+    existente = db.execute(
+        select(Usuario.senha_hash.is_not(None), Usuario.google_sub.is_not(None)).where(
+            Usuario.email == identidade.email
+        )
+    ).first()
+    if existente is not None:
+        tem_senha, tem_google = existente
+        if tem_senha and not tem_google:
+            logger.info("login_google resultado=email_com_senha")
+            return _conflito_de_login_google(CODIGO_EMAIL_COM_SENHA, EMAIL_COM_SENHA)
+        # Com `google_sub` é outro Google (o desta identidade teria entrado acima).
+        # Sem senha e sem `google_sub` não existe: o CHECK do usuário só permite
+        # isso ao removido, e o removido não guarda o e-mail.
+        logger.info("login_google resultado=email_com_outro_google")
+        return _conflito_de_login_google(CODIGO_EMAIL_COM_OUTRO_GOOGLE, CONTA_COM_OUTRO_GOOGLE)
     logger.info("login_google resultado=sem_conta")
     raise HTTPException(
         status_code=http_status.HTTP_404_NOT_FOUND,
@@ -654,7 +720,7 @@ def vincular_google(
     auth_time = instante_do_login()
     if usuario.google_sub is not None and usuario.google_sub != identidade.sub:
         logger.info("vinculo_google resultado=conta_com_outro_google")
-        raise _conflito("Esta conta já está conectada a outra conta Google.")
+        raise _conflito(CONTA_COM_OUTRO_GOOGLE)
     if db.scalar(
         select(Usuario.id).where(Usuario.google_sub == identidade.sub, Usuario.id != usuario.id)
     ):
