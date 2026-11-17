@@ -80,6 +80,7 @@ def _cabecalho(gerar_token, resposta: dict) -> dict[str, str]:
 def _corpos_das_rotas(id_token: str, gerar_cnpj) -> dict[str, dict]:
     return {
         "/login/google": {"id_token": id_token},
+        "/login/google/vincular": {"id_token": id_token, "senha": "senha-atual-123"},
         "/register/google": {
             "id_token": id_token,
             "razao_social": "Empresa",
@@ -89,7 +90,12 @@ def _corpos_das_rotas(id_token: str, gerar_cnpj) -> dict[str, dict]:
     }
 
 
-ROTAS_GOOGLE = ["/login/google", "/register/google", "/convites/aceitar/google"]
+ROTAS_GOOGLE = [
+    "/login/google",
+    "/login/google/vincular",
+    "/register/google",
+    "/convites/aceitar/google",
+]
 
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
@@ -118,7 +124,7 @@ def test_falha_ao_buscar_as_chaves_e_503(db_session, google, gerar_cnpj, rota):
 
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
-def test_token_invalido_e_401_nas_tres_rotas(db_session, google, gerar_cnpj, rota):
+def test_token_invalido_e_401_nas_rotas_google(db_session, google, gerar_cnpj, rota):
     corpo = _corpos_das_rotas(google.id_token(email_verified=False), gerar_cnpj)[rota]
 
     response = client.post(rota, json=corpo)
@@ -142,7 +148,7 @@ def test_chaves_buscadas_sem_conexao_do_banco_em_uso(db_session, google, gerar_c
 
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
 def test_rate_limit_por_ip(db_session, google, gerar_cnpj, rota):
-    limite = 10 if rota == "/login/google" else 5
+    limite = 10 if rota.startswith("/login/") else 5
     corpo = _corpos_das_rotas("token-invalido", gerar_cnpj)[rota]
 
     for _ in range(limite):
@@ -212,10 +218,89 @@ def test_login_google_com_email_de_conta_com_senha_e_409_sem_vincular(
 
     assert response.status_code == 409
     assert response.json() == {
-        "detail": "Já existe uma conta com este e-mail. Entre com e-mail e senha."
+        "detail": "Já existe uma conta com este e-mail. Entre com e-mail e senha.",
+        "codigo": "email_com_senha",
     }
     db_session.refresh(com_senha)
     assert com_senha.google_sub is None
+
+
+DETAIL_OUTRO_GOOGLE = "Esta conta já está conectada a outra conta Google."
+
+
+def test_login_google_de_conta_so_google_com_outro_sub_e_409_outro_google(
+    db_session, google, usuario_google
+):
+    sub_antes, hash_antes = usuario_google.google_sub, usuario_google.senha_hash
+
+    response = _login_google(
+        google.id_token(email=usuario_google.email.upper(), sub="google-de-outra-pessoa")
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": DETAIL_OUTRO_GOOGLE,
+        "codigo": "email_com_outro_google",
+    }
+    db_session.refresh(usuario_google)
+    assert usuario_google.google_sub == sub_antes
+    assert usuario_google.senha_hash == hash_antes
+    assert usuario_google.ultimo_login_em is None
+
+
+def test_login_google_de_conta_com_senha_ja_conectada_a_outro_google_e_409_outro_google(
+    db_session, google, criar_usuario
+):
+    conta = criar_usuario()
+    conta.google_sub = "google-ja-conectado"
+    db_session.commit()
+
+    response = _login_google(google.id_token(email=conta.email, sub="google-diferente"))
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": DETAIL_OUTRO_GOOGLE,
+        "codigo": "email_com_outro_google",
+    }
+    db_session.refresh(conta)
+    assert conta.google_sub == "google-ja-conectado"
+    assert conta.ultimo_login_em is None
+
+
+def test_login_google_sem_conta_e_sem_codigo_e_conta_do_mesmo_sub_entra(
+    db_session, google, usuario_google
+):
+    sem_conta = _login_google(google.id_token(email=_email_google()))
+    entrou = _login_google(
+        google.id_token(email=usuario_google.email, sub=usuario_google.google_sub)
+    )
+
+    assert sem_conta.status_code == 404
+    assert "codigo" not in sem_conta.json()
+    assert entrou.status_code == 200
+    assert entrou.json()["id"] == str(usuario_google.id)
+    assert "codigo" not in entrou.json()
+
+
+def test_openapi_documenta_o_409_do_login_google_com_os_dois_codigos():
+    resposta_409 = client.get("/openapi.json").json()["paths"]["/login/google"]["post"][
+        "responses"
+    ]["409"]
+
+    exemplos = resposta_409["content"]["application/json"]["examples"]
+    assert {nome: ex["value"]["codigo"] for nome, ex in exemplos.items()} == {
+        "email_com_senha": "email_com_senha",
+        "email_com_outro_google": "email_com_outro_google",
+    }
+    assert exemplos["email_com_outro_google"]["value"]["detail"] == DETAIL_OUTRO_GOOGLE
+
+
+def test_openapi_do_login_google_segue_com_o_login_response_no_200():
+    ok = client.get("/openapi.json").json()["paths"]["/login/google"]["post"]["responses"]["200"]
+
+    assert ok["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/LoginResponse"
+    }
 
 
 def test_login_google_de_usuario_removido_nao_entra(db_session, google, criar_usuario):
@@ -385,6 +470,9 @@ def test_logs_nao_tem_id_token_email_nem_sub(
 ):
     caplog.set_level(logging.DEBUG)
     com_senha = criar_usuario()
+    com_outro_google = criar_usuario()
+    com_outro_google.google_sub = "77777777777777777777"
+    db_session.commit()
     corpo = cadastro_google(sub="55555555555555555555")
     sem_conta = google.id_token(email="ninguem.aqui@gmail.com", sub="66666666666666666666")
     do_usuario = google.id_token(email=usuario_google.email, sub=usuario_google.google_sub)
@@ -392,11 +480,22 @@ def test_logs_nao_tem_id_token_email_nem_sub(
     tokens = [corpo["id_token"], sem_conta, do_usuario, invalido]
 
     client.post("/register/google", json=corpo)
-    for token in [sem_conta, do_usuario, invalido, google.id_token(email=com_senha.email)]:
+    outro_google = google.id_token(email=com_outro_google.email, sub="88888888888888888888")
+    tokens.append(outro_google)
+    for token in [
+        sem_conta,
+        do_usuario,
+        invalido,
+        google.id_token(email=com_senha.email),
+        outro_google,
+    ]:
         _login_google(token)
 
     assert "login_google resultado=" in caplog.text
     assert "cadastro_google resultado=cadastrado" in caplog.text
+    assert "login_google resultado=email_com_senha" in caplog.text
+    assert "login_google resultado=email_com_outro_google" in caplog.text
+    assert "email_com_outra_conta" not in caplog.text
     proibidos = [
         *tokens,
         "55555555555555555555",
@@ -404,6 +503,9 @@ def test_logs_nao_tem_id_token_email_nem_sub(
         usuario_google.google_sub,
         usuario_google.email,
         com_senha.email,
+        com_outro_google.email,
+        "77777777777777777777",
+        "88888888888888888888",
         "ninguem.aqui",
         "invalido.aqui",
         "@gmail.com",
