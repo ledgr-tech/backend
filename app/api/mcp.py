@@ -23,11 +23,17 @@ Antes de qualquer coisa do SDK, `PortaDoMcp`, nesta ordem:
 A conexão vai para as ferramentas em `scope["state"]`, que o SDK expõe em
 `ctx.request_context.request.state`. As ferramentas são só de leitura,
 sempre da empresa da conexão, e usam a mesma regra da `/v1`
-(app/services/api_publica.py): nunca devolvem descrição de lançamento, texto
-de justificativa, ressalva, nome de pessoa ou nome de arquivo. Cada uma
-devolve o resultado estruturado (com `outputSchema`) e um texto curto em
-português; entrada inválida é erro da ferramenta (`isError`), nunca exceção
-HTTP.
+(app/services/api_publica.py) e a ampliação da issue #225
+(app/services/api_publica_ampliada.py): nunca devolvem descrição de
+lançamento, texto de justificativa, ressalva, nome de pessoa ou nome de
+arquivo. Cada uma devolve o resultado estruturado (com `outputSchema`) e um
+texto curto em português; entrada inválida é erro da ferramenta (`isError`),
+nunca exceção HTTP. Nas ferramentas de mês, `competencia` omitida é o mês mais
+recente com conciliação.
+
+Ferramentas: empresa_conectada, meses_com_conciliacao, resumo_do_mes,
+visao_do_mes, conciliacoes_do_mes, divergencias_do_mes,
+detalhe_da_divergencia, pendencias_do_mes e fechamentos.
 
 Logs: o nome da ferramenta, o id da conexão e o resultado. Nunca o token nem o
 conteúdo das respostas.
@@ -39,8 +45,10 @@ import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -65,19 +73,17 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.rate_limit import LIMITE_MCP_POR_CONEXAO, limiter
 from app.models import Empresa
-from app.services import api_publica
+from app.services import api_publica, api_publica_ampliada
 from app.services.api_publica import (
-    CATEGORIAS_DE_DIVERGENCIA,
     LIMITE_MAXIMO,
     LIMITE_PADRAO,
     PADRAO_COMPETENCIA,
-    SITUACOES,
     ConciliacoesV1,
-    DivergenciasV1,
     FechamentosV1,
     MesesV1,
     ResumoV1,
 )
+from app.services.ia import detalhes as ia_detalhes
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +104,26 @@ MESES = (
     "dezembro",
 )
 INSTRUCOES = (
-    "Ledgr é um sistema brasileiro de conciliação bancária. Estas ferramentas leem, só para "
-    "consulta, a situação das conciliações de UMA empresa: a que o usuário escolheu ao "
-    "conectar. Comece por empresa_conectada ou meses_com_conciliacao. Competência é o mês no "
-    "formato AAAA-MM (ex.: 2026-09). Valores vêm como texto decimal em reais, com duas casas "
-    "e ponto (negativo é saída); datas em ISO 8601. As ferramentas nunca devolvem descrição "
-    "de lançamento, texto de justificativa, texto de ressalva, nome de arquivo nem nome de "
-    "pessoa: não invente esses dados."
+    "Ledgr é um sistema brasileiro de conciliação bancária: compara o extrato do banco com o do "
+    "sistema (ERP) da empresa, aponta as divergências, registra justificativas e fecha o mês. "
+    "Estas ferramentas leem, só para consulta, UMA empresa: a que o usuário escolheu ao "
+    "conectar. Nenhuma recebe id de empresa.\n\n"
+    "Por onde começar: resumo_do_mes (contagens) e visao_do_mes (dinheiro e saldos) dão a "
+    "visão do mês; divergencias_do_mes lista as divergências (com filtros e ordenação) e "
+    "detalhe_da_divergencia explica uma pelo `id`; pendencias_do_mes diz o que falta para "
+    "fechar; fechamentos diz quando cada mês foi fechado; meses_com_conciliacao lista os meses "
+    "disponíveis; empresa_conectada diz de qual empresa se trata.\n\n"
+    "Competência é o mês no formato AAAA-MM (ex.: 2026-09). Nas ferramentas de mês, omitir a "
+    "competência vale o mês mais recente com conciliação; a resposta traz a competência usada, "
+    "e vale dizer ao usuário de que mês se trata. Se o usuário citar só o nome do mês, "
+    "confirme o ano com meses_com_conciliacao.\n\n"
+    'Valores vêm como texto decimal em reais, com duas casas e ponto (ex.: "1250.00"; '
+    "negativo é saída); datas em ISO 8601. Não refaça contas: use os totais que as "
+    "ferramentas devolvem. Listas vêm paginadas, com `total` e `truncado`: se `truncado` for "
+    "verdadeiro, diga ao usuário que há mais ou filtre e pagine.\n\n"
+    "Privacidade: as ferramentas nunca devolvem descrição de lançamento, texto de "
+    "justificativa, texto de ressalva, nome de arquivo nem nome de pessoa. Não invente esses "
+    "dados: se o usuário pedir, explique que o Ledgr não os envia ao assistente."
 )
 SO_LEITURA = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -159,11 +178,19 @@ def _sucesso(
     )
 
 
-def _competencia_invalida(competencia: str | None) -> bool:
-    return competencia is None or not re.fullmatch(PADRAO_COMPETENCIA, competencia)
+def _competencia_invalida(competencia: str) -> bool:
+    return not re.fullmatch(PADRAO_COMPETENCIA, competencia)
 
 
 ERRO_COMPETENCIA = "Competência inválida: use o formato AAAA-MM, com mês de 01 a 12 (ex.: 2026-09)."
+ERRO_SEM_CONCILIACAO = (
+    "Esta empresa ainda não tem conciliação em nenhum mês. Peça ao usuário para conciliar "
+    "um extrato no Ledgr."
+)
+ERRO_DIVERGENCIA = (
+    "Divergência não encontrada. Liste as divergências com divergencias_do_mes e passe o "
+    "`id` de um item; o `id` muda se a conciliação do par for refeita."
+)
 
 
 # --- ferramentas ---------------------------------------------------------------------------
@@ -189,9 +216,53 @@ servidor = _sem_mexer_no_logger_raiz(
 )
 
 ParametroCompetencia = Annotated[
-    str,
-    Field(description="Mês de referência no formato AAAA-MM, por exemplo 2026-09."),
+    str | None,
+    Field(
+        description=(
+            "Mês de referência no formato AAAA-MM, por exemplo 2026-09. "
+            "Omitida: o mês mais recente com conciliação."
+        )
+    ),
 ]
+ParametroValorMinimo = Annotated[
+    Decimal | None,
+    Field(
+        description=(
+            "Só valores de pelo menos isto, em reais (ex.: 1000 ou 1000.50). Vale para o valor "
+            "absoluto: entradas e saídas entram igual."
+        )
+    ),
+]
+ParametroValorMaximo = Annotated[
+    Decimal | None,
+    Field(
+        description=(
+            "Só valores de no máximo isto, em reais. Vale para o valor absoluto, como `valor_minimo`."
+        )
+    ),
+]
+
+
+def _competencia_em_uso(
+    db, nome: str, conexao: ConexaoAutenticada, competencia: str | None
+) -> tuple[str | None, CallToolResult | None]:
+    """A competência pedida ou, se omitida, a do mês mais recente com conciliação."""
+    if competencia is not None:
+        if _competencia_invalida(competencia):
+            return None, _erro(nome, conexao, ERRO_COMPETENCIA, "competencia_invalida")
+        return competencia, None
+    recente = api_publica_ampliada.competencia_mais_recente(db, conexao.empresa_id)
+    if recente is None:
+        return None, _erro(nome, conexao, ERRO_SEM_CONCILIACAO, "sem_conciliacao")
+    return recente, None
+
+
+def _erro_sem_conciliacao(nome: str, conexao: ConexaoAutenticada, competencia: str):
+    mensagem = (
+        f"Não há conciliação em {_mes_por_extenso(competencia).lower()}. "
+        "Use meses_com_conciliacao para ver os meses que têm."
+    )
+    return _erro(nome, conexao, mensagem, "sem_conciliacao")
 
 
 class EmpresaConectada(BaseModel):
@@ -206,7 +277,9 @@ class EmpresaConectada(BaseModel):
     description=(
         "Devolve a razão social e o CNPJ da empresa que esta conexão lê. A conexão vale para "
         "uma empresa só, escolhida pelo usuário ao conectar: todas as outras ferramentas "
-        "respondem sobre ela. Use para confirmar de qual empresa se trata."
+        "respondem sobre ela, e nenhuma recebe id de empresa. Use para confirmar de qual empresa "
+        "se trata ou para citar o nome dela num resumo. Exemplo: 'de qual empresa você está "
+        "falando?'."
     ),
     annotations=SO_LEITURA,
 )
@@ -225,7 +298,8 @@ def empresa_conectada(ctx: Context) -> Annotated[CallToolResult, EmpresaConectad
         "Lista as competências (meses, AAAA-MM) que têm conciliação, das mais recentes para as "
         "mais antigas, no máximo 24, cada uma com `fechado` (se o mês está fechado). A "
         "competência de uma conciliação é o mês em que começa o extrato do banco. Use para "
-        "descobrir quais meses consultar antes de chamar as outras ferramentas."
+        "descobrir quais meses consultar e quais ainda não foram fechados. Exemplos: 'quais "
+        "meses já conciliei?', 'quais meses ainda não foram fechados?'."
     ),
     annotations=SO_LEITURA,
 )
@@ -248,22 +322,26 @@ def meses_com_conciliacao(ctx: Context) -> Annotated[CallToolResult, MesesV1]:
 @servidor.tool(
     title="Resumo do mês",
     description=(
-        "Situação de uma competência: se o mês está fechado (e se foi com ressalva, sem o texto "
-        "dela), se está pronto para fechar e quantas linhas há em cada categoria da conciliação "
-        "e em cada situação (justificadas, aguardando aprovação, pendentes, linhas não lidas). "
-        "Use para responder 'como está setembro?' ou 'quantas divergências tive?'. "
-        "Divergências são as linhas fora de match_exato, match_tolerancia e match_agrupado "
-        "(um lote que fechou ao centavo: um lançamento contra vários do outro lado)."
+        "Situação de uma competência em contagens: se o mês está fechado (e se foi com ressalva, "
+        "sem o texto dela), se está pronto para fechar e quantas linhas há em cada categoria da "
+        "conciliação e em cada situação (justificadas, aguardando aprovação, pendentes, linhas "
+        "não lidas). Divergências são as linhas fora de match_exato, match_tolerancia e "
+        "match_agrupado (um lote que fechou ao centavo: um lançamento contra vários do outro "
+        "lado). Para dinheiro e saldos, use visao_do_mes; para o que falta para fechar, "
+        "pendencias_do_mes. Sem `competencia`, o mês mais recente com conciliação. Exemplos: "
+        "'como foi a conciliação de outubro?', 'quantas divergências tive em setembro?'."
     ),
     annotations=SO_LEITURA,
 )
 def resumo_do_mes(
-    competencia: ParametroCompetencia, ctx: Context
+    ctx: Context, competencia: ParametroCompetencia = None
 ) -> Annotated[CallToolResult, ResumoV1]:
+    nome = "resumo_do_mes"
     conexao = _conexao(ctx)
-    if _competencia_invalida(competencia):
-        return _erro("resumo_do_mes", conexao, ERRO_COMPETENCIA, "competencia_invalida")
     with SessionLocal() as db:
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
         modelo = api_publica.resumo_do_mes(db, conexao.empresa_id, competencia)
     c = modelo.contagens
     divergencias = c.total - c.match_exato - c.match_tolerancia - c.match_agrupado
@@ -283,7 +361,62 @@ def resumo_do_mes(
         texto = f"{_mes_por_extenso(competencia)}: sem conciliação, {estado}."
     else:
         texto = f"{_mes_por_extenso(competencia)}: {', '.join(partes)}, {estado}."
-    return _sucesso("resumo_do_mes", conexao, modelo, texto)
+    return _sucesso(nome, conexao, modelo, texto)
+
+
+@servidor.tool(
+    title="Visão do mês",
+    description=(
+        "O mês como um todo, em dinheiro: para o banco e para o sistema, quanto entrou (créditos) "
+        "e saiu (débitos, negativos), o líquido e o saldo final do extrato; a diferença líquida "
+        "entre os dois lados, se os saldos finais batem, o percentual conciliado em quantidade e "
+        "em valor, e os totais de tarifa bancária, duplicados e agrupamentos. Use para 'quanto "
+        "entrou e saiu', 'o saldo bate?' e 'quanto foi de tarifa'. Para contagens por categoria, "
+        "use resumo_do_mes. O saldo final só vem quando o lado tem um extrato só e o arquivo "
+        "traz saldo. Sem `competencia`, o mês mais recente com conciliação. Exemplos: 'quanto "
+        "entrou e quanto saiu em outubro, no banco e no sistema?', 'o saldo final do extrato "
+        "bate com o do sistema?'."
+    ),
+    annotations=SO_LEITURA,
+)
+def visao_do_mes(
+    ctx: Context, competencia: ParametroCompetencia = None
+) -> Annotated[CallToolResult, api_publica_ampliada.VisaoDoMesV1]:
+    nome = "visao_do_mes"
+    conexao = _conexao(ctx)
+    with SessionLocal() as db:
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
+        try:
+            modelo = api_publica_ampliada.visao_do_mes(db, conexao.empresa_id, competencia)
+        except api_publica_ampliada.SemConciliacao:
+            return _erro_sem_conciliacao(nome, conexao, competencia)
+
+    def reais(valor: Decimal) -> str:
+        return ia_detalhes.formatar_valor(abs(valor))
+
+    def percentual(valor: Decimal | None) -> str:
+        return "sem dados" if valor is None else ia_detalhes.formatar_percentual(valor)
+
+    texto = (
+        f"{_mes_por_extenso(competencia)}: {percentual(modelo.percentual_conciliado_quantidade)} "
+        f"das linhas conciliadas ({percentual(modelo.percentual_conciliado_valor)} do valor do "
+        f"banco). Banco: entrou {reais(modelo.banco.entradas)} e saiu {reais(modelo.banco.saidas)}. "
+        f"Sistema: entrou {reais(modelo.sistema.entradas)} e saiu "
+        f"{reais(modelo.sistema.saidas)}. Diferença líquida (banco menos sistema): "
+        f"{ia_detalhes.formatar_valor(modelo.diferenca_liquida)}."
+    )
+    if modelo.saldos_batem is None:
+        texto += " Saldo final: indisponível em um dos lados."
+    elif modelo.saldos_batem:
+        texto += " Os saldos finais do banco e do sistema batem."
+    else:
+        texto += (
+            f" Os saldos finais não batem: diferença de "
+            f"{ia_detalhes.formatar_valor(modelo.diferenca_de_saldo)}."
+        )
+    return _sucesso(nome, conexao, modelo, texto)
 
 
 @servidor.tool(
@@ -291,63 +424,82 @@ def resumo_do_mes(
     description=(
         "Os pares conciliados vigentes de uma competência: para cada extrato do banco do mês, a "
         "conciliação da rodada mais recente, com data de execução, período do extrato e "
-        "contagens por categoria. Use para saber quais conciliações compõem o mês."
+        "contagens por categoria. Use para saber quais conciliações compõem o mês, quantas "
+        "rodadas houve e quando rodaram; não traz nomes de arquivo. Sem `competencia`, o mês "
+        "mais recente com conciliação. Exemplo: 'quando a conciliação de setembro foi feita?'."
     ),
     annotations=SO_LEITURA,
 )
 def conciliacoes_do_mes(
-    competencia: ParametroCompetencia, ctx: Context
+    ctx: Context, competencia: ParametroCompetencia = None
 ) -> Annotated[CallToolResult, ConciliacoesV1]:
+    nome = "conciliacoes_do_mes"
     conexao = _conexao(ctx)
-    if _competencia_invalida(competencia):
-        return _erro("conciliacoes_do_mes", conexao, ERRO_COMPETENCIA, "competencia_invalida")
     with SessionLocal() as db:
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
         modelo = api_publica.conciliacoes_do_mes(db, conexao.empresa_id, competencia)
     texto = (
         f"{_mes_por_extenso(competencia)}: "
         f"{_plural(len(modelo.itens), 'conciliação vigente', 'conciliações vigentes')}."
     )
-    return _sucesso("conciliacoes_do_mes", conexao, modelo, texto)
+    return _sucesso(nome, conexao, modelo, texto)
 
 
 @servidor.tool(
     title="Divergências do mês",
     description=(
-        "As linhas divergentes de uma competência, com categoria, data, valor (texto decimal "
-        "em reais), lado (banco, sistema ou ambos) e situação. Nunca traz a descrição do "
-        "lançamento nem o texto da justificativa. Paginada: `total` diz quantas há com os "
-        "filtros; use `deslocamento` para as próximas páginas. Filtros opcionais: categoria "
-        f"({', '.join(CATEGORIAS_DE_DIVERGENCIA)}) e situação ({', '.join(SITUACOES)})."
+        "As linhas divergentes de uma competência, com `id`, categoria, data, valor (texto "
+        "decimal em reais), lado (banco, sistema ou ambos) e situação. Nunca traz a descrição "
+        "do lançamento nem o texto da justificativa. Filtros opcionais: `categoria`, "
+        "`situacao`, `valor_minimo` e `valor_maximo` (valor absoluto, em reais). Ordena por data "
+        "(padrão) ou por valor absoluto (`ordenar_por`), crescente ou decrescente (`ordem`). "
+        "Paginada: `total` diz quantas há com os filtros e `truncado` se há mais além da "
+        "página; use `deslocamento` para as próximas. Para explicar uma divergência, passe o "
+        "`id` dela a detalhe_da_divergencia; para o que falta para fechar, use "
+        "pendencias_do_mes. Sem `competencia`, o mês mais recente com conciliação. Exemplos: "
+        "'quais são as dez maiores divergências do mês?' (ordenar_por=valor, ordem=desc, "
+        "limite=10), 'quais divergências de valor passam de R$ 1.000?' "
+        "(categoria=divergente_valor, valor_minimo=1000)."
     ),
     annotations=SO_LEITURA,
 )
 def divergencias_do_mes(
-    competencia: ParametroCompetencia,
     ctx: Context,
+    competencia: ParametroCompetencia = None,
     categoria: Annotated[
-        str | None,
-        Field(description=f"Tipo de divergência: {', '.join(CATEGORIAS_DE_DIVERGENCIA)}."),
+        api_publica.Categoria | None, Field(description="Só divergências deste tipo.")
     ] = None,
     situacao: Annotated[
-        str | None, Field(description=f"Situação da linha: {', '.join(SITUACOES)}.")
+        api_publica.Situacao | None,
+        Field(
+            description=(
+                "Só linhas nesta situação: sem_justificativa (ninguém tratou), "
+                "aguardando_aprovacao (justificada, falta aprovar), justificada (aprovada) ou "
+                "conferida."
+            )
+        ),
     ] = None,
+    valor_minimo: ParametroValorMinimo = None,
+    valor_maximo: ParametroValorMaximo = None,
+    ordenar_por: Annotated[
+        api_publica.Ordenar,
+        Field(description="Ordena por `data` (padrão) ou por `valor` (valor absoluto)."),
+    ] = "data",
+    ordem: Annotated[
+        api_publica.Ordem,
+        Field(description="`asc` (padrão, do menor para o maior) ou `desc`."),
+    ] = "asc",
     limite: Annotated[
         int, Field(description=f"Itens por página, de 1 a {LIMITE_MAXIMO}. Padrão {LIMITE_PADRAO}.")
     ] = LIMITE_PADRAO,
     deslocamento: Annotated[int, Field(description="Quantos itens pular. Padrão 0.")] = 0,
-) -> Annotated[CallToolResult, DivergenciasV1]:
+) -> Annotated[CallToolResult, api_publica_ampliada.DivergenciasComIdV1]:
     nome = "divergencias_do_mes"
     conexao = _conexao(ctx)
-    if _competencia_invalida(competencia):
+    if competencia is not None and _competencia_invalida(competencia):
         return _erro(nome, conexao, ERRO_COMPETENCIA, "competencia_invalida")
-    if categoria is not None and categoria not in CATEGORIAS_DE_DIVERGENCIA:
-        mensagem = (
-            f"Categoria desconhecida. Use uma destas: {', '.join(CATEGORIAS_DE_DIVERGENCIA)}."
-        )
-        return _erro(nome, conexao, mensagem, "categoria_invalida")
-    if situacao is not None and situacao not in SITUACOES:
-        mensagem = f"Situação desconhecida. Use uma destas: {', '.join(SITUACOES)}."
-        return _erro(nome, conexao, mensagem, "situacao_invalida")
     if not 1 <= limite <= LIMITE_MAXIMO:
         mensagem = f"O limite vai de 1 a {LIMITE_MAXIMO}."
         return _erro(nome, conexao, mensagem, "limite_invalido")
@@ -355,22 +507,157 @@ def divergencias_do_mes(
         return _erro(
             nome, conexao, "O deslocamento não pode ser negativo.", "deslocamento_invalido"
         )
+    erro_valor = _erro_de_faixa_de_valor(nome, conexao, valor_minimo, valor_maximo)
+    if erro_valor is not None:
+        return erro_valor
     with SessionLocal() as db:
-        modelo = api_publica.divergencias_do_mes(
-            db, conexao.empresa_id, competencia, categoria, situacao, limite, deslocamento
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
+        modelo = api_publica_ampliada.divergencias_com_id(
+            db,
+            conexao.empresa_id,
+            competencia,
+            categoria=categoria,
+            situacao=situacao,
+            valor_minimo=valor_minimo,
+            valor_maximo=valor_maximo,
+            ordenar_por=ordenar_por,
+            ordem=ordem,
+            limit=limite,
+            offset=deslocamento,
         )
     texto = (
         f"{_mes_por_extenso(competencia)}: {_plural(modelo.total, 'divergência', 'divergências')}"
     )
-    if categoria or situacao:
+    if any(f is not None for f in (categoria, situacao, valor_minimo, valor_maximo)):
         texto += " com os filtros"
     if modelo.itens:
         texto += f"; mostrando {len(modelo.itens)} a partir da {deslocamento + 1}ª."
     else:
         texto += "."
-    if modelo.total > deslocamento + len(modelo.itens) and modelo.itens:
+    if modelo.truncado:
         texto += " Há mais páginas."
     return _sucesso(nome, conexao, modelo, texto)
+
+
+def _erro_de_faixa_de_valor(
+    nome: str,
+    conexao: ConexaoAutenticada,
+    minimo: Decimal | None,
+    maximo: Decimal | None,
+) -> CallToolResult | None:
+    if any(v is not None and (v < 0 or not v.is_finite()) for v in (minimo, maximo)):
+        mensagem = (
+            "Os valores mínimo e máximo não podem ser negativos: o filtro vale para o valor "
+            "absoluto (R$ 1.000 pega entradas e saídas de R$ 1.000)."
+        )
+        return _erro(nome, conexao, mensagem, "valor_invalido")
+    if minimo is not None and maximo is not None and minimo > maximo:
+        return _erro(
+            nome, conexao, "O valor mínimo não pode ser maior que o máximo.", "valor_invalido"
+        )
+    return None
+
+
+@servidor.tool(
+    title="Detalhe da divergência",
+    description=(
+        "Uma divergência explicada com fatos calculados, sem IA: o lançamento da linha e, quando "
+        "há, o do outro lado (data, valor e tipo; nunca a descrição), a diferença de valor e de "
+        "dias, a categoria, a tolerância de dias da rodada, a situação da decisão (sem o texto "
+        "da justificativa) e uma explicação em português com os números. Precisa do `id` de um "
+        "item de divergencias_do_mes (ou de pendencias_do_mes). O `id` muda se a conciliação do "
+        "par for refeita: se der 'não encontrada', liste de novo. Exemplo: 'por que essa "
+        "divergência de R$ 350,00 aconteceu?' (ache-a em divergencias_do_mes pelo valor e passe "
+        "o `id`)."
+    ),
+    annotations=SO_LEITURA,
+)
+def detalhe_da_divergencia(
+    ctx: Context,
+    id: Annotated[
+        str,
+        Field(description="Identificador (UUID) da divergência, o `id` de divergencias_do_mes."),
+    ],
+) -> Annotated[CallToolResult, api_publica_ampliada.DetalheDaDivergenciaV1]:
+    nome = "detalhe_da_divergencia"
+    conexao = _conexao(ctx)
+    try:
+        divergencia_id = uuid.UUID(id)
+    except ValueError:
+        return _erro(nome, conexao, ERRO_DIVERGENCIA, "id_invalido")
+    with SessionLocal() as db:
+        try:
+            modelo = api_publica_ampliada.detalhe_da_divergencia(
+                db, conexao.empresa_id, divergencia_id
+            )
+        except api_publica_ampliada.DivergenciaNaoEncontrada:
+            return _erro(nome, conexao, ERRO_DIVERGENCIA, "nao_encontrada")
+    texto = (
+        f"Divergência de {_mes_por_extenso(modelo.competencia).lower()} "
+        f"({modelo.situacao.replace('_', ' ')}). {modelo.explicacao}"
+    )
+    return _sucesso(nome, conexao, modelo, texto)
+
+
+@servidor.tool(
+    title="Pendências do mês",
+    description=(
+        "O que falta para fechar um mês: as divergências sem justificativa e as com "
+        "justificativa aguardando aprovação (contagem e ids, das de maior valor para as de "
+        "menor), as linhas não lidas, `pode_fechar` (sem ressalva), `pode_fechar_com_ressalva` e "
+        "a lista de `motivos` que impedem. Regra do Ledgr: justificativa não aprovada impede "
+        "o fechamento sempre; divergência sem justificativa e linha não lida só impedem "
+        "fechar sem ressalva. Use os ids com detalhe_da_divergencia. Não traz o texto das "
+        "justificativas. Sem `competencia`, o mês mais recente com conciliação. Exemplos: "
+        "'outubro pode ser fechado? o que falta?', 'o que está aguardando aprovação?'."
+    ),
+    annotations=SO_LEITURA,
+)
+def pendencias_do_mes(
+    ctx: Context, competencia: ParametroCompetencia = None
+) -> Annotated[CallToolResult, api_publica_ampliada.PendenciasV1]:
+    nome = "pendencias_do_mes"
+    conexao = _conexao(ctx)
+    with SessionLocal() as db:
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
+        try:
+            modelo = api_publica_ampliada.pendencias_do_mes(db, conexao.empresa_id, competencia)
+        except api_publica_ampliada.SemConciliacao:
+            return _erro_sem_conciliacao(nome, conexao, competencia)
+    mes = _mes_por_extenso(competencia)
+    if modelo.pode_fechar:
+        texto = f"{mes}: pode ser fechado, sem pendências."
+    else:
+        motivos = ", ".join(
+            _quantidade_do_motivo(m) for m in modelo.motivos if m.codigo != "mes_fechado"
+        )
+        if modelo.fechado:
+            texto = f"{mes}: já está fechado."
+        elif modelo.pode_fechar_com_ressalva:
+            texto = f"{mes}: não fecha sem ressalva ({motivos}); fecha com ressalva."
+        else:
+            texto = f"{mes}: não pode ser fechado ({motivos})."
+    return _sucesso(nome, conexao, modelo, texto)
+
+
+def _quantidade_do_motivo(motivo: api_publica_ampliada.MotivoV1) -> str:
+    rotulos = {
+        "justificativas_aguardando_aprovacao": (
+            "justificativa aguardando aprovação",
+            "justificativas aguardando aprovação",
+        ),
+        "divergencias_sem_justificativa": (
+            "divergência sem justificativa",
+            "divergências sem justificativa",
+        ),
+        "linhas_nao_lidas": ("linha não lida", "linhas não lidas"),
+    }
+    singular, plural = rotulos.get(motivo.codigo, (motivo.codigo, motivo.codigo))
+    return _plural(motivo.quantidade, singular, plural)
 
 
 @servidor.tool(
@@ -379,7 +666,9 @@ def divergencias_do_mes(
         "Os fechamentos de mês da empresa, ativos e reabertos, dos mais recentes para os mais "
         "antigos, com as contagens congeladas no fechamento e `com_ressalva` (sem o texto da "
         "ressalva). Com `competencia` (AAAA-MM), só os daquele mês. Use para saber quando um "
-        "mês foi fechado ou reaberto."
+        "mês foi fechado ou reaberto; para saber se um mês aberto pode fechar, use "
+        "pendencias_do_mes. Exemplos: 'quando foi fechado setembro?', 'quais meses foram "
+        "fechados com ressalva?'."
     ),
     annotations=SO_LEITURA,
 )
