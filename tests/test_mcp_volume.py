@@ -27,6 +27,8 @@ import re
 import time
 import uuid
 from collections import Counter
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -35,9 +37,11 @@ from sqlalchemy import event, insert
 from test_mcp_oauth import mcp  # noqa: F401 - fixture usada com usefixtures
 from test_mcp_servidor import _com_cliente, cenario  # noqa: F401 - `cenario` é fixture
 
+from app.core.config import settings
 from app.core.database import engine
 from app.models import Extrato, Lancamento
 from app.parsers.csv import parse_csv
+from app.parsers.tipos import LancamentoNormalizado, ResultadoParsing
 
 TETO_SEGURANCA_SEGUNDOS = 10.0
 TETO_PAYLOAD_LISTA_BYTES = 150_000
@@ -49,9 +53,15 @@ gerador = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gerador)
 
 
-def _mes_sintetico(db, empresa_id, por_lado: int, seed: int) -> uuid.UUID:
-    """Concilia, pela API, um mês sintético de `por_lado` lançamentos de cada lado.
-    Devolve o id do extrato do banco."""
+PARCELAS_DO_LOTE = (5000, 8000, 11000, 12500, 14000, 15500, 17000, 18500, 21000, 27500)
+
+
+def _mes_sintetico(db, empresa_id, por_lado: int, seed: int, mes: int = 10, lote: bool = True):
+    """Os dois extratos de um mês sintético de `por_lado` lançamentos de cada lado, mais, com
+    `lote`, um débito de R$ 150.000,00 no banco contra dez parcelas no sistema, no dia 31 (o
+    gerador só usa os dias 1 a 30: nada mais cai na janela do lote, e a soma é única). As datas
+    do gerador, de setembro, são levadas para `mes` (de 10 a 12). Devolve os ids do banco e do
+    sistema."""
 
     rng = random.Random(seed)
     banco, sistema = gerador._gerar_par(por_lado, por_lado * 3 // 4, rng)
@@ -62,6 +72,21 @@ def _mes_sintetico(db, empresa_id, por_lado: int, seed: int) -> uuid.UUID:
         )
         lidos = parse_csv(conteudo)
         assert len(lidos.lancamentos) == por_lado and not lidos.erros
+        itens = [
+            LancamentoNormalizado(l.data.replace(month=mes), l.valor, l.descricao, l.tipo)
+            for l in lidos.lancamentos
+        ]
+        if lote:
+            dia = date(2026, mes, 31) if mes != 11 else date(2026, 11, 30)
+            itens += (
+                [LancamentoNormalizado(dia, Decimal("-150000.00"), "LOTE", "debito")]
+                if lado == "banco"
+                else [
+                    LancamentoNormalizado(dia, Decimal(f"-{v}.00"), f"PARCELA {i}", "debito")
+                    for i, v in enumerate(PARCELAS_DO_LOTE)
+                ]
+            )
+        lidos = ResultadoParsing(lancamentos=itens, erros=[], saldo=lidos.saldo)
         extrato = Extrato(
             empresa_id=empresa_id,
             nome_arquivo=f"sintetico_{lado}.csv",
@@ -69,7 +94,7 @@ def _mes_sintetico(db, empresa_id, por_lado: int, seed: int) -> uuid.UUID:
             tamanho_bytes=len(conteudo),
             origem=lado,
             status="concluido",
-            quantidade_lancamentos=por_lado,
+            quantidade_lancamentos=len(lidos.lancamentos),
             periodo_inicio=min(l.data for l in lidos.lancamentos),
             periodo_fim=max(l.data for l in lidos.lancamentos),
             saldo_final=lidos.saldo.valor if lidos.saldo else None,
@@ -138,35 +163,55 @@ class _Consultas:
         self.comandos = []
 
 
+COMPETENCIA = "2026-10"
+
+
 def _medir(token: str, consultas: _Consultas) -> dict[str, dict]:
     """Chama as ferramentas de mês numa conexão só e devolve, por ferramenta, o
     tempo, o tamanho do payload e os comandos SQL."""
 
     async def _funcao(cliente):
         medidas = {}
-        lista = await cliente.call_tool("divergencias_do_mes", {"limite": 5})
+        lista = await cliente.call_tool(
+            "divergencias_do_mes", {"competencia": COMPETENCIA, "limite": 5}
+        )
         um_id = lista.structured_content["itens"][0]["id"]
+        mes = {"competencia": COMPETENCIA}
         chamadas = {
-            "resumo_do_mes": {},
-            "visao_do_mes": {},
-            "pendencias_do_mes": {},
-            "divergencias_do_mes (limite 50)": ({}, "divergencias_do_mes"),
+            "resumo_do_mes": ("resumo_do_mes", mes),
+            "visao_do_mes": ("visao_do_mes", mes),
+            "pendencias_do_mes": ("pendencias_do_mes", mes),
+            "divergencias_do_mes (limite 50)": ("divergencias_do_mes", mes),
             "divergencias_do_mes (limite 200, por valor)": (
-                {"limite": 200, "ordenar_por": "valor", "ordem": "desc"},
                 "divergencias_do_mes",
+                {**mes, "limite": 200, "ordenar_por": "valor", "ordem": "desc"},
             ),
             "divergencias_do_mes (filtro de valor)": (
-                {"valor_minimo": 1000, "limite": 200},
                 "divergencias_do_mes",
+                {**mes, "valor_minimo": 1000, "limite": 200},
             ),
-            "detalhe_da_divergencia": {"id": um_id},
+            "detalhe_da_divergencia": ("detalhe_da_divergencia", {"id": um_id}),
+            "lancamentos_do_mes (limite 50)": ("lancamentos_do_mes", mes),
+            "lancamentos_do_mes (limite 200, por valor)": (
+                "lancamentos_do_mes",
+                {**mes, "limite": 200, "ordenar_por": "valor", "ordem": "desc"},
+            ),
+            "lancamentos_do_mes (um valor)": (
+                "lancamentos_do_mes",
+                {**mes, "valor_minimo": 150000, "valor_maximo": 150000},
+            ),
+            "lancamentos_do_mes (dia, sem correspondência)": (
+                "lancamentos_do_mes",
+                {**mes, "lado": "banco", "data": "2026-10-12", "situacao": "sem_correspondencia"},
+            ),
+            "lancamentos_do_mes (débitos acima de 5 mil)": (
+                "lancamentos_do_mes",
+                {**mes, "tipo": "debito", "valor_minimo": 5000, "limite": 200},
+            ),
+            "comparar_meses (6 meses)": ("comparar_meses", {"quantidade": 6}),
+            "grupos_do_mes": ("grupos_do_mes", mes),
         }
-        for rotulo, definicao in chamadas.items():
-            nome, argumentos = (
-                (definicao[1], definicao[0])
-                if isinstance(definicao, tuple)
-                else (rotulo, definicao)
-            )
+        for rotulo, (nome, argumentos) in chamadas.items():
             consultas.zerar()
             consultas.ligado = True
             inicio = time.perf_counter()
@@ -179,6 +224,7 @@ def _medir(token: str, consultas: _Consultas) -> dict[str, dict]:
                 "segundos": duracao,
                 "bytes": len(json.dumps(resultado.structured_content)) + len(texto),
                 "comandos": list(consultas.comandos),
+                "resposta": resultado.structured_content,
             }
         return medidas
 
@@ -212,12 +258,17 @@ def test_ferramentas_com_10_mil_lancamentos_por_lado(
     cenario,  # noqa: F811
     db_session,
     criar_empresa,
+    monkeypatch,
 ):
+    monkeypatch.setattr(settings, "agrupamento_habilitado", True)
     conta_id = cenario.admin.conta_id
     pequena = criar_empresa(razao_social="Pequena Ltda", conta_id=conta_id).id
     grande = criar_empresa(razao_social="Grande Ltda", conta_id=conta_id).id
     _conciliar(cenario, pequena, *_mes_sintetico(db_session, pequena, 2_000, seed=7))
     _conciliar(cenario, grande, *_mes_sintetico(db_session, grande, 10_000, seed=11))
+    # A grande tem mais dois meses (pequenos), para provar que a comparação não consulta por mês.
+    for mes, seed in ((11, 13), (12, 17)):
+        _conciliar(cenario, grande, *_mes_sintetico(db_session, grande, 200, seed, mes=mes))
 
     with _Consultas() as consultas:
         da_pequena = _medir(cenario.conectar(empresa_id=pequena), consultas)
@@ -236,5 +287,19 @@ def test_ferramentas_com_10_mil_lancamentos_por_lado(
     for rotulo, medida in da_grande.items():
         assert medida["segundos"] < TETO_SEGURANCA_SEGUNDOS, rotulo
         assert medida["bytes"] < TETO_PAYLOAD_LISTA_BYTES, rotulo
-        # Número fixo de consultas, qualquer que seja o tamanho do mês.
+        # Número fixo de consultas, qualquer que seja o tamanho do mês (e a quantidade de meses).
         assert len(medida["comandos"]) == len(da_pequena[rotulo]["comandos"]), rotulo
+    # O lote existe nos dois meses e a ferramenta o achou, como o primeiro dos grupos (o de maior
+    # soma): as sobras aleatórias do gerador também formam grupos pequenos.
+    for medidas in (da_pequena, da_grande):
+        grupos = medidas["grupos_do_mes"]["resposta"]
+        assert grupos["total"] >= 1 and grupos["itens"][0]["soma"] == "150000.00"
+        assert grupos["itens"][0]["quantidade_do_outro_lado"] == 10
+    assert [
+        m["competencia"] for m in da_grande["comparar_meses (6 meses)"]["resposta"]["itens"]
+    ] == [
+        "2026-10",
+        "2026-11",
+        "2026-12",
+    ]
+    assert da_grande["lancamentos_do_mes (um valor)"]["resposta"]["total"] == 1
