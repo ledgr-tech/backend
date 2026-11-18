@@ -47,6 +47,9 @@ FERRAMENTAS = {
     "conciliacoes_do_mes",
     "divergencias_do_mes",
     "fechamentos",
+    "visao_do_mes",
+    "detalhe_da_divergencia",
+    "pendencias_do_mes",
 }
 WWW_AUTHENTICATE = (
     f'Bearer resource_metadata="{ISSUER}/.well-known/oauth-protected-resource", '
@@ -80,18 +83,25 @@ def _chamar(token: str, nome: str, argumentos: dict | None = None):
 
 
 def _todas(token: str, competencia: str = "2026-09") -> dict:
-    """Chama as 6 ferramentas numa conexão só e devolve os resultados."""
+    """Chama todas as ferramentas numa conexão só e devolve os resultados."""
 
     async def _funcao(cliente):
         chamadas = {
             "empresa_conectada": {},
             "meses_com_conciliacao": {},
             "resumo_do_mes": {"competencia": competencia},
+            "visao_do_mes": {"competencia": competencia},
             "conciliacoes_do_mes": {"competencia": competencia},
             "divergencias_do_mes": {"competencia": competencia, "limite": 200},
+            "pendencias_do_mes": {"competencia": competencia},
             "fechamentos": {},
         }
-        return {nome: await cliente.call_tool(nome, args) for nome, args in chamadas.items()}
+        resultados = {nome: await cliente.call_tool(nome, args) for nome, args in chamadas.items()}
+        primeira = resultados["divergencias_do_mes"].structured_content["itens"][0]
+        resultados["detalhe_da_divergencia"] = await cliente.call_tool(
+            "detalhe_da_divergencia", {"id": primeira["id"]}
+        )
+        return resultados
 
     return _com_cliente(token, _funcao)
 
@@ -213,7 +223,7 @@ def cenario(
 
 @pytest.mark.parametrize("mode", ["legacy", "auto"])
 @pytest.mark.usefixtures("mcp")
-def test_initialize_e_lista_as_6_ferramentas_so_de_leitura(cenario, mode):
+def test_initialize_e_lista_as_ferramentas_so_de_leitura(cenario, mode):
     token = cenario.conectar()
 
     async def _funcao(cliente):
@@ -268,9 +278,12 @@ def test_saidas_batem_com_a_v1(cenario):
     assert resultados["conciliacoes_do_mes"].structured_content == v1(
         "/conciliacoes", competencia="2026-09"
     )
-    assert resultados["divergencias_do_mes"].structured_content == v1(
-        "/divergencias", competencia="2026-09", limit=200
-    )
+    # O MCP acrescenta o `id` de cada item e o `truncado`; o resto é o da /v1.
+    divergencias = resultados["divergencias_do_mes"].structured_content
+    for item in divergencias["itens"]:
+        item.pop("id")
+    assert divergencias.pop("truncado") is False
+    assert divergencias == v1("/divergencias", competencia="2026-09", limit=200)
     assert resultados["fechamentos"].structured_content == v1("/fechamentos")
 
 
@@ -315,15 +328,17 @@ def test_saidas_nao_tem_descricao_justificativa_ressalva_nomes_nem_arquivo(cenar
         ("resumo_do_mes", {"competencia": "setembro"}, "Competência inválida"),
         ("conciliacoes_do_mes", {"competencia": "2026-9"}, "Competência inválida"),
         ("fechamentos", {"competencia": "26-09"}, "Competência inválida"),
+        # Lista fechada no esquema: o próprio SDK recusa, isError, e a mensagem
+        # nomeia o argumento e os valores aceitos.
         (
             "divergencias_do_mes",
             {"competencia": "2026-09", "categoria": "x"},
-            "Categoria desconhecida",
+            "Input should be 'divergente_valor'",
         ),
         (
             "divergencias_do_mes",
             {"competencia": "2026-09", "situacao": "x"},
-            "Situação desconhecida",
+            "Input should be 'sem_justificativa'",
         ),
         ("divergencias_do_mes", {"competencia": "2026-09", "limite": 201}, "limite vai de 1 a 200"),
         ("divergencias_do_mes", {"competencia": "2026-09", "limite": 0}, "limite vai de 1 a 200"),
