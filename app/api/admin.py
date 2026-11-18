@@ -62,7 +62,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.empresas import _MASCARA_CNPJ, _SEM_ACENTO_PYTHON, _nome_normalizado
+from app.api.empresas import _MASCARA_CNPJ
 from app.core import plano
 from app.core.auth import SessaoAutenticada, _agora, obter_sessao_autenticada
 from app.core.database import SessionLocal, get_db
@@ -73,6 +73,7 @@ from app.core.rate_limit import (
     chave_por_usuario,
     limiter,
 )
+from app.core.sem_acento import sem_acento, sem_acento_sql
 from app.models import (
     AcessoAdmin,
     AssinaturaStripe,
@@ -358,9 +359,7 @@ def _filtro_da_busca(busca: str | None):
     if not texto:
         return None
     condicoes = [
-        _nome_normalizado(Conta.razao_social).contains(
-            texto.translate(_SEM_ACENTO_PYTHON).lower(), autoescape=True
-        ),
+        sem_acento_sql(Conta.razao_social).contains(sem_acento(texto), autoescape=True),
         Conta.id.in_(
             select(Usuario.conta_id).where(
                 Usuario.papel == "admin",

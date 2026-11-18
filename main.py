@@ -9,6 +9,7 @@ from app.api.admin_assinaturas import router as admin_assinaturas_router
 from app.api.assinatura import router as assinatura_router
 from app.api.assistente import router as assistente_router
 from app.api.auth import router as auth_router
+from app.api.busca import router as busca_router
 from app.api.chaves_api import router as chaves_api_router
 from app.api.conciliacoes import router as conciliacoes_router
 from app.api.conexoes_mcp import router as conexoes_mcp_router
@@ -104,6 +105,7 @@ app.include_router(oauth_router)
 app.include_router(conexoes_mcp_router)
 app.include_router(admin_router)
 app.include_router(admin_assinaturas_router)
+app.include_router(busca_router)
 # Rota exata, sem Mount: um Mount redirecionaria /mcp para /mcp/.
 app.router.add_route(caminho_do_mcp(), PortaDoMcp(), include_in_schema=False)
 
