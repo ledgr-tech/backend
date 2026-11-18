@@ -11,7 +11,7 @@ desde a issue #157, com o envelope das outras listagens (`total`, `limit`,
   CNPJ, com ou sem máscara. O CNPJ só entra na busca quando o texto, sem a
   máscara, tem algum dígito: senão "Padaria" acharia um CNPJ alfanumérico com
   essas letras. A comparação sem acento é um `translate` dos acentos do
-  português (`_COM_ACENTO`), sem a extensão `unaccent`;
+  português (`app/core/sem_acento.py`), sem a extensão `unaccent`;
 - `ordem`: `nome` (padrão), `cnpj` ou `status`, e `direcao`: `asc` (padrão) ou
   `desc`. As favoritas do usuário vêm sempre primeiro, em qualquer ordem; a
   pedida vale dentro de cada grupo. Desempate pela razão social e pelo id;
@@ -89,6 +89,7 @@ from app.api.auth import (
 from app.core.auth import exigir_papel, obter_usuario_autenticado
 from app.core.database import get_db
 from app.core.rate_limit import LIMITE_FAVORITAS_POR_USUARIO, chave_por_usuario, limiter
+from app.core.sem_acento import sem_acento, sem_acento_sql
 from app.models import (
     Configuracao,
     Conta,
@@ -107,12 +108,6 @@ router = APIRouter(prefix="/empresas", tags=["empresas"])
 
 LIMITE_EMPRESAS_POR_HORA = 20
 
-# Acentos do português, maiúsculos e minúsculos, e a letra sem acento. O mesmo
-# mapa normaliza a razão social no banco (`translate`) e a busca no Python,
-# então os dois lados comparam igual qualquer que seja o locale do Postgres.
-_COM_ACENTO = "ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ"
-_SEM_ACENTO = "aaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuuccnn"
-_SEM_ACENTO_PYTHON = str.maketrans(_COM_ACENTO, _SEM_ACENTO)
 _MASCARA_CNPJ = re.compile(r"[.\-/\s]")
 
 Ordem = Literal["nome", "cnpj", "status"]
@@ -156,20 +151,12 @@ def _resposta(empresa: Empresa) -> EmpresaResponse:
     )
 
 
-def _nome_normalizado(coluna):
-    return func.lower(func.translate(coluna, _COM_ACENTO, _SEM_ACENTO))
-
-
 def _filtro_da_busca(busca: str | None):
     """Condição da busca, ou None sem texto (regra no docstring do módulo)."""
     texto = (busca or "").strip()
     if not texto:
         return None
-    condicoes = [
-        _nome_normalizado(Empresa.razao_social).contains(
-            texto.translate(_SEM_ACENTO_PYTHON).lower(), autoescape=True
-        )
-    ]
+    condicoes = [sem_acento_sql(Empresa.razao_social).contains(sem_acento(texto), autoescape=True)]
     cnpj = _MASCARA_CNPJ.sub("", texto).upper()
     if cnpj.isalnum() and any(caractere.isdigit() for caractere in cnpj):
         condicoes.append(Empresa.cnpj.contains(cnpj, autoescape=True))
@@ -217,7 +204,7 @@ def listar_empresas(
     competencias, status_expr = _status_das_empresas(usuario.conta_id)
     favorita = EmpresaFavorita.usuario_id.is_not(None).label("favorita")
     status = status_expr.label("status")
-    nome = _nome_normalizado(Empresa.razao_social)
+    nome = sem_acento_sql(Empresa.razao_social)
     chave = {"nome": nome, "cnpj": Empresa.cnpj, "status": status}[ordem]
 
     consulta = (

@@ -124,6 +124,9 @@ LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 LIMITE_PREFERENCIAS_POR_USUARIO = "30/minute"
 # Favoritar e desfavoritar empresa (issue #157): um clique por empresa no seletor.
 LIMITE_FAVORITAS_POR_USUARIO = "30/minute"
+# Busca do topo do app (issue #220): o front consulta enquanto a pessoa digita,
+# com espera entre as teclas; o limite só barra o abuso.
+LIMITE_BUSCA_POR_USUARIO = "120/minute"
 # Revisão da importação via IA (issue #159): corrigir, remover, adicionar e
 # confirmar. A pessoa corrige linha a linha conferindo o PDF.
 LIMITE_REVISAO_IMPORTACAO_POR_USUARIO = "60/minute"
