@@ -33,7 +33,9 @@ recente com conciliação.
 
 Ferramentas: empresa_conectada, meses_com_conciliacao, resumo_do_mes,
 visao_do_mes, conciliacoes_do_mes, divergencias_do_mes,
-detalhe_da_divergencia, pendencias_do_mes e fechamentos.
+detalhe_da_divergencia, pendencias_do_mes, lancamentos_do_mes, comparar_meses,
+grupos_do_mes e fechamentos (12). Prompts: resumo_de_fechamento e
+priorizar_divergencias.
 
 Logs: o nome da ferramenta, o id da conexão e o resultado. Nunca o token nem o
 conteúdo das respostas.
@@ -48,6 +50,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import date
 from decimal import Decimal
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -109,10 +112,13 @@ INSTRUCOES = (
     "Estas ferramentas leem, só para consulta, UMA empresa: a que o usuário escolheu ao "
     "conectar. Nenhuma recebe id de empresa.\n\n"
     "Por onde começar: resumo_do_mes (contagens) e visao_do_mes (dinheiro e saldos) dão a "
-    "visão do mês; divergencias_do_mes lista as divergências (com filtros e ordenação) e "
-    "detalhe_da_divergencia explica uma pelo `id`; pendencias_do_mes diz o que falta para "
-    "fechar; fechamentos diz quando cada mês foi fechado; meses_com_conciliacao lista os meses "
-    "disponíveis; empresa_conectada diz de qual empresa se trata.\n\n"
+    "visão do mês; comparar_meses mostra a evolução entre meses; divergencias_do_mes lista as "
+    "divergências (com filtros e ordenação) e detalhe_da_divergencia explica uma pelo `id`; "
+    "lancamentos_do_mes acha e confere lançamentos por valor, data, tipo e situação; "
+    "grupos_do_mes mostra os pagamentos em lote conciliados por agrupamento; pendencias_do_mes "
+    "diz o que falta para fechar; fechamentos diz quando cada mês foi fechado; "
+    "meses_com_conciliacao lista os meses disponíveis; empresa_conectada diz de qual empresa "
+    "se trata.\n\n"
     "Competência é o mês no formato AAAA-MM (ex.: 2026-09). Nas ferramentas de mês, omitir a "
     "competência vale o mês mais recente com conciliação; a resposta traz a competência usada, "
     "e vale dizer ao usuário de que mês se trata. Se o usuário citar só o nome do mês, "
@@ -122,8 +128,9 @@ INSTRUCOES = (
     "ferramentas devolvem. Listas vêm paginadas, com `total` e `truncado`: se `truncado` for "
     "verdadeiro, diga ao usuário que há mais ou filtre e pagine.\n\n"
     "Privacidade: as ferramentas nunca devolvem descrição de lançamento, texto de "
-    "justificativa, texto de ressalva, nome de arquivo nem nome de pessoa. Não invente esses "
-    "dados: se o usuário pedir, explique que o Ledgr não os envia ao assistente."
+    "justificativa, texto de ressalva, nome de arquivo nem nome de pessoa. Um lançamento se "
+    "identifica por data, valor, tipo e `id`. Não invente esses dados: se o usuário pedir, "
+    "explique que o Ledgr não os envia ao assistente."
 )
 SO_LEITURA = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -183,6 +190,7 @@ def _competencia_invalida(competencia: str) -> bool:
 
 
 ERRO_COMPETENCIA = "Competência inválida: use o formato AAAA-MM, com mês de 01 a 12 (ex.: 2026-09)."
+ERRO_ATE = "Mês `ate` inválido: use o formato AAAA-MM, com mês de 01 a 12 (ex.: 2026-09)."
 ERRO_SEM_CONCILIACAO = (
     "Esta empresa ainda não tem conciliação em nenhum mês. Peça ao usuário para conciliar "
     "um extrato no Ledgr."
@@ -500,13 +508,9 @@ def divergencias_do_mes(
     conexao = _conexao(ctx)
     if competencia is not None and _competencia_invalida(competencia):
         return _erro(nome, conexao, ERRO_COMPETENCIA, "competencia_invalida")
-    if not 1 <= limite <= LIMITE_MAXIMO:
-        mensagem = f"O limite vai de 1 a {LIMITE_MAXIMO}."
-        return _erro(nome, conexao, mensagem, "limite_invalido")
-    if deslocamento < 0:
-        return _erro(
-            nome, conexao, "O deslocamento não pode ser negativo.", "deslocamento_invalido"
-        )
+    erro_pagina = _erro_de_pagina(nome, conexao, limite, LIMITE_MAXIMO, deslocamento)
+    if erro_pagina is not None:
+        return erro_pagina
     erro_valor = _erro_de_faixa_de_valor(nome, conexao, valor_minimo, valor_maximo)
     if erro_valor is not None:
         return erro_valor
@@ -661,6 +665,259 @@ def _quantidade_do_motivo(motivo: api_publica_ampliada.MotivoV1) -> str:
 
 
 @servidor.tool(
+    title="Lançamentos do mês",
+    description=(
+        "Os lançamentos (linhas dos extratos) do mês, do banco e do sistema, cada um com `id`, "
+        "data, valor, tipo (credito ou debito), lado e `situacao` (conciliado ou a categoria da "
+        "divergência em que caiu), mais o `divergencia_id` quando é divergência. Nunca traz a "
+        "descrição do lançamento: identifique um lançamento por valor, data e tipo. Filtros "
+        "opcionais: `lado`, `tipo`, `situacao`, `valor_minimo` e `valor_maximo` (valor absoluto, "
+        "em reais), `data` (um dia) ou `data_inicial` e `data_final`. Ordena por data (padrão) "
+        "ou por valor absoluto. Paginada: `total` diz quantos há com os filtros e `truncado` se "
+        "há mais além da página. Use para achar ou conferir lançamentos; para a lista de "
+        "divergências use divergencias_do_mes, e passe o `divergencia_id` a "
+        "detalhe_da_divergencia para explicar uma. Sem `competencia`, o mês mais recente com "
+        "conciliação. Exemplos: 'existe um lançamento de R$ 1.250,00 em outubro? foi "
+        "conciliado?' (valor_minimo=1250, valor_maximo=1250), 'quais lançamentos do banco no dia "
+        "12 ficaram sem correspondência?' (lado=banco, data=2026-10-12, "
+        "situacao=sem_correspondencia), 'liste os débitos acima de R$ 5.000' (tipo=debito, "
+        "valor_minimo=5000)."
+    ),
+    annotations=SO_LEITURA,
+)
+def lancamentos_do_mes(
+    ctx: Context,
+    competencia: ParametroCompetencia = None,
+    lado: Annotated[
+        api_publica_ampliada.LadoDoLancamento | None,
+        Field(description="Só lançamentos deste extrato: banco ou sistema (ERP)."),
+    ] = None,
+    tipo: Annotated[
+        api_publica_ampliada.TipoDoLancamento | None,
+        Field(description="credito (entrada) ou debito (saída)."),
+    ] = None,
+    situacao: Annotated[
+        api_publica_ampliada.SituacaoDoLancamento | None,
+        Field(
+            description=(
+                "Como a conciliação tratou o lançamento: conciliado (par exato, por tolerância "
+                "de data ou agrupado) ou a categoria da divergência (divergente_valor, "
+                "divergente_data, sem_correspondencia, duplicado, tarifa_bancaria)."
+            )
+        ),
+    ] = None,
+    valor_minimo: ParametroValorMinimo = None,
+    valor_maximo: ParametroValorMaximo = None,
+    data: Annotated[
+        date | None,
+        Field(description="Só lançamentos deste dia, ISO 8601 (ex.: 2026-10-12)."),
+    ] = None,
+    data_inicial: Annotated[
+        date | None, Field(description="Só lançamentos desta data em diante, inclusive.")
+    ] = None,
+    data_final: Annotated[
+        date | None, Field(description="Só lançamentos até esta data, inclusive.")
+    ] = None,
+    ordenar_por: Annotated[
+        api_publica.Ordenar,
+        Field(description="Ordena por `data` (padrão) ou por `valor` (valor absoluto)."),
+    ] = "data",
+    ordem: Annotated[
+        api_publica.Ordem,
+        Field(description="`asc` (padrão, do menor para o maior) ou `desc`."),
+    ] = "asc",
+    limite: Annotated[
+        int, Field(description=f"Itens por página, de 1 a {LIMITE_MAXIMO}. Padrão {LIMITE_PADRAO}.")
+    ] = LIMITE_PADRAO,
+    deslocamento: Annotated[int, Field(description="Quantos itens pular. Padrão 0.")] = 0,
+) -> Annotated[CallToolResult, api_publica_ampliada.LancamentosV1]:
+    nome = "lancamentos_do_mes"
+    conexao = _conexao(ctx)
+    if competencia is not None and _competencia_invalida(competencia):
+        return _erro(nome, conexao, ERRO_COMPETENCIA, "competencia_invalida")
+    erro_pagina = _erro_de_pagina(nome, conexao, limite, LIMITE_MAXIMO, deslocamento)
+    if erro_pagina is not None:
+        return erro_pagina
+    erro_valor = _erro_de_faixa_de_valor(nome, conexao, valor_minimo, valor_maximo)
+    if erro_valor is not None:
+        return erro_valor
+    if data is not None and (data_inicial is not None or data_final is not None):
+        mensagem = (
+            "Use `data` (um dia) ou `data_inicial` e `data_final` (um intervalo), não os dois."
+        )
+        return _erro(nome, conexao, mensagem, "data_invalida")
+    if data_inicial is not None and data_final is not None and data_inicial > data_final:
+        return _erro(nome, conexao, "A data inicial não pode ser depois da final.", "data_invalida")
+    if data is not None:
+        data_inicial = data_final = data
+    with SessionLocal() as db:
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
+        modelo = api_publica_ampliada.lancamentos_do_mes(
+            db,
+            conexao.empresa_id,
+            competencia,
+            lado=lado,
+            tipo=tipo,
+            situacao=situacao,
+            valor_minimo=valor_minimo,
+            valor_maximo=valor_maximo,
+            data_inicial=data_inicial,
+            data_final=data_final,
+            ordenar_por=ordenar_por,
+            ordem=ordem,
+            limit=limite,
+            offset=deslocamento,
+        )
+    texto = f"{_mes_por_extenso(competencia)}: {_plural(modelo.total, 'lançamento', 'lançamentos')}"
+    if any(f is not None for f in (lado, tipo, situacao, valor_minimo, valor_maximo)) or (
+        data_inicial is not None or data_final is not None
+    ):
+        texto += " com os filtros"
+    if modelo.itens:
+        texto += f"; mostrando {len(modelo.itens)} a partir do {deslocamento + 1}º."
+    else:
+        texto += "."
+    if modelo.truncado:
+        texto += " Há mais páginas."
+    return _sucesso(nome, conexao, modelo, texto)
+
+
+@servidor.tool(
+    title="Comparar meses",
+    description=(
+        "A série dos últimos meses com conciliação, do mais antigo para o mais recente, cada um "
+        "com as linhas, as conciliadas, as divergências por categoria (divergente_valor, "
+        "divergente_data, sem_correspondencia, duplicado, tarifa_bancaria) e a `variacao` "
+        "(diferença) para o mês anterior da série, em quantidade e em percentual do total de "
+        "divergências. Use para comparar meses e ver tendência. Para dinheiro e saldos de um "
+        "mês, use visao_do_mes. `quantidade` vai de 1 a "
+        f"{api_publica_ampliada.QUANTIDADE_MAXIMA_DE_MESES} (padrão "
+        f"{api_publica_ampliada.QUANTIDADE_PADRAO_DE_MESES}); `ate` é o último mês da série "
+        "(padrão: o mais recente com conciliação). Exemplos: 'como outubro se compara com "
+        "setembro?' (quantidade=2, ate=2026-10), 'como evoluíram as divergências nos últimos "
+        "seis meses?'."
+    ),
+    annotations=SO_LEITURA,
+)
+def comparar_meses(
+    ctx: Context,
+    quantidade: Annotated[
+        int,
+        Field(
+            description=(
+                f"Quantos meses, de 1 a {api_publica_ampliada.QUANTIDADE_MAXIMA_DE_MESES}. "
+                f"Padrão {api_publica_ampliada.QUANTIDADE_PADRAO_DE_MESES}."
+            )
+        ),
+    ] = api_publica_ampliada.QUANTIDADE_PADRAO_DE_MESES,
+    ate: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Último mês da série, AAAA-MM. Omitido: o mês mais recente com conciliação."
+            )
+        ),
+    ] = None,
+) -> Annotated[CallToolResult, api_publica_ampliada.ComparacaoV1]:
+    nome = "comparar_meses"
+    conexao = _conexao(ctx)
+    if ate is not None and _competencia_invalida(ate):
+        return _erro(nome, conexao, ERRO_ATE, "ate_invalido")
+    maximo = api_publica_ampliada.QUANTIDADE_MAXIMA_DE_MESES
+    if not 1 <= quantidade <= maximo:
+        return _erro(
+            nome, conexao, f"A quantidade de meses vai de 1 a {maximo}.", "quantidade_invalida"
+        )
+    with SessionLocal() as db:
+        modelo = api_publica_ampliada.comparar_meses(db, conexao.empresa_id, quantidade, ate)
+    if not modelo.itens:
+        return _erro(nome, conexao, ERRO_SEM_CONCILIACAO, "sem_conciliacao")
+    ultimo = modelo.itens[-1]
+    texto = (
+        f"{_plural(modelo.quantidade, 'mês', 'meses')} com conciliação, de "
+        f"{_mes_por_extenso(modelo.itens[0].competencia).lower()} a "
+        f"{_mes_por_extenso(ultimo.competencia).lower()}: {_plural(ultimo.divergencias.total, 'divergência', 'divergências')} "
+        f"no último"
+    )
+    if ultimo.variacao is not None:
+        delta = ultimo.variacao.total
+        texto += (
+            ", igual ao mês anterior"
+            if delta == 0
+            else f", {abs(delta)} {'a mais' if delta > 0 else 'a menos'} que no mês anterior"
+        )
+    return _sucesso(nome, conexao, modelo, texto + ".")
+
+
+@servidor.tool(
+    title="Grupos do mês",
+    description=(
+        "Os agrupamentos do mês: um lançamento de um lado cuja soma bate, ao centavo, com a de "
+        "vários do outro (pagamento em lote, um lançamento de R$ 4.000 contra dois de R$ 2.000). "
+        "Cada grupo traz o lado do lançamento único, a `soma` que fechou, o lançamento único "
+        "(`id`, data e valor) e os do outro lado (até "
+        f"{api_publica_ampliada.MEMBROS_POR_GRUPO}, com a quantidade total). Eles contam como "
+        "conciliados, não como divergência. Dos de maior soma para os de menor, paginados em "
+        f"até {api_publica_ampliada.GRUPOS_LIMITE_MAXIMO} grupos. Para só o total de grupos, "
+        "veja `agrupamentos` em visao_do_mes. Sem `competencia`, o mês mais recente com "
+        "conciliação. Exemplo: 'quais lançamentos foram conciliados por agrupamento e como a "
+        "soma foi formada?'."
+    ),
+    annotations=SO_LEITURA,
+)
+def grupos_do_mes(
+    ctx: Context,
+    competencia: ParametroCompetencia = None,
+    limite: Annotated[
+        int,
+        Field(
+            description=(
+                f"Grupos por página, de 1 a {api_publica_ampliada.GRUPOS_LIMITE_MAXIMO}. "
+                f"Padrão {api_publica_ampliada.GRUPOS_LIMITE_PADRAO}."
+            )
+        ),
+    ] = api_publica_ampliada.GRUPOS_LIMITE_PADRAO,
+    deslocamento: Annotated[int, Field(description="Quantos grupos pular. Padrão 0.")] = 0,
+) -> Annotated[CallToolResult, api_publica_ampliada.GruposV1]:
+    nome = "grupos_do_mes"
+    conexao = _conexao(ctx)
+    if competencia is not None and _competencia_invalida(competencia):
+        return _erro(nome, conexao, ERRO_COMPETENCIA, "competencia_invalida")
+    erro_pagina = _erro_de_pagina(
+        nome, conexao, limite, api_publica_ampliada.GRUPOS_LIMITE_MAXIMO, deslocamento
+    )
+    if erro_pagina is not None:
+        return erro_pagina
+    with SessionLocal() as db:
+        competencia, erro = _competencia_em_uso(db, nome, conexao, competencia)
+        if erro is not None:
+            return erro
+        modelo = api_publica_ampliada.grupos_do_mes(
+            db, conexao.empresa_id, competencia, limite, deslocamento
+        )
+    mes = _mes_por_extenso(competencia)
+    texto = f"{mes}: {_plural(modelo.total, 'agrupamento', 'agrupamentos')}"
+    if modelo.itens:
+        texto += f"; mostrando {len(modelo.itens)} a partir do {deslocamento + 1}º"
+    texto += ". Há mais páginas." if modelo.truncado else "."
+    return _sucesso(nome, conexao, modelo, texto)
+
+
+def _erro_de_pagina(
+    nome: str, conexao: ConexaoAutenticada, limite: int, maximo: int, deslocamento: int
+) -> CallToolResult | None:
+    if not 1 <= limite <= maximo:
+        return _erro(nome, conexao, f"O limite vai de 1 a {maximo}.", "limite_invalido")
+    if deslocamento < 0:
+        return _erro(
+            nome, conexao, "O deslocamento não pode ser negativo.", "deslocamento_invalido"
+        )
+    return None
+
+
+@servidor.tool(
     title="Fechamentos",
     description=(
         "Os fechamentos de mês da empresa, ativos e reabertos, dos mais recentes para os mais "
@@ -695,6 +952,50 @@ def fechamentos(
             f"de {_mes_por_extenso(recente.competencia).lower()}, {estado}."
         )
     return _sucesso("fechamentos", conexao, modelo, texto)
+
+
+# --- prompts (M4) ----------------------------------------------------------------------------
+
+
+def _mes_do_prompt(competencia: str | None) -> str:
+    return f"o mês {competencia}" if competencia else "o mês mais recente com conciliação"
+
+
+@servidor.prompt(
+    name="resumo_de_fechamento",
+    title="Resumo de fechamento",
+    description=(
+        "Monta um resumo do fechamento de um mês para o usuário mandar ao cliente da empresa."
+    ),
+)
+def resumo_de_fechamento(competencia: str | None = None) -> str:
+    return (
+        f"Faça um resumo do fechamento de {_mes_do_prompt(competencia)} para eu mandar ao "
+        "cliente. Use as ferramentas do Ledgr, nesta ordem: empresa_conectada (nome da "
+        "empresa), resumo_do_mes e visao_do_mes (conciliação, entradas, saídas e saldos), "
+        "pendencias_do_mes (se pode fechar e o que falta), divergencias_do_mes com "
+        "ordenar_por=valor, ordem=desc e limite=5 (as maiores divergências) e fechamentos (se e "
+        "quando o mês foi fechado). Escreva em português, em tom profissional e curto: situação "
+        "geral, números principais, o que ficou pendente e o próximo passo. Use só os números "
+        "que as ferramentas devolveram e não invente descrição de lançamento nem nomes."
+    )
+
+
+@servidor.prompt(
+    name="priorizar_divergencias",
+    title="Priorizar divergências",
+    description="Lista por onde começar a tratar as divergências de um mês, das mais importantes.",
+)
+def priorizar_divergencias(competencia: str | None = None) -> str:
+    return (
+        f"Quero tratar as divergências de {_mes_do_prompt(competencia)}. Use pendencias_do_mes "
+        "para ver o que falta justificar ou aprovar, divergencias_do_mes com "
+        "situacao=sem_justificativa, ordenar_por=valor e ordem=desc para as maiores, e "
+        "detalhe_da_divergencia nas três primeiras. Proponha uma ordem de ataque: primeiro o que "
+        "tem maior valor ou impede o fechamento, depois o resto, e diga em uma frase o que "
+        "provavelmente explica cada uma, com base só nos fatos calculados que as ferramentas "
+        "devolveram. Não invente descrição de lançamento."
+    )
 
 
 # --- porta de entrada ----------------------------------------------------------------------
