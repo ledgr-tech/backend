@@ -291,7 +291,9 @@ def _divergencias(
         linhas = [linha for linha in linhas if linha.categoria == categoria]
     mes = _maiuscula(_mes(competencia))
     links = _links_das_conciliacoes(pares, competencia)
-    pendentes = sum(1 for linha in linhas if linha.situacao == "sem_justificativa")
+    # Como o resumo do mês (`fechamentos.resumo_do_mes`) e a Visão geral: a
+    # conferida não tem justificativa e continua pendente.
+    pendentes = sum(1 for linha in linhas if linha.situacao in ("sem_justificativa", "conferida"))
     if categoria is not None:
         singular, plural = _CATEGORIAS[categoria]
         if not linhas:

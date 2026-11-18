@@ -410,3 +410,15 @@ def test_nenhum_numero_da_resposta_sai_do_banco_sem_formatacao(empresa):
 
     assert "R$ 12.345,67" in resposta.texto
     assert not re.search(r"\d\.\d{2}\b", resposta.texto)
+
+
+def test_divergencias_contam_a_conferida_como_o_resumo_do_mes(empresa, db_session):
+    """A conferida continua pendente (não tem justificativa), como no resumo do
+    mês e na Visão geral: as duas respostas dizem o mesmo número."""
+    banco = _setembro_com_divergencias(empresa)
+    empresa.decidir(banco, "33.30", "conferida")
+    pendentes = api_publica.resumo_do_mes(db_session, empresa.id, "2026-09").contagens.pendentes
+
+    resposta = empresa.perguntar(_consulta("divergencias_do_mes", competencia="2026-09"))
+
+    assert resposta.texto.endswith(f"{pendentes} estão sem justificativa.")
