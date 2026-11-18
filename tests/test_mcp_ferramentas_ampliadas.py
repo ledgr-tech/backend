@@ -35,6 +35,19 @@ from app.core.config import settings
 from app.models import Extrato, Lancamento
 from main import app
 
+# As ferramentas que `test_nenhuma_ferramenta_devolve_dado_proibido` percorre; as do PR 2 ficam em
+# tests/test_mcp_lancamentos_comparacao_grupos.py, que confere que as duas listas juntas são todas.
+FERRAMENTAS_VARRIDAS_NO_PR_1 = {
+    "empresa_conectada",
+    "meses_com_conciliacao",
+    "resumo_do_mes",
+    "visao_do_mes",
+    "conciliacoes_do_mes",
+    "divergencias_do_mes",
+    "detalhe_da_divergencia",
+    "pendencias_do_mes",
+    "fechamentos",
+}
 ARQUIVO_SECRETO = "ARQUIVO-SECRETO-outubro.ofx"
 JUSTIFICATIVA_DA_ANALISTA = "Justificativa secreta da analista de outubro"
 NOME_DA_ANALISTA = "Analista Pessoa Secreta"
@@ -146,6 +159,9 @@ def test_output_schema_presente_e_toda_resposta_adere_a_ele(outubro):
             "conciliacoes_do_mes": {},
             "divergencias_do_mes": {},
             "pendencias_do_mes": {},
+            "lancamentos_do_mes": {},
+            "comparar_meses": {},
+            "grupos_do_mes": {},
             "fechamentos": {},
             "detalhe_da_divergencia": {"id": divergencias.structured_content["itens"][0]["id"]},
         }
@@ -715,27 +731,31 @@ def test_nenhuma_ferramenta_devolve_dado_proibido(monkeypatch, outubro, criar_us
     )
 
     async def _funcao(cliente):
-        saidas = []
+        saidas, nomes = [], set()
+
+        async def chamar(nome, argumentos):
+            nomes.add(nome)
+            saidas.append(await cliente.call_tool(nome, argumentos))
+            return saidas[-1]
+
         for competencia in ("2026-09", "2026-10"):
-            lista = await cliente.call_tool(
-                "divergencias_do_mes", {"competencia": competencia, "limite": 200}
-            )
-            saidas.append(lista)
+            lista = await chamar("divergencias_do_mes", {"competencia": competencia, "limite": 200})
             for item in lista.structured_content["itens"]:
-                saidas.append(await cliente.call_tool("detalhe_da_divergencia", {"id": item["id"]}))
+                await chamar("detalhe_da_divergencia", {"id": item["id"]})
             for nome in (
                 "resumo_do_mes",
                 "visao_do_mes",
                 "conciliacoes_do_mes",
                 "pendencias_do_mes",
             ):
-                saidas.append(await cliente.call_tool(nome, {"competencia": competencia}))
+                await chamar(nome, {"competencia": competencia})
         for nome in ("empresa_conectada", "meses_com_conciliacao", "fechamentos"):
-            saidas.append(await cliente.call_tool(nome, {}))
-        return saidas
+            await chamar(nome, {})
+        return saidas, nomes
 
-    resultados = _com_cliente(token, _funcao)
+    resultados, nomes = _com_cliente(token, _funcao)
 
+    assert nomes == FERRAMENTAS_VARRIDAS_NO_PR_1
     assert len(resultados) > 20
     for resultado in resultados:
         assert resultado.is_error is not True, _texto(resultado)

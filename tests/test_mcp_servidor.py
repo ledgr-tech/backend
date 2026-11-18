@@ -50,6 +50,9 @@ FERRAMENTAS = {
     "visao_do_mes",
     "detalhe_da_divergencia",
     "pendencias_do_mes",
+    "lancamentos_do_mes",
+    "comparar_meses",
+    "grupos_do_mes",
 }
 WWW_AUTHENTICATE = (
     f'Bearer resource_metadata="{ISSUER}/.well-known/oauth-protected-resource", '
@@ -94,6 +97,9 @@ def _todas(token: str, competencia: str = "2026-09") -> dict:
             "conciliacoes_do_mes": {"competencia": competencia},
             "divergencias_do_mes": {"competencia": competencia, "limite": 200},
             "pendencias_do_mes": {"competencia": competencia},
+            "lancamentos_do_mes": {"competencia": competencia, "limite": 200},
+            "comparar_meses": {},
+            "grupos_do_mes": {"competencia": competencia},
             "fechamentos": {},
         }
         resultados = {nome: await cliente.call_tool(nome, args) for nome, args in chamadas.items()}
