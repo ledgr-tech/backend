@@ -188,6 +188,9 @@ def perguntar(
         else None
     )
     empresa_id = empresa.id if empresa is not None else None
+    nomes_da_conta = (
+        consultas.nomes_das_empresas_da_conta(db, usuario.conta_id) if empresa_id else ()
+    )
 
     conta_id = usuario.conta_id
     limite = uso.limite_atingido(db, conta_id)
@@ -212,7 +215,9 @@ def perguntar(
     if empresa_id is not None:
         mes_atual = consultas.mes_atual_de_sao_paulo(datetime.now(UTC))
         marcada = marcar_conversa(
-            corpo.pergunta, [(turno.papel, turno.texto) for turno in corpo.historico]
+            corpo.pergunta,
+            [(turno.papel, turno.texto) for turno in corpo.historico],
+            nomes_da_conta,
         )
         pergunta_enviada, historico = marcada.pergunta, marcada.historico
     else:

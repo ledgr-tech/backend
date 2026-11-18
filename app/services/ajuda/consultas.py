@@ -6,10 +6,12 @@ nunca volta ao provedor.
 
 Regras dos textos:
 
-- só números, datas, meses, situações e categorias. Nunca texto livre do banco
-  (descrição de lançamento, justificativa, ressalva, nome de arquivo ou de
-  pessoa): a resposta volta no histórico da próxima pergunta, e o que não
-  está nela não tem como ir ao provedor;
+- só números, datas, meses, situações, categorias e a razão social das
+  empresas da conta. Nunca outro texto livre do banco (descrição de
+  lançamento, justificativa, ressalva, nome de arquivo ou de pessoa): a
+  resposta volta no histórico da próxima pergunta, e o que não está nela não
+  tem como ir ao provedor. A razão social também volta, mas a rota a troca
+  por `[EMPRESA]` antes de a conversa sair (`marcar_conversa`, `nomes`);
 - reais em pt-BR ("R$ 1.234,56"), datas em dd/mm/aaaa, meses por extenso
   ("setembro/2026");
 - saldo que o arquivo não informa é "não informa o saldo", nunca R$ 0,00.
@@ -35,17 +37,19 @@ from decimal import Decimal
 from typing import TypeVar
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.models import Extrato
+from app.models import Empresa, ExecucaoConciliacao, Extrato, Fechamento
 from app.services import api_publica, fechamentos
 from app.services.ia.base import ConsultaDeDados
 from app.services.saldo import saldo_do_extrato
 
-JANELA_MESES = 24
+# Até quantos meses atrás o assistente consulta, além do mês atual.
+JANELA_MESES = 12
 MAXIMO_MESES_NO_TEXTO = 12
 MAXIMO_LINKS_DE_CONCILIACAO = 3
+MAXIMO_EMPRESAS_POR_GRUPO = 10
 
 _PADRAO_COMPETENCIA = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 _MESES = (
@@ -113,7 +117,10 @@ TELAS_DE_ACAO = {
 _SEM_CONCILIACAO = "Esta empresa ainda não tem conciliação."
 _MES_INVALIDO = "Não entendi o mês."
 _MES_FUTURO = "Esse mês ainda não chegou."
-_FORA_DA_JANELA = f"Eu consulto só os últimos {JANELA_MESES} meses."
+_FORA_DA_JANELA = f"Eu consulto até {JANELA_MESES} meses atrás."
+_SEM_CONCILIACAO_NA_CONTA = "Nenhuma empresa da conta tem conciliação."
+_MESMO_MES = "Para comparar, preciso de dois meses diferentes."
+EMPRESAS = TELAS_DE_ACAO["empresas"]
 
 
 # --- formatação ----------------------------------------------------------------------
@@ -176,7 +183,7 @@ def resolver_competencia(
 ) -> str | None | Recusa:
     """A competência pedida (AAAA-MM), `None` quando a pergunta não citou mês
     (quem chama usa o mais recente com conciliação) ou `Recusa` quando o mês
-    é inválido, futuro ou mais antigo que `JANELA_MESES`, contando o atual."""
+    é inválido, futuro ou de mais de `JANELA_MESES` meses atrás."""
     atual = _PADRAO_COMPETENCIA.match(mes_atual)
     assert atual is not None, "mes_atual vem do backend, sempre AAAA-MM"
     indice_atual = _indice(int(atual[1]), int(atual[2]))
@@ -193,7 +200,7 @@ def resolver_competencia(
         return None
     if indice > indice_atual:
         return Recusa(_MES_FUTURO)
-    if indice_atual - indice >= JANELA_MESES:
+    if indice_atual - indice > JANELA_MESES:
         return Recusa(_FORA_DA_JANELA)
     return _competencia_do_indice(indice)
 
@@ -230,8 +237,18 @@ def _sem_conciliacao_no_mes(competencia: str, recente: str | None) -> RespostaDe
     return RespostaDeDados(texto, (HISTORICO,))
 
 
-def _meses(db: Session, empresa_id: uuid.UUID) -> RespostaDeDados:
-    itens = api_publica.meses_com_conciliacao(db, empresa_id, limite=JANELA_MESES).itens
+def _mais_antigo_da_janela(mes_atual: str) -> str:
+    ano, mes = mes_atual.split("-")
+    return _competencia_do_indice(_indice(int(ano), int(mes)) - JANELA_MESES)
+
+
+def _meses(db: Session, empresa_id: uuid.UUID, mes_atual: str) -> RespostaDeDados:
+    inicio = _mais_antigo_da_janela(mes_atual)
+    itens = [
+        item
+        for item in api_publica.meses_com_conciliacao(db, empresa_id, limite=JANELA_MESES + 1).itens
+        if inicio <= item.competencia <= mes_atual
+    ]
     if not itens:
         return RespostaDeDados(_SEM_CONCILIACAO, (HISTORICO,))
     partes = [
@@ -277,6 +294,10 @@ def _resumo(db: Session, empresa_id: uuid.UUID, competencia: str, pares) -> Resp
     return RespostaDeDados(texto, (*links, FECHAMENTOS))
 
 
+def _pendentes(linhas) -> int:
+    return sum(1 for linha in linhas if linha.situacao in ("sem_justificativa", "conferida"))
+
+
 def _sem_justificativa(n: int) -> str:
     if n == 0:
         return "Nenhuma está sem justificativa."
@@ -293,7 +314,7 @@ def _divergencias(
     links = _links_das_conciliacoes(pares, competencia)
     # Como o resumo do mês (`fechamentos.resumo_do_mes`) e a Visão geral: a
     # conferida não tem justificativa e continua pendente.
-    pendentes = sum(1 for linha in linhas if linha.situacao in ("sem_justificativa", "conferida"))
+    pendentes = _pendentes(linhas)
     if categoria is not None:
         singular, plural = _CATEGORIAS[categoria]
         if not linhas:
@@ -317,20 +338,26 @@ def _divergencias(
     return RespostaDeDados(texto, links)
 
 
-def _em_aberto(db: Session, empresa_id: uuid.UUID, competencia: str, pares) -> RespostaDeDados:
-    abertas = [
-        linha
-        for linha in api_publica.linhas_divergentes(db, empresa_id, pares)
-        if linha.situacao != "justificada"
-    ]
-    total = sum(
-        (
-            abs(linha.valor - linha.valor_sistema)
-            if linha.valor_sistema is not None
-            else abs(linha.valor)
+def _abertas(linhas) -> list:
+    return [linha for linha in linhas if linha.situacao != "justificada"]
+
+
+def _valor_em_aberto(abertas) -> Decimal:
+    return Decimal(
+        sum(
+            (
+                abs(linha.valor - linha.valor_sistema)
+                if linha.valor_sistema is not None
+                else abs(linha.valor)
+            )
+            for linha in abertas
         )
-        for linha in abertas
     )
+
+
+def _em_aberto(db: Session, empresa_id: uuid.UUID, competencia: str, pares) -> RespostaDeDados:
+    abertas = _abertas(api_publica.linhas_divergentes(db, empresa_id, pares))
+    total = _valor_em_aberto(abertas)
     links = _links_das_conciliacoes(pares, competencia)
     mes = _mes(competencia)
     if not abertas:
@@ -341,7 +368,7 @@ def _em_aberto(db: Session, empresa_id: uuid.UUID, competencia: str, pares) -> R
             f"{_maiuscula(mes)} não tem valor em aberto, mas {linhas} decisão.", links
         )
     return RespostaDeDados(
-        f"Em {mes} ficaram {_reais(Decimal(total))} em aberto, em {linhas} decisão.", links
+        f"Em {mes} ficaram {_reais(total)} em aberto, em {linhas} decisão.", links
     )
 
 
@@ -381,13 +408,215 @@ def _saldo(db: Session, empresa_id: uuid.UUID, competencia: str, pares) -> Respo
     return RespostaDeDados(texto, links)
 
 
+# --- comparar meses ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _NumerosDoMes:
+    divergencias: int
+    pendentes: int
+    em_aberto: Decimal
+    por_categoria: Counter
+
+
+def _numeros_do_mes(db: Session, empresa_id: uuid.UUID, pares) -> _NumerosDoMes:
+    linhas = api_publica.linhas_divergentes(db, empresa_id, pares)
+    return _NumerosDoMes(
+        divergencias=len(linhas),
+        pendentes=_pendentes(linhas),
+        em_aberto=_valor_em_aberto(_abertas(linhas)),
+        por_categoria=Counter(linha.categoria for linha in linhas),
+    )
+
+
+def _diferenca(a: int, b: int) -> str:
+    if a == b:
+        return "igual"
+    return f"{_numero(abs(a - b))} a {'mais' if a > b else 'menos'}"
+
+
+def _comparacao_de_contagem(a: int, b: int, singular: str, plural: str) -> str:
+    if a == b:
+        return f"{_plural(a, singular, plural)} nos dois meses"
+    return f"{_plural(a, singular, plural)} contra {_numero(b)} ({_diferenca(a, b)})"
+
+
+def _comparacao_em_aberto(a: Decimal, b: Decimal) -> str:
+    if a == b:
+        if not a:
+            return "nenhum valor em aberto nos dois meses"
+        return f"{_reais(a)} em aberto nos dois meses"
+    sentido = "a mais" if a > b else "a menos"
+    return f"{_reais(a)} em aberto contra {_reais(b)} ({_reais(abs(a - b))} {sentido})"
+
+
+def _comparar(
+    db: Session,
+    empresa_id: uuid.UUID,
+    consulta: ConsultaDeDados,
+    mes_atual: str,
+    recente: str | None,
+) -> RespostaDeDados:
+    """Um mês contra outro. Sem o primeiro, o mais recente com conciliação;
+    sem o segundo, o mês anterior ao primeiro. "De onde veio" é a diferença
+    por categoria: os números explicam, o modelo não (ADR-028)."""
+    principal = resolver_competencia(consulta.competencia, consulta.meses_atras, mes_atual)
+    if isinstance(principal, Recusa):
+        return RespostaDeDados(principal.texto, ())
+    if principal is None:
+        if recente is None:
+            return RespostaDeDados(_SEM_CONCILIACAO, (HISTORICO,))
+        principal = recente
+    outro = resolver_competencia(
+        consulta.comparar_com, consulta.comparar_com_meses_atras, mes_atual
+    )
+    if isinstance(outro, Recusa):
+        return RespostaDeDados(outro.texto, ())
+    if outro is None:
+        ano, mes = principal.split("-")
+        outro = _competencia_do_indice(_indice(int(ano), int(mes)) - 1)
+        if isinstance(resolver_competencia(outro, None, mes_atual), Recusa):
+            return RespostaDeDados(_FORA_DA_JANELA, ())
+    if outro == principal:
+        return RespostaDeDados(_MESMO_MES, ())
+    pares_a = fechamentos.pares_do_mes(db, empresa_id, principal)
+    pares_b = fechamentos.pares_do_mes(db, empresa_id, outro)
+    for pares, sem, com in ((pares_a, principal, outro), (pares_b, outro, principal)):
+        if not pares:
+            texto = (
+                f"{_maiuscula(_mes(sem))} não tem conciliação, então não dá para comparar "
+                f"com {_mes(com)}."
+            )
+            return RespostaDeDados(texto, (HISTORICO,))
+    a = _numeros_do_mes(db, empresa_id, pares_a)
+    b = _numeros_do_mes(db, empresa_id, pares_b)
+    partes = [
+        _comparacao_de_contagem(a.divergencias, b.divergencias, "divergência", "divergências"),
+        _comparacao_de_contagem(a.pendentes, b.pendentes, "sem justificativa", "sem justificativa"),
+        _comparacao_em_aberto(a.em_aberto, b.em_aberto),
+    ]
+    texto = f"{_maiuscula(_mes(principal))} comparado com {_mes(outro)}: {_juntar(partes)}."
+    origem = [
+        f"{_CATEGORIAS[nome][1]} {a.por_categoria[nome] - b.por_categoria[nome]:+d}"
+        for nome in _CATEGORIAS
+        if a.por_categoria[nome] != b.por_categoria[nome]
+    ]
+    if origem:
+        texto += f" Por tipo de divergência: {_juntar(origem)}."
+    links = (
+        *_links_das_conciliacoes(pares_a, principal)[:1],
+        *_links_das_conciliacoes(pares_b, outro)[:1],
+        HISTORICO,
+    )
+    return RespostaDeDados(texto, links)
+
+
+# --- empresas da conta -------------------------------------------------------------
+
+
+def _mais_recente_da_conta(db: Session, conta_id: uuid.UUID, mes_atual: str) -> str | None:
+    mes = func.to_char(Extrato.periodo_inicio, "YYYY-MM")
+    return db.scalar(
+        select(func.max(mes))
+        .join(ExecucaoConciliacao, ExecucaoConciliacao.extrato_banco_id == Extrato.id)
+        .join(Empresa, Empresa.id == ExecucaoConciliacao.empresa_id)
+        .where(Empresa.conta_id == conta_id, mes <= mes_atual)
+    )
+
+
+def _nomes(nomes: list[str]) -> str:
+    if len(nomes) > MAXIMO_EMPRESAS_POR_GRUPO:
+        resto = len(nomes) - MAXIMO_EMPRESAS_POR_GRUPO
+        nomes = [*nomes[:MAXIMO_EMPRESAS_POR_GRUPO], f"mais {_numero(resto)}"]
+    return _juntar(nomes)
+
+
+def _empresas_do_mes(
+    db: Session, empresa_id: uuid.UUID, consulta: ConsultaDeDados, mes_atual: str
+) -> RespostaDeDados:
+    """A situação do mês em cada empresa da conta da empresa ativa: fechada,
+    aberta (tem conciliação) ou sem conciliação. Quem acessa uma empresa da
+    conta acessa todas (`_empresa_ativa`, app/core/auth.py). Três consultas."""
+    ativa = db.get(Empresa, empresa_id)
+    assert ativa is not None, "a rota já conferiu a empresa"
+    conta_id = ativa.conta_id
+    competencia = resolver_competencia(consulta.competencia, consulta.meses_atras, mes_atual)
+    if isinstance(competencia, Recusa):
+        return RespostaDeDados(competencia.texto, ())
+    if competencia is None:
+        competencia = _mais_recente_da_conta(db, conta_id, mes_atual)
+        if competencia is None:
+            return RespostaDeDados(_SEM_CONCILIACAO_NA_CONTA, (EMPRESAS,))
+    empresas = list(
+        db.execute(
+            select(Empresa.id, Empresa.razao_social)
+            .where(Empresa.conta_id == conta_id)
+            .order_by(func.lower(Empresa.razao_social), Empresa.id)
+        )
+    )
+    mes = func.to_char(Extrato.periodo_inicio, "YYYY-MM")
+    com_conciliacao = set(
+        db.scalars(
+            select(ExecucaoConciliacao.empresa_id)
+            .join(Extrato, ExecucaoConciliacao.extrato_banco_id == Extrato.id)
+            .join(Empresa, Empresa.id == ExecucaoConciliacao.empresa_id)
+            .where(Empresa.conta_id == conta_id, mes == competencia)
+        )
+    )
+    fechadas = set(
+        db.scalars(
+            select(Fechamento.empresa_id)
+            .join(Empresa, Empresa.id == Fechamento.empresa_id)
+            .where(
+                Empresa.conta_id == conta_id,
+                Fechamento.competencia == competencia,
+                Fechamento.reaberto_em.is_(None),
+            )
+        )
+    )
+    grupos: dict[str, list[str]] = {"fechada": [], "aberta": [], "sem": []}
+    for id_, nome in empresas:
+        if id_ in fechadas:
+            grupos["fechada"].append(nome)
+        elif id_ in com_conciliacao:
+            grupos["aberta"].append(nome)
+        else:
+            grupos["sem"].append(nome)
+    partes = [
+        f"{_plural(len(nomes), singular, plural)} ({_nomes(nomes)})"
+        for chave, singular, plural in (
+            ("fechada", "fechada", "fechadas"),
+            ("aberta", "aberta", "abertas"),
+            ("sem", "sem conciliação", "sem conciliação"),
+        )
+        if (nomes := grupos[chave])
+    ]
+    onde = (
+        "na única empresa da conta"
+        if len(empresas) == 1
+        else f"nas {_numero(len(empresas))} empresas da conta"
+    )
+    texto = f"{_maiuscula(_mes(competencia))}, {onde}: {_juntar(partes)}."
+    return RespostaDeDados(texto, (EMPRESAS,))
+
+
+def nomes_das_empresas_da_conta(db: Session, conta_id: uuid.UUID) -> tuple[str, ...]:
+    """As razões sociais da conta, para a rota trocá-las por `[EMPRESA]` na
+    conversa antes de ela sair para o provedor."""
+    return tuple(db.scalars(select(Empresa.razao_social).where(Empresa.conta_id == conta_id)))
+
+
 def responder(
     db: Session, empresa_id: uuid.UUID, consulta: ConsultaDeDados, mes_atual: str
 ) -> RespostaDeDados:
     """A resposta da consulta, só com dados de `empresa_id`. `mes_atual` é o
     mês corrente de São Paulo (AAAA-MM)."""
     if consulta.intencao == "meses":
-        return _meses(db, empresa_id)
+        return _meses(db, empresa_id, mes_atual)
+    if consulta.intencao == "empresas_do_mes":
+        return _empresas_do_mes(db, empresa_id, consulta, mes_atual)
+    if consulta.intencao == "comparar_meses":
+        return _comparar(db, empresa_id, consulta, mes_atual, _mais_recente(db, empresa_id))
     competencia = resolver_competencia(consulta.competencia, consulta.meses_atras, mes_atual)
     if isinstance(competencia, Recusa):
         return RespostaDeDados(competencia.texto, ())

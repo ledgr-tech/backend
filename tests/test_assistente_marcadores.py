@@ -143,3 +143,28 @@ def test_turno_do_assistente_perde_todos_os_numeros():
 
 def test_texto_sem_numero_passa_igual():
     assert _pergunta("Como envio um extrato?") == "Como envio um extrato?"
+
+
+def test_nomes_das_empresas_viram_marcador_na_pergunta_e_no_historico():
+    """A resposta sobre as empresas da conta volta no histórico com as razões
+    sociais; nenhuma vai ao provedor (ADR-028)."""
+    nomes = ("Alfa Comércio Ltda", "Alfa", "Beta Serviços Ltda", "Zé")
+    marcada = marcar_conversa(
+        "e a alfa comércio ltda fechou? e a Alfa?",
+        (
+            ("usuario", "quais empresas fecharam outubro?"),
+            ("assistente", "Outubro/2026: 1 fechada (Beta Serviços Ltda) e 1 aberta (Alfa)."),
+        ),
+        nomes,
+    )
+
+    assert marcada.pergunta == "e a [EMPRESA] fechou? e a [EMPRESA]?"
+    assert marcada.historico[1].texto == (
+        "Outubro/[N]: [N] fechada ([EMPRESA]) e [N] aberta ([EMPRESA])."
+    )
+
+
+def test_nome_curto_ou_parte_de_palavra_nao_vira_marcador():
+    marcada = marcar_conversa("o Zé fechou o alfabeto?", (), ("Zé", "Alfa"))
+
+    assert marcada.pergunta == "o Zé fechou o alfabeto?"

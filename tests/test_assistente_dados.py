@@ -195,6 +195,29 @@ def test_valores_datas_e_respostas_anteriores_vao_com_marcadores(assistente, emp
     assert not re.search(r"\d", pergunta.historico[1].texto)
 
 
+def test_nomes_das_empresas_da_conta_nao_vao_ao_provedor(
+    assistente, empresa, db_session, criar_empresa
+):
+    """A resposta de `empresas_do_mes` traz as razões sociais e volta no
+    histórico; a pessoa também pode digitá-las. Nenhuma sai do backend."""
+    criar_empresa(razao_social="Beta Serviços Ltda", conta_id=empresa.conta_id)
+    assistente.dados("empresas_do_mes", competencia="2026-09")
+
+    resposta = _perguntar(
+        empresa.com_empresa,
+        "e a beta serviços ltda?",
+        historico=[
+            {"papel": "assistente", "texto": "Setembro/2026: 1 aberta (Beta Serviços Ltda)."}
+        ],
+    )
+
+    assert resposta.status_code == 200, resposta.text
+    assert "Beta Serviços Ltda" in resposta.json()["resposta"]
+    (pergunta,) = assistente.recebidas
+    assert pergunta.pergunta == "e a [EMPRESA]?"
+    assert "Beta" not in _tudo_que_foi_ao_provedor(assistente)
+
+
 def test_uma_chamada_ao_provedor_por_pergunta(assistente, empresa, db_session):
     assistente.dados("resumo_do_mes", competencia="2026-09")
     antes = db_session.scalar(

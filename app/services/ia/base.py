@@ -144,6 +144,9 @@ class ConsultaDeDados:
     competencia: str | None
     meses_atras: int | None
     categoria: str | None
+    # O segundo mês de `comparar_meses`.
+    comparar_com: str | None = None
+    comparar_com_meses_atras: int | None = None
 
 
 @dataclass(frozen=True)

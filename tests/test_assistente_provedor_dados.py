@@ -198,3 +198,24 @@ def test_instrucao_diz_que_o_assistente_so_consulta_e_nao_calcula():
     assert "Não responda nem calcule" in texto
     for intencao in INTENCOES:
         assert intencao in texto
+
+
+def test_comparar_meses_traz_o_segundo_mes():
+    resposta = ler_resposta_dados(
+        _saida(
+            intencao="comparar_meses",
+            competencia="2026-10",
+            comparar_com=None,
+            comparar_com_meses_atras=2,
+        )
+    )
+
+    assert resposta.consulta.intencao == "comparar_meses"
+    assert resposta.consulta.competencia == "2026-10"
+    assert resposta.consulta.comparar_com is None
+    assert resposta.consulta.comparar_com_meses_atras == 2
+
+
+def test_segundo_mes_com_tipo_errado_e_falha_do_provedor():
+    assert ler_resposta_dados(_saida(comparar_com_meses_atras="2")) is None
+    assert ler_resposta_dados(_saida(comparar_com=202610)) is None

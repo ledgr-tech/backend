@@ -39,9 +39,13 @@ ARQUIVO_SECRETO = "extrato_itau_conta_98765.ofx"
 MES_ATUAL = "2026-11"
 
 
-def _consulta(intencao, competencia=None, meses_atras=None, categoria=None):
+def _consulta(intencao, competencia=None, meses_atras=None, categoria=None, **outros):
     return ConsultaDeDados(
-        intencao=intencao, competencia=competencia, meses_atras=meses_atras, categoria=categoria
+        intencao=intencao,
+        competencia=competencia,
+        meses_atras=meses_atras,
+        categoria=categoria,
+        **outros,
     )
 
 
@@ -50,10 +54,11 @@ def empresa(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancame
     """Uma conta com a empresa dela e fábricas de par conciliado pela API do app."""
     admin = criar_usuario()
     empresa_id = empresa_unica(db_session, admin.conta_id)
-    headers = cabecalhos(gerar_token(admin.conta_id, usuario_id=admin.id), empresa_id)
+    token = gerar_token(admin.conta_id, usuario_id=admin.id)
+    headers = cabecalhos(token, empresa_id)
 
-    def extrato(origem, itens, periodo, saldo=None):
-        novo = criar_extrato_da_empresa(empresa_id, origem)
+    def extrato(origem, itens, periodo, saldo=None, dona=None):
+        novo = criar_extrato_da_empresa(dona or empresa_id, origem)
         inserir_lancamentos(novo, list(itens))
         novo.periodo_inicio, novo.periodo_fim = periodo
         novo.nome_arquivo = ARQUIVO_SECRETO
@@ -62,12 +67,12 @@ def empresa(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancame
         db_session.commit()
         return novo
 
-    def par(itens_banco, itens_sistema, periodo=SETEMBRO, saldo=None):
-        banco = extrato("banco", itens_banco, periodo, saldo)
-        sistema = extrato("sistema", itens_sistema, periodo)
+    def par(itens_banco, itens_sistema, periodo=SETEMBRO, saldo=None, dona=None):
+        banco = extrato("banco", itens_banco, periodo, saldo, dona)
+        sistema = extrato("sistema", itens_sistema, periodo, dona=dona)
         resposta = client.post(
             "/conciliacoes",
-            headers=headers,
+            headers=cabecalhos(token, dona or empresa_id),
             json={"extrato_banco_id": str(banco.id), "extrato_sistema_id": str(sistema.id)},
         )
         assert resposta.status_code == 201, resposta.text
@@ -89,11 +94,13 @@ def empresa(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancame
         )
         assert resposta.status_code == 200, resposta.text
 
-    def fechar(competencia="2026-09", ressalva=None):
+    def fechar(competencia="2026-09", ressalva=None, dona=None):
         corpo = {"competencia": competencia}
         if ressalva is not None:
             corpo["ressalva"] = ressalva
-        resposta = client.post("/fechamentos", headers=headers, json=corpo)
+        resposta = client.post(
+            "/fechamentos", headers=cabecalhos(token, dona or empresa_id), json=corpo
+        )
         assert resposta.status_code == 201, resposta.text
 
     def perguntar(consulta):
@@ -142,8 +149,9 @@ def _sem_texto_do_banco(resposta):
         (None, 0, "2026-11"),
         (None, 1, "2026-10"),
         (None, 11, "2025-12"),
+        (None, JANELA_MESES, "2025-11"),
         (None, None, None),
-        ("2024-12", None, "2024-12"),
+        ("2025-11", None, "2025-11"),
     ],
 )
 def test_resolver_competencia(competencia, meses_atras, esperado):
@@ -154,8 +162,8 @@ def test_resolver_competencia(competencia, meses_atras, esperado):
     ("competencia", "meses_atras"),
     [
         ("2026-12", None),
-        ("2024-11", None),
-        (None, JANELA_MESES),
+        ("2025-10", None),
+        (None, JANELA_MESES + 1),
         (None, -1),
         ("2026-13", None),
         ("setembro", None),
@@ -245,7 +253,7 @@ def test_mes_sem_conciliacao_aponta_o_mais_recente(empresa):
 def test_mes_fora_da_janela_explica_o_limite(empresa):
     resposta = empresa.perguntar(_consulta("resumo_do_mes", competencia="2020-01"))
 
-    assert resposta.texto == f"Eu consulto só os últimos {JANELA_MESES} meses."
+    assert resposta.texto == "Eu consulto até 12 meses atrás."
 
 
 def test_mes_futuro_nao_tem_conciliacao(empresa):
@@ -422,3 +430,164 @@ def test_divergencias_contam_a_conferida_como_o_resumo_do_mes(empresa, db_sessio
     resposta = empresa.perguntar(_consulta("divergencias_do_mes", competencia="2026-09"))
 
     assert resposta.texto.endswith(f"{pendentes} estão sem justificativa.")
+
+
+def test_meses_so_lista_ate_12_meses_atras(empresa):
+    empresa.par([("1.00", "x")], [("1.00", "x")], periodo=(date(2025, 10, 1), date(2025, 10, 31)))
+    empresa.par([("1.00", "x")], [("1.00", "x")], periodo=(date(2025, 11, 1), date(2025, 11, 30)))
+
+    resposta = empresa.perguntar(_consulta("meses"))
+
+    assert resposta.texto == "Meses com conciliação: novembro/2025 (aberto)."
+
+
+# --- comparar meses ----------------------------------------------------------------------
+
+
+def _outubro_com_mais_tarifas(empresa):
+    """Duas tarifas, uma diferença de valor (50 contra 40), dois lançamentos
+    só do banco e um match."""
+    return empresa.par(
+        [
+            ("10.00", "a"),
+            ("50.00", DESCRICAO_SECRETA),
+            ("-5.50", "TARIFA PACOTE SERVICOS"),
+            ("-2.00", "TARIFA PIX"),
+            ("99.90", "e"),
+            ("12.00", "f"),
+        ],
+        [("10.00", "a"), ("40.00", DESCRICAO_SECRETA)],
+        periodo=OUTUBRO,
+    )
+
+
+def _numeros(db_session, empresa_id, competencia):
+    linhas = api_publica.divergencias_do_mes(db_session, empresa_id, competencia).itens
+    return len(linhas), {
+        c: sum(1 for d in linhas if d.categoria == c) for c in {d.categoria for d in linhas}
+    }
+
+
+def test_comparar_meses_traz_a_diferenca_e_de_onde_ela_veio(empresa, db_session):
+    _setembro_com_divergencias(empresa)
+    _outubro_com_mais_tarifas(empresa)
+    total_set, cat_set = _numeros(db_session, empresa.id, "2026-09")
+    total_out, cat_out = _numeros(db_session, empresa.id, "2026-10")
+
+    resposta = empresa.perguntar(
+        _consulta("comparar_meses", competencia="2026-10", comparar_com="2026-09")
+    )
+
+    assert resposta.texto.startswith(
+        f"Outubro/2026 comparado com setembro/2026: {total_out} divergências contra " f"{total_set}"
+    )
+    assert cat_out["tarifa_bancaria"] - cat_set["tarifa_bancaria"] == 1
+    assert "tarifas bancárias +1" in resposta.texto
+    assert "em aberto" in resposta.texto
+    caminhos = [link.caminho for link in resposta.links]
+    assert len(caminhos) == 3 and caminhos[-1] == "/historico"
+    _sem_texto_do_banco(resposta)
+
+
+def test_comparar_sem_o_segundo_mes_usa_o_anterior(empresa):
+    _setembro_com_divergencias(empresa)
+    _outubro_com_mais_tarifas(empresa)
+
+    resposta = empresa.perguntar(_consulta("comparar_meses", competencia="2026-10"))
+
+    assert resposta.texto.startswith("Outubro/2026 comparado com setembro/2026: ")
+
+
+def test_comparar_sem_mes_usa_o_mais_recente_e_o_anterior(empresa):
+    _setembro_com_divergencias(empresa)
+    _outubro_com_mais_tarifas(empresa)
+
+    resposta = empresa.perguntar(_consulta("comparar_meses"))
+
+    assert resposta.texto.startswith("Outubro/2026 comparado com setembro/2026: ")
+
+
+def test_comparar_meses_iguais_diz_que_nao_mudou(empresa):
+    empresa.par([("1.00", "x")], [("1.00", "x")])
+    empresa.par([("1.00", "x")], [("1.00", "x")], periodo=OUTUBRO)
+
+    resposta = empresa.perguntar(_consulta("comparar_meses", competencia="2026-10"))
+
+    assert resposta.texto == (
+        "Outubro/2026 comparado com setembro/2026: 0 divergências nos dois meses, "
+        "0 sem justificativa nos dois meses e nenhum valor em aberto nos dois meses."
+    )
+
+
+def test_comparar_com_mes_sem_conciliacao(empresa):
+    _outubro_com_mais_tarifas(empresa)
+
+    resposta = empresa.perguntar(_consulta("comparar_meses", competencia="2026-10"))
+
+    assert resposta.texto == (
+        "Setembro/2026 não tem conciliação, então não dá para comparar com outubro/2026."
+    )
+
+
+def test_comparar_o_mesmo_mes(empresa):
+    _outubro_com_mais_tarifas(empresa)
+
+    resposta = empresa.perguntar(
+        _consulta("comparar_meses", competencia="2026-10", comparar_com="2026-10")
+    )
+
+    assert resposta.texto == "Para comparar, preciso de dois meses diferentes."
+
+
+def test_comparar_respeita_a_janela(empresa):
+    resposta = empresa.perguntar(
+        _consulta("comparar_meses", competencia="2026-10", comparar_com="2024-01")
+    )
+
+    assert resposta.texto == "Eu consulto até 12 meses atrás."
+
+
+# --- empresas da conta -------------------------------------------------------------------
+
+
+def test_empresas_do_mes_lista_quem_fechou_quem_esta_aberta_e_quem_nao_tem(
+    empresa, db_session, criar_empresa
+):
+    from app.models import Empresa
+
+    principal = db_session.get(Empresa, empresa.id)
+    principal.razao_social = "Alfa Comércio Ltda"
+    db_session.commit()
+    beta = criar_empresa(razao_social="Beta Serviços Ltda", conta_id=empresa.conta_id)
+    criar_empresa(razao_social="Gama Indústria Ltda", conta_id=empresa.conta_id)
+    _outubro_com_mais_tarifas(empresa)
+    empresa.par([("1.00", "x")], [("1.00", "x")], periodo=OUTUBRO, dona=beta.id)
+    empresa.fechar("2026-10", dona=beta.id)
+
+    resposta = empresa.perguntar(_consulta("empresas_do_mes", competencia="2026-10"))
+
+    assert resposta.texto == (
+        "Outubro/2026, nas 3 empresas da conta: 1 fechada (Beta Serviços Ltda), "
+        "1 aberta (Alfa Comércio Ltda) e 1 sem conciliação (Gama Indústria Ltda)."
+    )
+    assert [link.caminho for link in resposta.links] == ["/empresas"]
+    _sem_texto_do_banco(resposta)
+
+
+def test_empresas_do_mes_nao_mostra_empresa_de_outra_conta(empresa, criar_empresa):
+    criar_empresa(razao_social="Empresa De Outra Conta Ltda")
+    _outubro_com_mais_tarifas(empresa)
+
+    resposta = empresa.perguntar(_consulta("empresas_do_mes", competencia="2026-10"))
+
+    assert "Outra Conta" not in resposta.texto
+    assert "nas 1 empresas" not in resposta.texto
+    assert resposta.texto.startswith("Outubro/2026, na única empresa da conta: 1 aberta (")
+
+
+def test_empresas_sem_mes_usa_o_mais_recente_da_conta(empresa):
+    _outubro_com_mais_tarifas(empresa)
+
+    resposta = empresa.perguntar(_consulta("empresas_do_mes"))
+
+    assert resposta.texto.startswith("Outubro/2026, ")

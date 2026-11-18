@@ -188,19 +188,45 @@ def _sem_numeros(texto: str) -> str:
     return _DIGITOS.sub("[N]", mascarar_identificadores(texto))
 
 
-def marcar_conversa(pergunta: str, historico: Iterable[tuple[str, str]]) -> ConversaMarcada:
+MARCADOR_DE_EMPRESA = "[EMPRESA]"
+# Nome mais curto que isso não é trocado: pegaria palavras comuns.
+MINIMO_DE_LETRAS_DO_NOME = 3
+
+
+def _trocar_nomes(texto: str, nomes: Iterable[str]) -> str:
+    """Cada nome de `nomes` em `texto`, sem diferença de maiúscula e só como
+    palavra inteira, vira `[EMPRESA]`. O mais longo primeiro, para "Alfa
+    Comércio Ltda" não sobrar como "[EMPRESA] Comércio Ltda"."""
+    for nome in sorted({n.strip() for n in nomes}, key=len, reverse=True):
+        if len(nome) < MINIMO_DE_LETRAS_DO_NOME:
+            continue
+        padrao = re.compile(rf"(?<!\w){re.escape(nome)}(?!\w)", re.IGNORECASE)
+        texto = padrao.sub(MARCADOR_DE_EMPRESA, texto)
+    return texto
+
+
+def marcar_conversa(
+    pergunta: str, historico: Iterable[tuple[str, str]], nomes: Iterable[str] = ()
+) -> ConversaMarcada:
     """A pergunta e o histórico (pares papel e texto, na ordem) prontos para o
-    provedor, com o mapa de marcadores."""
+    provedor, com o mapa de marcadores. `nomes` são as razões sociais da conta:
+    a resposta sobre as empresas (`empresas_do_mes`) volta no histórico com
+    elas, e a pessoa pode digitá-las na pergunta; nenhuma vai ao provedor."""
+    nomes = tuple(nomes)
     marcador = _Marcador()
     turnos = tuple(
         MensagemHistorico(
             papel=papel,
-            texto=marcador.marcar(texto) if papel == "usuario" else _sem_numeros(texto),
+            texto=(
+                marcador.marcar(_trocar_nomes(texto, nomes))
+                if papel == "usuario"
+                else _sem_numeros(_trocar_nomes(texto, nomes))
+            ),
         )
         for papel, texto in historico
     )
     return ConversaMarcada(
-        pergunta=marcador.marcar(pergunta),
+        pergunta=marcador.marcar(_trocar_nomes(pergunta, nomes)),
         historico=turnos,
         valores=marcador.valores,
         datas=marcador.datas,
