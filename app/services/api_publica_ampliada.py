@@ -18,6 +18,12 @@ poder reaproveitá-los depois (M3 da issue).
   explicação sem IA (app/services/ia/detalhes.py).
 - `divergencias_com_id`: a lista de `divergencias_do_mes` com o `id` que
   `detalhe_da_divergencia` aceita e o `truncado`.
+- `lancamentos_do_mes`: os lançamentos dos extratos do mês com a situação que a
+  conciliação deu a cada um, filtrados, ordenados e paginados no banco.
+- `comparar_meses`: a série dos últimos N meses com conciliação, por categoria
+  de divergência, com a variação para o mês anterior.
+- `grupos_do_mes`: os agrupamentos N para 1 e 1 para N (issue #131) com a
+  composição e a soma que fechou.
 
 O `id` de uma divergência é o da linha em `conciliacoes`. Ele vale para a
 rodada vigente do mês: refazer a conciliação do par recria as linhas
@@ -25,15 +31,16 @@ rodada vigente do mês: refazer a conciliação do par recria as linhas
 """
 
 import uuid
+from collections import defaultdict
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, literal, select, tuple_, union_all
 from sqlalchemy.orm import Session, aliased
 
-from app.models import Conciliacao, Extrato, Lancamento
+from app.models import Conciliacao, ExecucaoConciliacao, Extrato, Fechamento, Lancamento
 from app.services import api_publica, decisoes, fechamentos
 from app.services.api_publica import (
     LIMITE_MAXIMO,
@@ -609,4 +616,427 @@ def detalhe_da_divergencia(
             DetalheV1(rotulo=d.rotulo, valor=d.valor) for d in ia_detalhes.montar_detalhes(contexto)
         ],
         explicacao=ia_detalhes.texto_deterministico(contexto),
+    )
+
+
+# --- lançamentos do mês ----------------------------------------------------------------------
+
+SituacaoDoLancamento = Literal[
+    "conciliado",
+    "divergente_valor",
+    "divergente_data",
+    "sem_correspondencia",
+    "duplicado",
+    "tarifa_bancaria",
+]
+SITUACOES_DO_LANCAMENTO: tuple[str, ...] = get_args(SituacaoDoLancamento)
+LadoDoLancamento = Literal["banco", "sistema"]
+TipoDoLancamento = Literal["credito", "debito"]
+
+
+class LancamentoV1(BaseModel):
+    """Um lançamento do mês e como a conciliação o tratou. Sem descrição."""
+
+    id: uuid.UUID = Field(description="Identificador do lançamento.")
+    lado: LadoDoLancamento = Field(description="De qual extrato vem: banco ou sistema (ERP).")
+    data: date = Field(description="Data do lançamento, ISO 8601.")
+    valor: Decimal = Field(description="Valor, string decimal em reais; negativo é saída.")
+    tipo: TipoDoLancamento = Field(description="credito (entrada) ou debito (saída).")
+    situacao: SituacaoDoLancamento = Field(
+        description=(
+            "conciliado (par exato, por tolerância de data ou agrupado) ou a categoria da "
+            "divergência em que ele caiu."
+        )
+    )
+    divergencia_id: uuid.UUID | None = Field(
+        description="Se é divergência, o `id` para detalhe_da_divergencia; nulo se conciliado."
+    )
+
+
+class LancamentosV1(BaseModel):
+    competencia: str = Field(description="Mês de referência, AAAA-MM.")
+    total: int = Field(description="Total de lançamentos que atendem aos filtros.")
+    limit: int = Field(description="Itens por página pedidos.")
+    offset: int = Field(description="Quantos itens foram pulados.")
+    truncado: bool = Field(description="Há mais lançamentos além dos desta página.")
+    itens: list[LancamentoV1]
+
+
+def lancamentos_do_mes(
+    db: Session,
+    empresa_id: uuid.UUID,
+    competencia: str,
+    *,
+    lado: str | None = None,
+    tipo: str | None = None,
+    situacao: str | None = None,
+    valor_minimo: Decimal | None = None,
+    valor_maximo: Decimal | None = None,
+    data_inicial: date | None = None,
+    data_final: date | None = None,
+    ordenar_por: api_publica.Ordenar = "data",
+    ordem: api_publica.Ordem = "asc",
+    limit: int = api_publica.LIMITE_PADRAO,
+    offset: int = 0,
+) -> LancamentosV1:
+    """Os lançamentos dos extratos do mês (os do banco da competência e os do sistema dos
+    pares vigentes), com a situação que a conciliação deu a cada um. Filtra, ordena e pagina
+    no banco: duas consultas além dos pares, qualquer que seja o tamanho do mês. Um
+    lançamento do sistema que esteja em dois pares do mês (dois extratos do banco na mesma
+    competência com o mesmo extrato do sistema) aparece uma vez por par."""
+    pares = fechamentos.pares_do_mes(db, empresa_id, competencia)
+    if not pares:
+        return LancamentosV1(
+            competencia=competencia, total=0, limit=limit, offset=offset, truncado=False, itens=[]
+        )
+    # As linhas dos pares vigentes primeiro, materializadas, e só depois os lançamentos, um a um
+    # pela chave primária e sem outro predicado (a empresa já está na linha do par, e os
+    # lançamentos dela são da mesma empresa). Com a estatística velha de uma carga recém-feita,
+    # um predicado a mais em `lancamentos` (empresa ou extrato) parece barato ao planejador, que
+    # varre todos os lançamentos da empresa para cada linha do par (42 s a 62 s com 10 mil
+    # lançamentos por lado, medido no teste de volume).
+    linhas_do_par = (
+        select(
+            Conciliacao.id,
+            Conciliacao.status,
+            Conciliacao.lancamento_banco_id,
+            Conciliacao.lancamento_sistema_id,
+        )
+        .where(
+            Conciliacao.empresa_id == empresa_id,
+            tuple_(Conciliacao.extrato_banco_id, Conciliacao.extrato_sistema_id).in_(
+                [(par.extrato_banco_id, par.extrato_sistema_id) for par in pares]
+            ),
+        )
+        .cte("linhas_do_par")
+        .prefix_with("MATERIALIZED")
+    )
+
+    def do_lado(nome: str, coluna):
+        return (
+            select(
+                Lancamento.id.label("id"),
+                literal(nome).label("lado"),
+                Lancamento.data.label("data"),
+                Lancamento.valor.label("valor"),
+                Lancamento.tipo.label("tipo"),
+                linhas_do_par.c.status.label("status"),
+                linhas_do_par.c.id.label("conciliacao_id"),
+            )
+            .select_from(linhas_do_par)
+            .join(Lancamento, Lancamento.id == coluna)
+        )
+
+    base = union_all(
+        do_lado("banco", linhas_do_par.c.lancamento_banco_id),
+        do_lado("sistema", linhas_do_par.c.lancamento_sistema_id),
+    ).subquery()
+    c = base.c
+    filtros = []
+    if lado is not None:
+        filtros.append(c.lado == lado)
+    if tipo is not None:
+        filtros.append(c.tipo == tipo)
+    if situacao == "conciliado":
+        filtros.append(c.status.in_(sorted(decisoes.STATUS_RESOLVIDOS)))
+    elif situacao is not None:
+        filtros.append(c.status == situacao)
+    if valor_minimo is not None:
+        filtros.append(func.abs(c.valor) >= valor_minimo)
+    if valor_maximo is not None:
+        filtros.append(func.abs(c.valor) <= valor_maximo)
+    if data_inicial is not None:
+        filtros.append(c.data >= data_inicial)
+    if data_final is not None:
+        filtros.append(c.data <= data_final)
+
+    total = db.scalar(select(func.count()).select_from(base).where(*filtros)) or 0
+    chaves = (
+        (func.abs(c.valor), c.data, c.id) if ordenar_por == "valor" else (c.data, c.valor, c.id)
+    )
+    if ordem == "desc":
+        chaves = tuple(chave.desc() for chave in chaves)
+    linhas = db.execute(
+        select(base).where(*filtros).order_by(*chaves).limit(limit).offset(offset)
+    ).all()
+    return LancamentosV1(
+        competencia=competencia,
+        total=total,
+        limit=limit,
+        offset=offset,
+        truncado=total > offset + len(linhas),
+        itens=[
+            LancamentoV1(
+                id=linha.id,
+                lado=linha.lado,
+                data=linha.data,
+                valor=linha.valor,
+                tipo=linha.tipo,
+                situacao=("conciliado" if not decisoes.diverge(linha.status) else linha.status),
+                divergencia_id=linha.conciliacao_id if decisoes.diverge(linha.status) else None,
+            )
+            for linha in linhas
+        ],
+    )
+
+
+# --- comparar meses --------------------------------------------------------------------------
+
+QUANTIDADE_PADRAO_DE_MESES = 6
+QUANTIDADE_MAXIMA_DE_MESES = 12
+
+
+class ContagensDeDivergenciaV1(BaseModel):
+    """Linhas divergentes por categoria. Na `variacao`, a diferença para o mês anterior."""
+
+    total: int = Field(description="Soma das cinco categorias.")
+    divergente_valor: int
+    divergente_data: int
+    sem_correspondencia: int
+    duplicado: int
+    tarifa_bancaria: int
+
+
+class MesComparadoV1(BaseModel):
+    competencia: str = Field(description="Mês, AAAA-MM.")
+    fechado: bool = Field(description="O mês está fechado.")
+    linhas: int = Field(description="Total de linhas dos pares conciliados do mês.")
+    conciliadas: int = Field(
+        description="Linhas conciliadas (exatas, por tolerância de data e agrupadas)."
+    )
+    divergencias: ContagensDeDivergenciaV1
+    variacao: ContagensDeDivergenciaV1 | None = Field(
+        description="Este mês menos o mês anterior da série; nulo no primeiro da série."
+    )
+    variacao_percentual: Decimal | None = Field(
+        description=(
+            "Variação do total de divergências sobre o do mês anterior, em %, duas casas; "
+            "nulo no primeiro da série e quando o mês anterior não tinha divergência."
+        )
+    )
+
+
+class ComparacaoV1(BaseModel):
+    quantidade: int = Field(description="Quantos meses vieram.")
+    itens: list[MesComparadoV1] = Field(
+        description="Do mês mais antigo para o mais recente, só meses com conciliação."
+    )
+
+
+_CATEGORIAS_DIVERGENTES = (
+    "divergente_valor",
+    "divergente_data",
+    "sem_correspondencia",
+    "duplicado",
+    "tarifa_bancaria",
+)
+
+
+def _divergencias_do_mes(pares: list[fechamentos.ParDoMes]) -> ContagensDeDivergenciaV1:
+    contagens = {c: sum(getattr(par.execucao, c) for par in pares) for c in _CATEGORIAS_DIVERGENTES}
+    return ContagensDeDivergenciaV1(total=sum(contagens.values()), **contagens)
+
+
+def comparar_meses(
+    db: Session,
+    empresa_id: uuid.UUID,
+    quantidade: int = QUANTIDADE_PADRAO_DE_MESES,
+    ate: str | None = None,
+) -> ComparacaoV1:
+    """Os `quantidade` meses com conciliação mais recentes até `ate` (inclusive), do mais
+    antigo para o mais recente, cada um com as divergências por categoria e a variação para o
+    mês anterior da série. Número fixo de consultas, qualquer que seja `quantidade`."""
+    mes = func.to_char(Extrato.periodo_inicio, "YYYY-MM")
+    consulta = (
+        select(mes)
+        .join(ExecucaoConciliacao, ExecucaoConciliacao.extrato_banco_id == Extrato.id)
+        .where(ExecucaoConciliacao.empresa_id == empresa_id, Extrato.periodo_inicio.is_not(None))
+    )
+    if ate is not None:
+        consulta = consulta.where(mes <= ate)
+    competencias = sorted(db.scalars(consulta.group_by(mes).order_by(mes.desc()).limit(quantidade)))
+    if not competencias:
+        return ComparacaoV1(quantidade=0, itens=[])
+    pares = fechamentos.pares_dos_meses(db, empresa_id, competencias)
+    fechados = set(
+        db.scalars(
+            select(Fechamento.competencia).where(
+                Fechamento.empresa_id == empresa_id,
+                Fechamento.reaberto_em.is_(None),
+                Fechamento.competencia.in_(competencias),
+            )
+        )
+    )
+    itens: list[MesComparadoV1] = []
+    anterior: ContagensDeDivergenciaV1 | None = None
+    for competencia in competencias:
+        do_mes = pares.get(competencia, [])
+        divergencias = _divergencias_do_mes(do_mes)
+        variacao = (
+            ContagensDeDivergenciaV1(
+                **{
+                    campo: getattr(divergencias, campo) - getattr(anterior, campo)
+                    for campo in ("total", *_CATEGORIAS_DIVERGENTES)
+                }
+            )
+            if anterior is not None
+            else None
+        )
+        itens.append(
+            MesComparadoV1(
+                competencia=competencia,
+                fechado=competencia in fechados,
+                linhas=sum(par.execucao.total for par in do_mes),
+                conciliadas=sum(
+                    par.execucao.match_exato
+                    + par.execucao.match_tolerancia
+                    + par.execucao.match_agrupado
+                    for par in do_mes
+                ),
+                divergencias=divergencias,
+                variacao=variacao,
+                variacao_percentual=(
+                    _percentual(Decimal(variacao.total), Decimal(anterior.total))
+                    if variacao is not None and anterior is not None
+                    else None
+                ),
+            )
+        )
+        anterior = divergencias
+    return ComparacaoV1(quantidade=len(itens), itens=itens)
+
+
+# --- grupos do mês ---------------------------------------------------------------------------
+
+GRUPOS_LIMITE_PADRAO = 10
+GRUPOS_LIMITE_MAXIMO = 25
+MEMBROS_POR_GRUPO = 50
+
+
+class MembroDoGrupoV1(BaseModel):
+    id: uuid.UUID = Field(description="Identificador do lançamento.")
+    data: date = Field(description="Data do lançamento, ISO 8601.")
+    valor: Decimal = Field(description="Valor, string decimal em reais; negativo é saída.")
+
+
+class GrupoV1(BaseModel):
+    """Um agrupamento: um lançamento de um lado cuja soma bate, ao centavo, com a de vários
+    do outro (pagamento em lote)."""
+
+    grupo_id: uuid.UUID = Field(description="Identificador do grupo.")
+    lado_unico: LadoDoLancamento = Field(
+        description="Lado do lançamento único: banco (um do banco contra vários do sistema) ou sistema."
+    )
+    soma: Decimal = Field(description="A soma que fechou, ao centavo, string decimal em reais.")
+    unico: MembroDoGrupoV1 = Field(description="O lançamento único.")
+    quantidade_do_outro_lado: int = Field(description="Quantos lançamentos há do outro lado.")
+    do_outro_lado: list[MembroDoGrupoV1] = Field(
+        description=f"Os lançamentos do outro lado, por data, no máximo {MEMBROS_POR_GRUPO}."
+    )
+    truncado: bool = Field(description="`quantidade_do_outro_lado` passa dos listados.")
+
+
+class GruposV1(BaseModel):
+    competencia: str = Field(description="Mês de referência, AAAA-MM.")
+    total: int = Field(description="Quantos grupos o mês tem.")
+    limit: int = Field(description="Grupos por página pedidos.")
+    offset: int = Field(description="Quantos grupos foram pulados.")
+    truncado: bool = Field(description="Há mais grupos além dos desta página.")
+    itens: list[GrupoV1] = Field(description="Dos de maior soma para os de menor.")
+
+
+def grupos_do_mes(
+    db: Session,
+    empresa_id: uuid.UUID,
+    competencia: str,
+    limit: int = GRUPOS_LIMITE_PADRAO,
+    offset: int = 0,
+) -> GruposV1:
+    """Os agrupamentos N para 1 e 1 para N do mês (issue #131, ADR-027). Três consultas além
+    dos pares: o total, a página de grupos e os lançamentos dos grupos da página."""
+    pares = fechamentos.pares_do_mes(db, empresa_id, competencia)
+    vazio = GruposV1(
+        competencia=competencia, total=0, limit=limit, offset=offset, truncado=False, itens=[]
+    )
+    if not pares:
+        return vazio
+    lanc_banco = aliased(Lancamento)
+    lanc_sistema = aliased(Lancamento)
+    do_mes = (
+        Conciliacao.empresa_id == empresa_id,
+        tuple_(Conciliacao.extrato_banco_id, Conciliacao.extrato_sistema_id).in_(
+            [(par.extrato_banco_id, par.extrato_sistema_id) for par in pares]
+        ),
+        Conciliacao.status == "match_agrupado",
+    )
+    # Cada linha do grupo guarda uma ponta; a soma do lado do banco é a do grupo inteiro.
+    soma_do_grupo = func.sum(func.abs(func.coalesce(lanc_banco.valor, 0)))
+    grupos = (
+        select(Conciliacao.grupo_id.label("grupo_id"), soma_do_grupo.label("soma"))
+        .outerjoin(lanc_banco, Conciliacao.lancamento_banco_id == lanc_banco.id)
+        .where(*do_mes)
+        .group_by(Conciliacao.grupo_id)
+    )
+    total = db.scalar(select(func.count()).select_from(grupos.subquery())) or 0
+    pagina = db.execute(
+        grupos.order_by(soma_do_grupo.desc(), Conciliacao.grupo_id).limit(limit).offset(offset)
+    ).all()
+    if not pagina:
+        return vazio.model_copy(update={"total": total})
+
+    linhas = db.execute(
+        select(
+            Conciliacao.grupo_id,
+            Conciliacao.lancamento_banco_id,
+            func.coalesce(lanc_banco.id, lanc_sistema.id).label("lancamento_id"),
+            func.coalesce(lanc_banco.data, lanc_sistema.data).label("data"),
+            func.coalesce(lanc_banco.valor, lanc_sistema.valor).label("valor"),
+        )
+        .outerjoin(lanc_banco, Conciliacao.lancamento_banco_id == lanc_banco.id)
+        .outerjoin(lanc_sistema, Conciliacao.lancamento_sistema_id == lanc_sistema.id)
+        .where(*do_mes, Conciliacao.grupo_id.in_([g.grupo_id for g in pagina]))
+        .order_by(
+            Conciliacao.grupo_id,
+            func.coalesce(lanc_banco.data, lanc_sistema.data),
+            func.coalesce(lanc_banco.valor, lanc_sistema.valor),
+            func.coalesce(lanc_banco.id, lanc_sistema.id),
+        )
+    ).all()
+    por_grupo: dict[uuid.UUID, list] = defaultdict(list)
+    for linha in linhas:
+        por_grupo[linha.grupo_id].append(linha)
+
+    itens = []
+    for grupo in pagina:
+        membros = por_grupo[grupo.grupo_id]
+        do_banco = [m for m in membros if m.lancamento_banco_id is not None]
+        do_sistema = [m for m in membros if m.lancamento_banco_id is None]
+        # O lado com um lançamento só é o único; o outro tem vários.
+        unico_lado, unicos, outros = (
+            ("banco", do_banco, do_sistema)
+            if len(do_banco) == 1 and len(do_sistema) != 1
+            else ("sistema", do_sistema, do_banco)
+        )
+        unico = unicos[0]
+        itens.append(
+            GrupoV1(
+                grupo_id=grupo.grupo_id,
+                lado_unico=unico_lado,
+                soma=_dinheiro(grupo.soma),
+                unico=MembroDoGrupoV1(id=unico.lancamento_id, data=unico.data, valor=unico.valor),
+                quantidade_do_outro_lado=len(outros),
+                do_outro_lado=[
+                    MembroDoGrupoV1(id=m.lancamento_id, data=m.data, valor=m.valor)
+                    for m in outros[:MEMBROS_POR_GRUPO]
+                ],
+                truncado=len(outros) > MEMBROS_POR_GRUPO,
+            )
+        )
+    return GruposV1(
+        competencia=competencia,
+        total=total,
+        limit=limit,
+        offset=offset,
+        truncado=total > offset + len(itens),
+        itens=itens,
     )
