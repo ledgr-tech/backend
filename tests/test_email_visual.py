@@ -107,9 +107,22 @@ ESPERADO = {
             ("Uso", "Uma vez só, nesta conta"),
         ],
     },
+    "alerta_admin": {
+        "olho": "Painel · alerta",
+        "titulo": ("Ação de operador", "no painel."),
+        "mascote": "neutro",
+        "ficha": [
+            ("Operador", "Ana"),
+            ("E-mail", "olga@ledgr.com.br"),
+            ("Conta", "Telha Certa Ltda"),
+            ("Id da conta", "5f0c2f0e-8a54-4b1a-9a43-0e3d5d7d3c11"),
+            ("Ação", "Conta inativada"),
+            ("Quando", "19/11/2026 às 10:30:00"),
+        ],
+    },
 }
 # Quem leva o nome da empresa no HTML.
-COM_RAZAO_SOCIAL = {"boas_vindas", "convite", "conta_desativada", "cupom"}
+COM_RAZAO_SOCIAL = {"boas_vindas", "convite", "conta_desativada", "cupom", "alerta_admin"}
 
 
 class _Linhas(HTMLParser):

@@ -698,6 +698,7 @@ def mensagem_alerta_admin(
     Todo texto vindo de pessoa (nome, razão social, motivo, ação com o nome do
     cupom) é escapado no HTML."""
     texto = (
+        "Olá, equipe.\n\n"
         "Um operador fez uma ação no painel administrativo do Ledgr.\n\n"
         f"Operador: {operador_nome} ({operador_email})\n"
         f"Conta: {razao_social} ({conta_id})\n"
@@ -707,7 +708,8 @@ def mensagem_alerta_admin(
         "Se não foi uma ação combinada, revise o acesso desse operador."
     )
     corpo_html = (
-        _p("Um operador fez uma ação no painel administrativo do Ledgr.")
+        _p("Olá, equipe.")
+        + _p("Um operador fez uma ação no painel administrativo do Ledgr.")
         + _ficha(
             ("Operador", operador_nome),
             ("E-mail", operador_email),
