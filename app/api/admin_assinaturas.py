@@ -2,10 +2,11 @@
 (issue #169, ADR-025 e ADR-026).
 
 Mesmo prefixo `/admin` e mesma guarda da parte 1 (app/api/admin.py): só o
-operador (403 para os outros, inclusive o admin de conta), login recente de 2
-horas (401), acesso registrado em `acessos_admin`, limite por usuário
+operador (403 para os outros, inclusive o admin de conta), sessão do operador
+de 60 minutos e 20 de inatividade (401, issue #234), acesso registrado em `acessos_admin`, limite por usuário
 (`LIMITE_ADMIN_LEITURA_POR_USUARIO` nas consultas, `LIMITE_ADMIN_ACAO_POR_USUARIO`
-nas ações). Ignora `X-Ledgr-Empresa`.
+nas ações) e, com `ADMIN_LIMITE_POR_IP_HABILITADO` ligada, o limite por IP da
+issue #234 (app/api/admin.py). Ignora `X-Ledgr-Empresa`.
 
 Consultas, sem chamar a Stripe: leem o que o webhook guardou em
 `assinaturas_stripe` e `pagamentos_stripe`.
@@ -26,8 +27,9 @@ Consultas, sem chamar a Stripe: leem o que o webhook guardou em
 Ações, que chamam a Stripe (app/services/assinatura/operador.py): cancelar
 (`fim_do_periodo` ou `agora`, com motivo; sem reembolso nem proporcional),
 manter (desfaz o cancelamento agendado), listar os cupons da Stripe e dar um
-cupom à conta. Cada uma grava um evento em `eventos_conta` e sincroniza a
-assinatura na hora. A cobrança desligada dá 503; a Stripe fora do ar, 502.
+cupom à conta. Cada uma grava um evento em `eventos_conta`, sincroniza a
+assinatura na hora e, depois do commit e da resposta, avisa a equipe interna por
+e-mail (issue #234, app/services/alerta_admin.py). A cobrança desligada dá 503; a Stripe fora do ar, 502.
 
 Logs só com ids e o resultado, nunca nome, e-mail, CNPJ, código do cupom nem
 termo buscado. Nunca dado de lançamento nem das empresas clientes.
@@ -39,7 +41,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Literal
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
@@ -50,6 +52,7 @@ from app.api.admin import (
     MotivoRequest,
     OperadorAutenticado,
     PagamentoResponse,
+    _alertar,
     _conta,
     _detalhe,
     _evento,
@@ -64,6 +67,8 @@ from app.core.rate_limit import (
     LIMITE_ADMIN_ACAO_POR_USUARIO,
     LIMITE_ADMIN_LEITURA_POR_USUARIO,
     chave_por_usuario,
+    limite_admin_acao_por_ip,
+    limite_admin_leitura_por_ip,
     limiter,
 )
 from app.models import AssinaturaStripe, Conta, PagamentoStripe, Usuario
@@ -208,6 +213,7 @@ def _periodo(desde: date | None, ate: date | None) -> tuple[datetime | None, dat
 
 @router.get("/contas/{conta_id}/pagamentos", response_model=PagamentosDaContaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_pagamentos_da_conta(
     request: Request,
     conta_id: uuid.UUID,
@@ -235,6 +241,7 @@ def listar_pagamentos_da_conta(
 
 @router.get("/pagamentos", response_model=PagamentosListaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_pagamentos(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -280,6 +287,7 @@ def listar_pagamentos(
 
 @router.get("/cancelamentos", response_model=CancelamentosListaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_cancelamentos(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -345,6 +353,7 @@ def listar_cancelamentos(
 
 @router.get("/vencimentos", response_model=VencimentosResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_vencimentos(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -420,6 +429,7 @@ def listar_vencimentos(
 
 @router.get("/cupons", response_model=list[CupomDaStripeResponse])
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_cupons(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -436,12 +446,15 @@ def _erro_da_stripe(exc: stripe.StripeError, onde: str) -> HTTPException:
 
 @router.post("/contas/{conta_id}/assinatura/cancelar", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def cancelar_assinatura(
     request: Request,
     conta_id: uuid.UUID,
     corpo: CancelarRequest,
+    tarefas: BackgroundTasks,
     quem: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     chave = stripe_api.exigir_stripe()
     conta = _conta(db, conta_id, travar=True)
@@ -454,17 +467,21 @@ def cancelar_assinatura(
     db.commit()
     db.refresh(conta)
     logger.info("admin_assinatura acao=%s conta_id=%s", tipo, conta.id)
+    _alertar(tarefas, provedor, quem, conta, tipo, corpo.motivo)
     return _detalhe(db, conta)
 
 
 @router.post("/contas/{conta_id}/assinatura/manter", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def manter_assinatura(
     request: Request,
     conta_id: uuid.UUID,
     corpo: MotivoRequest,
+    tarefas: BackgroundTasks,
     quem: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     chave = stripe_api.exigir_stripe()
     conta = _conta(db, conta_id, travar=True)
@@ -477,6 +494,7 @@ def manter_assinatura(
     db.commit()
     db.refresh(conta)
     logger.info("admin_assinatura acao=cancelamento_desfeito conta_id=%s", conta.id)
+    _alertar(tarefas, provedor, quem, conta, "cancelamento_desfeito", corpo.motivo)
     return _detalhe(db, conta)
 
 
@@ -494,10 +512,12 @@ def _admin_da_conta(db: Session, conta_id: uuid.UUID) -> Usuario | None:
 
 @router.post("/contas/{conta_id}/cupom", response_model=CupomDadoResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def dar_cupom(
     request: Request,
     conta_id: uuid.UUID,
     corpo: DarCupomRequest,
+    tarefas: BackgroundTasks,
     quem: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
     provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
@@ -526,6 +546,8 @@ def dar_cupom(
     resumo = f"Cupom {registro.cupom_nome} ({registro.desconto}), forma {registro.forma}"
     _evento(db, conta, "cupom_enviado", resumo[:500], quem)
     db.commit()
+    # O cupom não tem motivo: o resumo (cupom, desconto e forma) vai como detalhe.
+    _alertar(tarefas, provedor, quem, conta, "cupom_enviado", detalhe=resumo)
 
     base = frontend_url_para_link()
     mensagem = mensagem_cupom(

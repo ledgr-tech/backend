@@ -99,12 +99,24 @@ class Settings(BaseSettings):
     email_responder_para: str = ""
     email_timeout_segundos: float = 10.0
     frontend_url: str = ""
+    # Alerta por e-mail a cada ação de operador no /admin (issue #234): os
+    # endereços da equipe interna, separados por vírgula. Vazio, ou com o e-mail
+    # desligado (EMAIL_HABILITADO), nada é enviado. Texto, não `list`: o
+    # pydantic-settings leria uma lista como JSON. Use `alertas_admin_destinatarios`.
+    alertas_admin_emails: str = ""
 
     # Rate limit (issue #64): segredo que o servidor do Next manda junto com o
     # IP do navegador, em app/core/rate_limit.py. Vazio, o IP repassado é
     # ignorado e o limite de /login, /register e /senha/* volta a ser um só
     # para todos os usuários do front. Mesmo valor nos dois lados.
     ledgr_segredo_proxy: str = ""
+    # Limite por IP no /admin/* (issue #234), somado ao limite por usuário. Nasce
+    # DESLIGADO: o front só repassa o IP do navegador (X-Ledgr-IP-Cliente com
+    # X-Ledgr-Segredo-Proxy) nas rotas públicas, então no /admin todo pedido
+    # chega com o IP da Vercel e os operadores se bloqueariam entre si. Ligar só
+    # quando o front avisar que repassa o IP nas chamadas ao /admin. Desligado, o
+    # comportamento é o de antes.
+    admin_limite_por_ip_habilitado: bool = False
 
     # Login pelo Google (issue #73): o client id do client OAuth da Ledgr no
     # Google Cloud, o mesmo que o NextAuth usa na Vercel. O backend confere
@@ -267,6 +279,16 @@ class Settings(BaseSettings):
                 "não é true. Chave live só com STRIPE_MODO_LIVE=true, de propósito."
             )
         return self
+
+    def alertas_admin_destinatarios(self) -> list[str]:
+        """Os endereços de `ALERTAS_ADMIN_EMAILS`, sem espaços, sem repetidos
+        (maiúsculas não contam) e sem item que não seja um endereço."""
+        vistos: dict[str, str] = {}
+        for item in self.alertas_admin_emails.split(","):
+            email = item.strip()
+            if "@" in email and not any(c.isspace() for c in email):
+                vistos.setdefault(email.lower(), email)
+        return list(vistos.values())
 
     def stripe_disponivel(self) -> bool:
         """A flag está ligada e há chave: as rotas de cobrança podem falar com a

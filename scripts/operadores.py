@@ -132,7 +132,7 @@ def incluir(db: Session, email: str, por: str, perguntar: Callable[[str], str]) 
         return 1
     db.add(OperadorLedgr(usuario_id=usuario.id, incluido_por=por.strip()[:100]))
     db.commit()
-    print("Gravado. O usuário já pode usar o /admin (com login de no máximo 2 horas).")
+    print("Gravado. O usuário já pode usar o /admin (sessão de 60 minutos, 20 de inatividade).")
     return 0
 
 

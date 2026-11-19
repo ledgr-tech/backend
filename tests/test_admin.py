@@ -103,20 +103,138 @@ def test_sem_login_e_401_sem_registro(db_session):
     assert _acessos(db_session) == []
 
 
-def test_login_antigo_e_401_e_fica_registrado(db_session, operador, cliente):
+def _acesso_ha(db_session, o, minutos, resultado="permitido"):
+    """Grava um acesso anterior do operador, `minutos` atrás."""
+    db_session.add(
+        AcessoAdmin(
+            usuario_id=o.usuario.id,
+            operador_id=o.registro.id,
+            metodo="GET",
+            rota="/admin/contas",
+            resultado=resultado,
+            em=datetime.now(UTC) - timedelta(minutes=minutos),
+        )
+    )
+    db_session.commit()
+
+
+def test_login_de_mais_de_60_minutos_e_401_e_fica_registrado(db_session, operador, cliente):
+    """Issue #234: o limite do login caiu de 2 h para 60 min; mesmo com acesso
+    recente, o login de 61 min não vale."""
     c = cliente()
-    antigo = operador(auth_time=_agora_em_segundos() - 2 * 3600 - 60)
-    recente = operador(nome="Rui Recente", auth_time=_agora_em_segundos() - 2 * 3600 + 60)
+    antigo = operador(auth_time=_agora_em_segundos() - 61 * 60)
+    recente = operador(nome="Rui Recente", auth_time=_agora_em_segundos() - 59 * 60)
+    _acesso_ha(db_session, antigo, 1)
+    _acesso_ha(db_session, recente, 1)
 
     negado = _detalhe(antigo.headers, c.conta_id)
     permitido = _detalhe(recente.headers, c.conta_id)
 
     assert (negado.status_code, negado.json()) == (401, LOGIN_ANTIGO)
     assert permitido.status_code == 200
-    assert [(a.resultado, a.operador_id) for a in _acessos(db_session)] == [
+    # `rota == "/admin/contas"` são os acessos anteriores plantados acima.
+    assert [
+        (a.resultado, a.operador_id) for a in _acessos(db_session) if a.rota != "/admin/contas"
+    ] == [
         ("login_antigo", antigo.registro.id),
         ("permitido", recente.registro.id),
     ]
+
+
+def test_sessao_do_operador_constantes_da_issue_234():
+    from app.api.admin import INATIVIDADE_OPERADOR, LOGIN_RECENTE_OPERADOR
+
+    assert LOGIN_RECENTE_OPERADOR == timedelta(minutes=60)
+    assert INATIVIDADE_OPERADOR == timedelta(minutes=20)
+
+
+@pytest.mark.parametrize(
+    ("login_ha", "ultimo_acesso_ha", "status"),
+    [
+        (30, 19, 200),  # login velho, mas a última atividade é de 19 min
+        (30, 21, 401),  # 21 min sem atividade
+        (59, 5, 200),  # perto do teto de 60 min, com atividade
+        (30, None, 401),  # login de 30 min e nenhum acesso: vale o login, vencido
+        (5, None, 200),  # primeiro acesso depois do login
+        (19, None, 200),  # ainda dentro dos 20 min do login
+        (21, None, 401),
+    ],
+    ids=[
+        "acesso_ha_19",
+        "acesso_ha_21",
+        "login_59_com_acesso",
+        "login_30_sem_acesso",
+        "primeiro_acesso",
+        "login_19_sem_acesso",
+        "login_21_sem_acesso",
+    ],
+)
+def test_inatividade_de_20_minutos_do_operador(
+    db_session, operador, cliente, login_ha, ultimo_acesso_ha, status
+):
+    c = cliente()
+    o = operador(auth_time=_agora_em_segundos() - login_ha * 60)
+    if ultimo_acesso_ha is not None:
+        _acesso_ha(db_session, o, ultimo_acesso_ha)
+
+    resposta = _detalhe(o.headers, c.conta_id)
+
+    assert resposta.status_code == status
+    if status == 401:
+        assert resposta.json() == LOGIN_ANTIGO
+        assert _acessos(db_session)[-1].resultado == "login_antigo"
+    else:
+        assert _acessos(db_session)[-1].resultado == "permitido"
+
+
+def test_acesso_permitido_renova_a_inatividade_e_o_401_nao(db_session, operador, cliente):
+    c = cliente()
+    o = operador(auth_time=_agora_em_segundos() - 30 * 60)
+    _acesso_ha(db_session, o, 19)
+
+    primeiro = _detalhe(o.headers, c.conta_id)  # permitido: agora o último acesso é de agora
+    # Anda o relógio do operador: o acesso de 19 min vira de 25 e o da requisição, de 10.
+    db_session.execute(text("UPDATE acessos_admin SET em = em - interval '6 minutes'"))
+    db_session.commit()
+    segundo = _detalhe(o.headers, c.conta_id)
+    # Sem nenhum permitido na janela: 401, e esse 401 não renova nada.
+    db_session.execute(text("UPDATE acessos_admin SET em = em - interval '30 minutes'"))
+    db_session.commit()
+    terceiro = _detalhe(o.headers, c.conta_id)
+    quarto = _detalhe(o.headers, c.conta_id)
+
+    assert [r.status_code for r in (primeiro, segundo, terceiro, quarto)] == [200, 200, 401, 401]
+    assert [a.resultado for a in _acessos(db_session)][-2:] == ["login_antigo", "login_antigo"]
+
+
+def test_acesso_negado_de_outro_nao_renova_a_sessao(db_session, operador, cliente):
+    """Só um acesso `permitido` do próprio operador conta: o `login_antigo`
+    dele e o acesso de outro operador não prolongam a sessão."""
+    c = cliente()
+    o = operador(auth_time=_agora_em_segundos() - 30 * 60)
+    outro = operador(nome="Outro Operador")
+    _acesso_ha(db_session, o, 1, resultado="login_antigo")
+    _acesso_ha(db_session, outro, 1)
+
+    resposta = _detalhe(o.headers, c.conta_id)
+
+    assert (resposta.status_code, resposta.json()) == (401, LOGIN_ANTIGO)
+
+
+def test_nao_operador_continua_403_antes_de_qualquer_conferencia_de_tempo(
+    db_session, cliente, gerar_token
+):
+    c = cliente()
+    admin = c.usuarios["admin"]
+    # Login de 5 h atrás: dentro dos 7 dias do app, fora dos 60 min do painel.
+    token = gerar_token(
+        admin.conta_id, usuario_id=admin.id, auth_time=_agora_em_segundos() - 5 * 3600
+    )
+
+    resposta = _detalhe({"Authorization": f"Bearer {token}"}, c.conta_id)
+
+    assert (resposta.status_code, resposta.json()) == (403, SO_OPERADOR)
+    assert [a.resultado for a in _acessos(db_session)] == ["nao_operador"]
 
 
 def test_operador_removido_perde_o_acesso_na_hora(db_session, operador):
