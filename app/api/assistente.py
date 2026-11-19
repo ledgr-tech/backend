@@ -162,7 +162,7 @@ def _links_da_central(central, citacoes) -> list[LinkAjuda]:
 
 def _links_de_tela(links: tuple[consultas.LinkDeTela, ...]) -> list[LinkAjuda]:
     return [
-        LinkAjuda(titulo=link.titulo, caminho=link.caminho, tipo="tela")
+        LinkAjuda(titulo=link.titulo, caminho=link.caminho, tipo=link.tipo)
         for link in links[:MAXIMO_LINKS]
     ]
 

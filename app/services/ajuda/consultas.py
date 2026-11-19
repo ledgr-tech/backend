@@ -34,7 +34,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import TypeVar
+from typing import Literal, TypeVar
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
@@ -82,10 +82,15 @@ T = TypeVar("T")
 @dataclass(frozen=True)
 class LinkDeTela:
     """Caminho de uma tela do app, sem o prefixo `/e/<empresa>`, que o front
-    acrescenta. Sempre montado aqui, de uma lista fechada de telas."""
+    acrescenta. Sempre montado aqui, de uma lista fechada de telas.
+
+    `tipo` "ajuda" é a exceção para o que não tem tela própria no front (as
+    Configurações são uma janela, sem rota): o caminho é a seção da Central
+    que ensina a chegar lá, e o front não acrescenta o prefixo."""
 
     titulo: str
     caminho: str
+    tipo: Literal["tela", "ajuda"] = "tela"
 
 
 @dataclass(frozen=True)
@@ -109,9 +114,11 @@ TELAS_DE_ACAO = {
     "nova_conciliacao": LinkDeTela("Nova conciliação", "/conciliacoes/nova"),
     "conciliacoes": HISTORICO,
     "fechamentos": FECHAMENTOS,
-    "regras": LinkDeTela("Regras", "/regras"),
+    # a regra da conciliação (tolerância de data) fica na janela Configurações
+    "regras": LinkDeTela("Configurações", "/ajuda/configuracoes#tolerancia", "ajuda"),
     "empresas": LinkDeTela("Empresas", "/empresas"),
-    "equipe": LinkDeTela("Equipe", "/equipe"),
+    # a Equipe é uma aba da tela Empresas
+    "equipe": LinkDeTela("Equipe", "/empresas?aba=equipe"),
 }
 
 _SEM_CONCILIACAO = "Esta empresa ainda não tem conciliação."

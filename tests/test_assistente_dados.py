@@ -270,6 +270,33 @@ def test_pedido_de_gravar_recebe_recusa_com_a_tela(assistente, empresa, db_sessi
     assert db_session.scalar(select(func.count()).select_from(Fechamento)) == antes
 
 
+@pytest.mark.parametrize(
+    ("tela", "esperado"),
+    [
+        (
+            "equipe",
+            {"titulo": "Equipe", "caminho": "/empresas?aba=equipe", "tipo": "tela"},
+        ),
+        (
+            "regras",
+            {
+                "titulo": "Configurações",
+                "caminho": "/ajuda/configuracoes#tolerancia",
+                "tipo": "ajuda",
+            },
+        ),
+    ],
+)
+def test_recusa_aponta_onde_a_tela_existe_no_front(assistente, empresa, tela, esperado):
+    # o front não tem /equipe nem /regras: a Equipe é aba de Empresas e a
+    # tolerância fica na janela Configurações, que não tem rota
+    assistente.outro("acao", tela=tela)
+
+    resposta = _perguntar(empresa.com_empresa, "mude isso")
+
+    assert resposta.json()["links"] == [esperado]
+
+
 def test_pedido_de_gravar_sem_tela(assistente, empresa):
     assistente.outro("acao")
 
