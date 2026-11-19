@@ -95,13 +95,12 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.auth import obter_empresa_id_ativa
-from app.core.competencia import validar_competencia
+from app.core.competencia import intervalo_da_competencia_ou_422
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
 from app.models.extrato import STATUS_RASCUNHO
 from app.services.decisoes import contar_justificativas
 from app.services.execucoes import calcular_percentual_acerto
-from app.services.travas import intervalo_da_competencia
 
 router = APIRouter(prefix="/execucoes", tags=["execucoes"])
 
@@ -176,9 +175,9 @@ def _extrato_nao_encontrado() -> HTTPException:
     )
 
 
-def _na_competencia(periodo_inicio, competencia: str):
+def _na_competencia(periodo_inicio, intervalo: tuple[date, date]):
     """`periodo_inicio` (coluna) dentro do mês da competência. NULL não casa."""
-    inicio, fim = intervalo_da_competencia(competencia)
+    inicio, fim = intervalo
     return and_(periodo_inicio >= inicio, periodo_inicio < fim)
 
 
@@ -217,8 +216,7 @@ def listar_execucoes(
     `periodo_inicio` fica fora de qualquer competência). Sem filtros devolve tudo,
     como antes.
     """
-    if competencia is not None:
-        validar_competencia(competencia)
+    intervalo = intervalo_da_competencia_ou_422(competencia) if competencia is not None else None
     if extrato_banco_id is not None:
         extrato = db.get(Extrato, extrato_banco_id)
         if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
@@ -267,14 +265,14 @@ def listar_execucoes(
 
     consulta = select(subconsulta)
     consulta_total = select(func.count()).select_from(ExecucaoConciliacao).where(*filtros)
-    if competencia is not None:
+    if intervalo is not None:
         # Fora da subconsulta, depois do row_number(): `atual` sai do conjunto
         # completo da empresa. A contagem junta com o extrato do banco só aqui.
-        consulta = consulta.where(_na_competencia(subconsulta.c.periodo_inicio, competencia))
+        consulta = consulta.where(_na_competencia(subconsulta.c.periodo_inicio, intervalo))
         consulta_total = consulta_total.join(
             Extrato,
             ExecucaoConciliacao.extrato_banco_id == Extrato.id,
-        ).where(_na_competencia(Extrato.periodo_inicio, competencia))
+        ).where(_na_competencia(Extrato.periodo_inicio, intervalo))
     consulta = (
         consulta.order_by(subconsulta.c.criado_em.desc(), subconsulta.c.id.desc())
         .limit(limit)

@@ -864,6 +864,45 @@ def test_competencia_com_formato_invalido_da_422_com_o_texto_de_fechamentos(
     assert em_fechamentos.json() == resposta.json()
 
 
+@pytest.mark.parametrize("competencia", ["0000-01", "0000-12", "9999-12"])
+def test_competencia_fora_do_calendario_do_python_da_422_e_nao_500(
+    competencia, criar_empresa, auth_headers
+):
+    """O formato aceita 0000-01 e 9999-12, mas o intervalo do mês precisa de
+    date(0, 1, 1) e date(10000, 1, 1): nada disso pode virar 500."""
+    empresa = criar_empresa()
+
+    resposta = _get(auth_headers(empresa.id), competencia=competencia)
+
+    assert resposta.status_code == 422
+    assert resposta.json() == {"detail": TEXTO_COMPETENCIA_INVALIDA}
+
+
+@pytest.mark.parametrize("competencia", ["0001-01", "9999-01", "9999-11"])
+def test_competencia_nos_extremos_representaveis_continua_valida(
+    competencia, criar_empresa, auth_headers
+):
+    empresa = criar_empresa()
+
+    resposta = _get(auth_headers(empresa.id), competencia=competencia)
+
+    assert resposta.status_code == 200
+    assert resposta.json()["total"] == 0
+
+
+@pytest.mark.parametrize("competencia", ["0000-01", "9999-12"])
+def test_fechamentos_segue_aceitando_os_valores_que_execucoes_recusa(
+    competencia, criar_empresa, auth_headers
+):
+    empresa = criar_empresa()
+
+    resposta = client.get(
+        "/fechamentos", headers=auth_headers(empresa.id), params={"competencia": competencia}
+    )
+
+    assert resposta.status_code == 200
+
+
 def test_competencia_isolamento_por_empresa_ativa(
     criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
 ):
