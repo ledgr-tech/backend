@@ -64,6 +64,7 @@ from app.core.auth import (
     obter_empresa_ativa,
     obter_empresa_id_ativa,
 )
+from app.core.competencia import validar_competencia
 from app.core.database import get_db
 from app.models import Fechamento, Usuario
 from app.services import fechamentos, relatorio_publico
@@ -152,14 +153,6 @@ def _erro(status_code: int, detalhe: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detalhe)
 
 
-def _validar_competencia(competencia: str) -> None:
-    if not fechamentos.competencia_valida(competencia):
-        raise _erro(
-            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "A competência deve estar no formato AAAA-MM, com mês de 01 a 12.",
-        )
-
-
 def _plural(quantidade: int, singular: str, plural: str) -> str:
     return f"{quantidade} {singular if quantidade == 1 else plural}"
 
@@ -196,7 +189,7 @@ def fechar_competencia(
     db: Annotated[Session, Depends(get_db)],
 ) -> FechamentoResponse:
     usuario, empresa_id = ativa.usuario, ativa.empresa.id
-    _validar_competencia(corpo.competencia)
+    validar_competencia(corpo.competencia)
     ressalva = (corpo.ressalva or "").strip() or None
     if ressalva is not None and len(ressalva) > TAMANHO_MAXIMO_RESSALVA:
         raise _erro(
@@ -248,7 +241,7 @@ def listar_fechamentos(
 ) -> FechamentoListaResponse:
     consulta = select(Fechamento).where(Fechamento.empresa_id == empresa_id)
     if competencia is not None:
-        _validar_competencia(competencia)
+        validar_competencia(competencia)
         consulta = consulta.where(Fechamento.competencia == competencia)
     itens = db.scalars(
         consulta.order_by(Fechamento.competencia.desc(), Fechamento.fechado_em.desc())
@@ -264,7 +257,7 @@ def reabrir_competencia(
     db: Annotated[Session, Depends(get_db)],
 ) -> FechamentoResponse:
     usuario, empresa_id = ativa.usuario, ativa.empresa.id
-    _validar_competencia(competencia)
+    validar_competencia(competencia)
 
     travar_mes(db, empresa_id, competencia)
 
