@@ -5,7 +5,8 @@ Mesmo prefixo `/admin` e mesma guarda da parte 1 (app/api/admin.py): só o
 operador (403 para os outros, inclusive o admin de conta), sessão do operador
 de 60 minutos e 20 de inatividade (401, issue #234), acesso registrado em `acessos_admin`, limite por usuário
 (`LIMITE_ADMIN_LEITURA_POR_USUARIO` nas consultas, `LIMITE_ADMIN_ACAO_POR_USUARIO`
-nas ações). Ignora `X-Ledgr-Empresa`.
+nas ações) e, com `ADMIN_LIMITE_POR_IP_HABILITADO` ligada, o limite por IP da
+issue #234 (app/api/admin.py). Ignora `X-Ledgr-Empresa`.
 
 Consultas, sem chamar a Stripe: leem o que o webhook guardou em
 `assinaturas_stripe` e `pagamentos_stripe`.
@@ -66,6 +67,8 @@ from app.core.rate_limit import (
     LIMITE_ADMIN_ACAO_POR_USUARIO,
     LIMITE_ADMIN_LEITURA_POR_USUARIO,
     chave_por_usuario,
+    limite_admin_acao_por_ip,
+    limite_admin_leitura_por_ip,
     limiter,
 )
 from app.models import AssinaturaStripe, Conta, PagamentoStripe, Usuario
@@ -210,6 +213,7 @@ def _periodo(desde: date | None, ate: date | None) -> tuple[datetime | None, dat
 
 @router.get("/contas/{conta_id}/pagamentos", response_model=PagamentosDaContaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_pagamentos_da_conta(
     request: Request,
     conta_id: uuid.UUID,
@@ -237,6 +241,7 @@ def listar_pagamentos_da_conta(
 
 @router.get("/pagamentos", response_model=PagamentosListaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_pagamentos(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -282,6 +287,7 @@ def listar_pagamentos(
 
 @router.get("/cancelamentos", response_model=CancelamentosListaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_cancelamentos(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -347,6 +353,7 @@ def listar_cancelamentos(
 
 @router.get("/vencimentos", response_model=VencimentosResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_vencimentos(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -422,6 +429,7 @@ def listar_vencimentos(
 
 @router.get("/cupons", response_model=list[CupomDaStripeResponse])
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_cupons(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -438,6 +446,7 @@ def _erro_da_stripe(exc: stripe.StripeError, onde: str) -> HTTPException:
 
 @router.post("/contas/{conta_id}/assinatura/cancelar", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def cancelar_assinatura(
     request: Request,
     conta_id: uuid.UUID,
@@ -464,6 +473,7 @@ def cancelar_assinatura(
 
 @router.post("/contas/{conta_id}/assinatura/manter", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def manter_assinatura(
     request: Request,
     conta_id: uuid.UUID,
@@ -502,6 +512,7 @@ def _admin_da_conta(db: Session, conta_id: uuid.UUID) -> Usuario | None:
 
 @router.post("/contas/{conta_id}/cupom", response_model=CupomDadoResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def dar_cupom(
     request: Request,
     conta_id: uuid.UUID,

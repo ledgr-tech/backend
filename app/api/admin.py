@@ -46,6 +46,13 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
   `/piloto` (`ativo` e `motivo`): gravam o estado em `contas` e um evento em
   `eventos_conta`. Repetir dá 409.
 
+Limite por IP (issue #234): além do limite por usuário, o `/admin/*` tem 120
+leituras e 30 ações por minuto por IP (`LIMITE_ADMIN_*_POR_IP`, app/core/
+rate_limit.py), só com `ADMIN_LIMITE_POR_IP_HABILITADO` ligada. Vem desligada:
+o front só repassa o IP do navegador (`X-Ledgr-IP-Cliente` com
+`X-Ledgr-Segredo-Proxy`) nas rotas públicas, e sem isso todo pedido ao `/admin`
+chega com o IP da Vercel e os operadores se bloqueariam entre si.
+
 Alerta (issue #234): cada ação de operador que muda uma conta, as três acima e
 as de assinatura e cupom (app/api/admin_assinaturas.py), avisa a equipe interna
 por e-mail depois do commit e da resposta (`ALERTAS_ADMIN_EMAILS`, regras em
@@ -91,6 +98,8 @@ from app.core.rate_limit import (
     LIMITE_ADMIN_ACAO_POR_USUARIO,
     LIMITE_ADMIN_LEITURA_POR_USUARIO,
     chave_por_usuario,
+    limite_admin_acao_por_ip,
+    limite_admin_leitura_por_ip,
     limiter,
 )
 from app.core.sem_acento import sem_acento, sem_acento_sql
@@ -657,6 +666,7 @@ def _alertar(
 
 @router.get("/contas", response_model=ContaListaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_contas(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -696,6 +706,7 @@ def listar_contas(
 
 @router.get("/contas/por-uf", response_model=ContasPorUfResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def contar_contas_por_uf(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -732,6 +743,7 @@ def contar_contas_por_uf(
 
 @router.get("/contas/{conta_id}", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def detalhar_conta(
     request: Request,
     conta_id: uuid.UUID,
@@ -743,6 +755,7 @@ def detalhar_conta(
 
 @router.post("/contas/{conta_id}/inativar", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def inativar_conta(
     request: Request,
     conta_id: uuid.UUID,
@@ -767,6 +780,7 @@ def inativar_conta(
 
 @router.post("/contas/{conta_id}/reativar", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def reativar_conta(
     request: Request,
     conta_id: uuid.UUID,
@@ -791,6 +805,7 @@ def reativar_conta(
 
 @router.post("/contas/{conta_id}/piloto", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def definir_piloto(
     request: Request,
     conta_id: uuid.UUID,
