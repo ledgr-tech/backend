@@ -67,6 +67,17 @@ extrato segue sem original. `arquivo_original` no upload, em cada item da
 listagem e no detalhe diz se há original guardado (e a flag está ligada).
 `GET /extratos/{extrato_id}/arquivo-original` devolve o arquivo como foi
 enviado, só para o admin e o gestor.
+
+Descartar (issue #185): `DELETE /extratos/{extrato_id}` apaga o extrato que
+nunca entrou em conciliação, com os lançamentos e as linhas não lidas dele,
+para quem enviou o arquivo com erros e volta para corrigi-lo. Responde 204;
+404 para o inexistente, o de outra empresa e o rascunho da importação via IA
+(como o `GET`); 409 com o texto pronto para o front mostrar para o extrato já
+usado em conciliação e para o que ainda está sendo importado. As regras estão
+em app/services/descarte_extrato.py. O original no R2, se houver, é apagado
+depois do commit, e uma falha nele só vai para o log. Pode descartar quem pode
+enviar (a mesma dependency do upload), e a conta inativa recebe o 403 de
+`conta_inativa` como em toda escrita (ADR-025).
 """
 
 import logging
@@ -121,6 +132,11 @@ from app.services.arquivo_original import (
     conta_guarda_o_original,
     obter_arquivo_original,
     original_visivel,
+)
+from app.services.descarte_extrato import (
+    ExtratoNaoDescartavel,
+    ExtratoNaoEncontrado,
+    descartar_extrato,
 )
 from app.services.normalizacao import normalizar_extrato
 
@@ -500,3 +516,73 @@ def baixar_arquivo_original(
             "Cache-Control": "no-store",
         },
     )
+
+
+DESCARTE_404 = "Extrato inexistente, de outra empresa ou rascunho da importação via IA."
+DESCARTE_409 = (
+    "O extrato já foi usado em uma conciliação ou ainda está sendo importado. "
+    "O `detail` vem em português, pronto para o front mostrar como veio."
+)
+DESCARTE_403 = "Conta inativa (ADR-025): `detail` e `codigo` igual a `conta_inativa`."
+
+
+@router.delete(
+    "/{extrato_id}",
+    status_code=http_status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={
+        404: {"description": DESCARTE_404},
+        409: {"description": DESCARTE_409},
+        403: {"description": DESCARTE_403},
+    },
+)
+def descartar_extrato_da_empresa(
+    extrato_id: uuid.UUID,
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
+    db: Annotated[Session, Depends(get_db)],
+    servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
+) -> Response:
+    """Descarta o extrato que nunca entrou em conciliação (issue #185).
+
+    Síncrona de propósito, como o download do original: o FastAPI roda numa
+    thread, a espera pelas travas não prende o event loop e o cliente do R2 é
+    síncrono. O original só é apagado depois do commit: se o R2 falhar, o
+    extrato já foi descartado e a rota responde 204 do mesmo jeito.
+    """
+    try:
+        descartado = descartar_extrato(db, ativa.empresa.id, extrato_id)
+    except ExtratoNaoEncontrado as exc:
+        db.rollback()
+        raise HTTPException(http_status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except ExtratoNaoDescartavel as exc:
+        db.rollback()
+        raise HTTPException(http_status.HTTP_409_CONFLICT, exc.mensagem) from exc
+    db.commit()
+    logger.info("extrato %s descartado", descartado.extrato_id)
+
+    if descartado.arquivo_chave is not None:
+        _apagar_original_do_extrato_descartado(
+            servico, descartado.arquivo_chave, descartado.extrato_id
+        )
+    return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
+def _apagar_original_do_extrato_descartado(
+    servico: ArquivoOriginal | None, chave: str, extrato_id: uuid.UUID
+) -> None:
+    """Best-effort, como `_apagar_original_sem_extrato`: o extrato já saiu do
+    banco, e o 204 não depende do R2. No log, só a classe do erro e o id do
+    extrato (a mensagem do `boto3` traz o endpoint e o bucket)."""
+    if servico is None:
+        logger.warning(
+            "arquivo original de extrato descartado não apagado (sem R2), %s", extrato_id
+        )
+        return
+    try:
+        servico.apagar(chave)
+    except Exception as exc:  # noqa: BLE001 - o extrato já foi descartado
+        logger.warning(
+            "arquivo original de extrato descartado não foi apagado (%s), extrato %s",
+            type(exc).__name__,
+            extrato_id,
+        )

@@ -130,7 +130,7 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Lancamento
+from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Extrato, Lancamento
 from app.services import soma_exata
 from app.services.normalizacao import _normalizar_descricao
 from app.services.travas import travar_extrato_banco
@@ -842,6 +842,27 @@ def executar_motor(
     return resultados
 
 
+class ExtratoInexistenteError(LookupError):
+    """Um dos extratos do par deixou de existir (foi descartado) entre a
+    validação da rota e a trava."""
+
+
+def _travar_extratos_existentes(
+    db: Session,
+    empresa_id: uuid.UUID,
+    extrato_banco_id: uuid.UUID,
+    extrato_sistema_id: uuid.UUID,
+) -> None:
+    ids = {extrato_banco_id, extrato_sistema_id}
+    existentes = db.scalars(
+        select(Extrato.id)
+        .where(Extrato.id.in_(ids), Extrato.empresa_id == empresa_id)
+        .with_for_update(key_share=True)
+    ).all()
+    if len(existentes) != len(ids):
+        raise ExtratoInexistenteError("extrato do par não existe mais")
+
+
 def conciliar_extratos(
     db: Session,
     empresa_id: uuid.UUID,
@@ -872,9 +893,15 @@ def conciliar_extratos(
     `execucoes_conciliacao`, na mesma transação/lock — ao contrário de
     `conciliacoes`, essa tabela é só de inserção e nunca é apagada, então o
     histórico sobrevive a reconciliações futuras do mesmo par.
+
+    Extrato descartado no meio (issue #185): com a trava, a função trava as
+    linhas dos dois extratos (`FOR KEY SHARE`), o que impede `DELETE
+    /extratos/{id}` até o commit; se algum já não existe, levanta
+    `ExtratoInexistenteError`, em vez de deixar a FK da execução estourar.
     """
     try:
         travar_extrato_banco(db, empresa_id, extrato_banco_id)
+        _travar_extratos_existentes(db, empresa_id, extrato_banco_id, extrato_sistema_id)
         banco = _carregar_lancamentos(db, empresa_id, extrato_banco_id)
         sistema = _carregar_lancamentos(db, empresa_id, extrato_sistema_id)
         tolerancia_dias = db.execute(

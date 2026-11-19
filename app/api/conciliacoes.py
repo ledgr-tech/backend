@@ -196,7 +196,7 @@ from app.services.ia.geracao import (
     gerar_explicacoes_do_par,
     obter_provedor_dependencia,
 )
-from app.services.matching import conciliar_extratos
+from app.services.matching import ExtratoInexistenteError, conciliar_extratos
 from app.services.plano import motivo_do_bloqueio
 
 logger = logging.getLogger(__name__)
@@ -307,7 +307,15 @@ def criar_conciliacao(
         raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail=motivo)
 
     _garantir_mes_aberto(db, empresa_id, extrato_banco)
-    contagens = conciliar_extratos(db, empresa_id, corpo.extrato_banco_id, corpo.extrato_sistema_id)
+    try:
+        contagens = conciliar_extratos(
+            db, empresa_id, corpo.extrato_banco_id, corpo.extrato_sistema_id
+        )
+    except ExtratoInexistenteError as exc:
+        # Descartado (DELETE /extratos/{id}) depois da validação acima (issue #185).
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Extrato não encontrado."
+        ) from exc
     if provedor is not None and automatica_ligada():
         # Depois do commit de `conciliar_extratos` e da resposta.
         tarefas.add_task(
