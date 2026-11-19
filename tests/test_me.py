@@ -8,14 +8,17 @@ rate limit testados com as fixtures de conftest.py.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, update
 
 from app.api.me import LIMITE_CONSULTA_ME_POR_USUARIO
+from app.core import conta_inativa
 from app.core.auth import CABECALHO_EMPRESA
 from app.core.config import settings
+from app.models import Conta
 from main import app
 
 client = TestClient(app)
@@ -82,6 +85,9 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "preferencias": {"tutoriais_dispensados": [], "roteiro_dispensado": False},
         # Flag desligada e conta sem plano (issue #139).
         "guarda_arquivo_original": False,
+        # Conta ativa (issues #156 e #214).
+        "conta_inativa": False,
+        "conta_inativada_em": None,
     }
     assert len(corpo["cnpj"]) == 14
     assert not corpo["cnpj"].isalpha()  # sem máscara (sem pontuação)
@@ -153,6 +159,133 @@ def test_resposta_nao_expoe_hashes(db_session, criar_usuario, cabecalho_de):
     assert "google_sub" not in corpo
     assert usuario.senha_hash not in response.text
     assert usuario.google_sub not in response.text
+
+
+# --- conta inativa (issues #156 e #214) ---------------------------------------
+
+
+MOTIVO = "Inadimplência há 90 dias, combinado com o financeiro"
+
+
+def _inativar_no_banco(db_session, conta_id, motivo=MOTIVO):
+    db_session.execute(
+        update(Conta)
+        .where(Conta.id == conta_id)
+        .values(inativada_em=func.now(), motivo_inativacao=motivo)
+    )
+    db_session.commit()
+
+
+def _inativada_em_gravada(db_session, conta_id) -> datetime:
+    db_session.expire_all()
+    return db_session.get(Conta, conta_id).inativada_em
+
+
+def test_conta_ativa_diz_que_nao_esta_inativa(cliente):
+    c = cliente()
+
+    corpo = _me(c.headers["admin"]).json()
+
+    assert corpo["conta_inativa"] is False
+    assert corpo["conta_inativada_em"] is None
+
+
+@pytest.mark.parametrize("papel", ["admin", "gestor", "analista"])
+def test_conta_inativa_diz_que_esta_e_quando_em_utc(db_session, cliente, papel):
+    c = cliente()
+    _inativar_no_banco(db_session, c.conta_id)
+    gravada = _inativada_em_gravada(db_session, c.conta_id)
+
+    response = _me(c.headers[papel])
+
+    assert response.status_code == 200
+    corpo = response.json()
+    assert corpo["conta_inativa"] is True
+    em = datetime.fromisoformat(corpo["conta_inativada_em"])
+    assert em == gravada
+    assert em.utcoffset() == timedelta(0)  # UTC explícito, como teste_termina_em
+    assert corpo["conta_inativada_em"].endswith(("Z", "+00:00"))
+
+
+def test_conta_inativa_nao_depende_da_empresa_ativa(db_session, cliente):
+    c = cliente()
+    _inativar_no_banco(db_session, c.conta_id)
+    headers = {**c.headers["gestor"], CABECALHO_EMPRESA: "nao-e-uuid"}
+
+    response = _me(headers)
+
+    assert response.status_code == 200
+    assert response.json()["conta_inativa"] is True
+
+
+def test_a_resposta_nunca_expoe_o_motivo_da_inativacao(db_session, cliente):
+    c = cliente()
+    _inativar_no_banco(db_session, c.conta_id)
+
+    for papel in ("admin", "gestor", "analista"):
+        response = _me(c.headers[papel])
+
+        assert response.status_code == 200
+        assert "motivo_inativacao" not in response.json()
+        assert not [chave for chave in response.json() if "motivo" in chave]
+        assert MOTIVO not in response.text
+        assert "Inadimplência" not in response.text
+
+
+def test_me_segue_a_inativacao_e_a_reativacao_feitas_pelo_admin(db_session, operador, cliente):
+    """Pelo caminho do painel (`POST /admin/contas/{id}/inativar` e
+    `/reativar`): sem cache, o `/me` seguinte já reflete, e nenhuma das
+    consultas é recusada."""
+    o = operador()
+    c = cliente()
+    headers = c.headers["admin"]
+
+    antes = _me(headers)
+    inativou = client.post(
+        f"/admin/contas/{c.conta_id}/inativar", headers=o.headers, json={"motivo": MOTIVO}
+    )
+    inativa = _me(headers)
+    reativou = client.post(
+        f"/admin/contas/{c.conta_id}/reativar", headers=o.headers, json={"motivo": "Pagou"}
+    )
+    depois = _me(headers)
+    de_novo = client.post(
+        f"/admin/contas/{c.conta_id}/inativar", headers=o.headers, json={"motivo": MOTIVO}
+    )
+    inativa_de_novo = _me(headers)
+
+    assert (inativou.status_code, reativou.status_code, de_novo.status_code) == (200, 200, 200)
+    assert [r.status_code for r in (antes, inativa, depois, inativa_de_novo)] == [200] * 4
+    assert (antes.json()["conta_inativa"], antes.json()["conta_inativada_em"]) == (False, None)
+    assert inativa.json()["conta_inativa"] is True
+    # A data do /me é a que o painel mostra para a inativação.
+    assert datetime.fromisoformat(inativa.json()["conta_inativada_em"]) == datetime.fromisoformat(
+        inativou.json()["inativacao"]["em"]
+    )
+    assert (depois.json()["conta_inativa"], depois.json()["conta_inativada_em"]) == (False, None)
+    assert inativa_de_novo.json()["conta_inativa"] is True
+    assert datetime.fromisoformat(
+        inativa_de_novo.json()["conta_inativada_em"]
+    ) >= datetime.fromisoformat(inativa.json()["conta_inativada_em"])
+    assert all(MOTIVO not in r.text for r in (inativa, inativa_de_novo))
+
+
+def test_me_responde_200_com_a_conta_inativa_e_a_escrita_continua_403(db_session, cliente):
+    """Regressão da #156: a leitura é liberada, a escrita segue barrada."""
+    c = cliente()
+    _inativar_no_banco(db_session, c.conta_id)
+
+    leitura = _me(c.headers["admin"])
+    escrita = client.post(
+        "/empresas",
+        headers=c.headers["admin"],
+        json={"cnpj": "11222333000181", "razao_social": "Nova"},
+    )
+
+    assert leitura.status_code == 200
+    assert leitura.json()["conta_inativa"] is True
+    assert (escrita.status_code, escrita.json()) == (403, conta_inativa.corpo())
+    assert escrita.json()["codigo"] == "conta_inativa"
 
 
 # --- autenticação por usuário -----------------------------------------------
