@@ -46,6 +46,12 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
   `/piloto` (`ativo` e `motivo`): gravam o estado em `contas` e um evento em
   `eventos_conta`. Repetir dá 409.
 
+Alerta (issue #234): cada ação de operador que muda uma conta, as três acima e
+as de assinatura e cupom (app/api/admin_assinaturas.py), avisa a equipe interna
+por e-mail depois do commit e da resposta (`ALERTAS_ADMIN_EMAILS`, regras em
+app/services/alerta_admin.py). Ação recusada não avisa, e falha no envio nunca
+falha a ação.
+
 Pagamentos, cancelamentos, vencimentos e cupons (issue #169) ficam em
 app/api/admin_assinaturas.py, no mesmo prefixo e com a mesma guarda.
 
@@ -70,7 +76,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import and_, case, delete, func, or_, select
@@ -105,7 +111,10 @@ from app.models import (
     PagamentoStripe,
     Usuario,
 )
+from app.services import alerta_admin
 from app.services.convites import condicoes_pendente
+from app.services.email import ProvedorDeEmail
+from app.services.email.envio import obter_provedor_email_dependencia
 from app.services.plano import FUSO_DA_FRANQUIA
 
 logger = logging.getLogger(__name__)
@@ -621,6 +630,28 @@ def _conflito(detalhe: str) -> HTTPException:
     return HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=detalhe)
 
 
+def _alertar(
+    tarefas: BackgroundTasks,
+    provedor: ProvedorDeEmail | None,
+    quem: OperadorAutenticado,
+    conta: Conta,
+    tipo: str,
+    motivo: str | None = None,
+    detalhe: str | None = None,
+) -> None:
+    """Alerta à equipe interna (issue #234), para chamar DEPOIS do commit da
+    ação: o envio sai depois da resposta e nunca a falha."""
+    alerta_admin.agendar(
+        tarefas,
+        provedor,
+        operador=quem.usuario,
+        conta=conta,
+        tipo=tipo,
+        motivo=motivo,
+        detalhe=detalhe,
+    )
+
+
 # --- rotas ----------------------------------------------------------------------------
 
 
@@ -716,8 +747,10 @@ def inativar_conta(
     request: Request,
     conta_id: uuid.UUID,
     corpo: MotivoRequest,
+    tarefas: BackgroundTasks,
     operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     conta = _conta(db, conta_id, travar=True)
     if conta.inativada_em is not None:
@@ -728,6 +761,7 @@ def inativar_conta(
     db.commit()
     db.refresh(conta)
     logger.info("admin_conta acao=inativada conta_id=%s", conta.id)
+    _alertar(tarefas, provedor, operador, conta, "inativada", corpo.motivo)
     return _detalhe(db, conta)
 
 
@@ -737,8 +771,10 @@ def reativar_conta(
     request: Request,
     conta_id: uuid.UUID,
     corpo: MotivoRequest,
+    tarefas: BackgroundTasks,
     operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     conta = _conta(db, conta_id, travar=True)
     if conta.inativada_em is None:
@@ -749,6 +785,7 @@ def reativar_conta(
     db.commit()
     db.refresh(conta)
     logger.info("admin_conta acao=reativada conta_id=%s", conta.id)
+    _alertar(tarefas, provedor, operador, conta, "reativada", corpo.motivo)
     return _detalhe(db, conta)
 
 
@@ -758,8 +795,10 @@ def definir_piloto(
     request: Request,
     conta_id: uuid.UUID,
     corpo: PilotoRequest,
+    tarefas: BackgroundTasks,
     operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     conta = _conta(db, conta_id, travar=True)
     if conta.assinatura_ativa == corpo.ativo:
@@ -775,4 +814,12 @@ def definir_piloto(
     db.commit()
     db.refresh(conta)
     logger.info("admin_conta acao=piloto ativo=%s conta_id=%s", corpo.ativo, conta.id)
+    _alertar(
+        tarefas,
+        provedor,
+        operador,
+        conta,
+        "piloto_ligado" if corpo.ativo else "piloto_desligado",
+        corpo.motivo,
+    )
     return _detalhe(db, conta)

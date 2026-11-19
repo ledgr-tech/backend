@@ -26,8 +26,9 @@ Consultas, sem chamar a Stripe: leem o que o webhook guardou em
 Ações, que chamam a Stripe (app/services/assinatura/operador.py): cancelar
 (`fim_do_periodo` ou `agora`, com motivo; sem reembolso nem proporcional),
 manter (desfaz o cancelamento agendado), listar os cupons da Stripe e dar um
-cupom à conta. Cada uma grava um evento em `eventos_conta` e sincroniza a
-assinatura na hora. A cobrança desligada dá 503; a Stripe fora do ar, 502.
+cupom à conta. Cada uma grava um evento em `eventos_conta`, sincroniza a
+assinatura na hora e, depois do commit e da resposta, avisa a equipe interna por
+e-mail (issue #234, app/services/alerta_admin.py). A cobrança desligada dá 503; a Stripe fora do ar, 502.
 
 Logs só com ids e o resultado, nunca nome, e-mail, CNPJ, código do cupom nem
 termo buscado. Nunca dado de lançamento nem das empresas clientes.
@@ -39,7 +40,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Literal
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
@@ -50,6 +51,7 @@ from app.api.admin import (
     MotivoRequest,
     OperadorAutenticado,
     PagamentoResponse,
+    _alertar,
     _conta,
     _detalhe,
     _evento,
@@ -440,8 +442,10 @@ def cancelar_assinatura(
     request: Request,
     conta_id: uuid.UUID,
     corpo: CancelarRequest,
+    tarefas: BackgroundTasks,
     quem: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     chave = stripe_api.exigir_stripe()
     conta = _conta(db, conta_id, travar=True)
@@ -454,6 +458,7 @@ def cancelar_assinatura(
     db.commit()
     db.refresh(conta)
     logger.info("admin_assinatura acao=%s conta_id=%s", tipo, conta.id)
+    _alertar(tarefas, provedor, quem, conta, tipo, corpo.motivo)
     return _detalhe(db, conta)
 
 
@@ -463,8 +468,10 @@ def manter_assinatura(
     request: Request,
     conta_id: uuid.UUID,
     corpo: MotivoRequest,
+    tarefas: BackgroundTasks,
     quem: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     chave = stripe_api.exigir_stripe()
     conta = _conta(db, conta_id, travar=True)
@@ -477,6 +484,7 @@ def manter_assinatura(
     db.commit()
     db.refresh(conta)
     logger.info("admin_assinatura acao=cancelamento_desfeito conta_id=%s", conta.id)
+    _alertar(tarefas, provedor, quem, conta, "cancelamento_desfeito", corpo.motivo)
     return _detalhe(db, conta)
 
 
@@ -498,6 +506,7 @@ def dar_cupom(
     request: Request,
     conta_id: uuid.UUID,
     corpo: DarCupomRequest,
+    tarefas: BackgroundTasks,
     quem: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
     provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
@@ -526,6 +535,8 @@ def dar_cupom(
     resumo = f"Cupom {registro.cupom_nome} ({registro.desconto}), forma {registro.forma}"
     _evento(db, conta, "cupom_enviado", resumo[:500], quem)
     db.commit()
+    # O cupom não tem motivo: o resumo (cupom, desconto e forma) vai como detalhe.
+    _alertar(tarefas, provedor, quem, conta, "cupom_enviado", detalhe=resumo)
 
     base = frontend_url_para_link()
     mensagem = mensagem_cupom(

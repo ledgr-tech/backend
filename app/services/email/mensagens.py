@@ -1,4 +1,4 @@
-"""Textos dos e-mails transacionais (issues #66, #68, #69, #78, #149 e #169, ADR-012).
+"""Textos dos e-mails transacionais (issues #66, #68, #69, #78, #149, #169 e #234, ADR-012).
 
 Cada mensagem sai em texto puro e em HTML de e-mail (tabelas e estilo inline,
 porque os clientes de e-mail ignoram classes), sem rastreamento. O visual é o
@@ -671,5 +671,64 @@ def mensagem_cupom(
         assunto="Um desconto para a sua conta Ledgr",
         texto=texto,
         html=html,
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
+def _uma_linha(texto: str, limite: int = 120) -> str:
+    """Para o assunto: sem quebra de linha (o texto vem de pessoa) e curto."""
+    return " ".join(texto.split())[:limite]
+
+
+def mensagem_alerta_admin(
+    *,
+    para: str,
+    operador_nome: str,
+    operador_email: str,
+    conta_id: str,
+    razao_social: str,
+    acao: str,
+    quando: str,
+    motivo: str,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Alerta à equipe interna de que um operador agiu numa conta pelo painel
+    (issue #234). Nunca vai para o cliente. `quando` já vem formatado, no fuso
+    de São Paulo; `motivo` é o texto do operador ou "sem motivo informado".
+    Todo texto vindo de pessoa (nome, razão social, motivo, ação com o nome do
+    cupom) é escapado no HTML."""
+    texto = (
+        "Um operador fez uma ação no painel administrativo do Ledgr.\n\n"
+        f"Operador: {operador_nome} ({operador_email})\n"
+        f"Conta: {razao_social} ({conta_id})\n"
+        f"Ação: {acao}\n"
+        f"Quando: {quando}\n"
+        f"Motivo: {motivo}\n\n"
+        "Se não foi uma ação combinada, revise o acesso desse operador."
+    )
+    corpo_html = (
+        _p("Um operador fez uma ação no painel administrativo do Ledgr.")
+        + _ficha(
+            ("Operador", operador_nome),
+            ("E-mail", operador_email),
+            ("Conta", razao_social),
+            ("Id da conta", conta_id),
+            ("Ação", acao),
+            ("Quando", quando),
+        )
+        + _p(f"<strong>Motivo:</strong> {escape(motivo)}")
+        + _aviso("Se não foi uma ação combinada, revise o acesso desse operador.")
+    )
+    return MensagemEmail(
+        para=para,
+        assunto=f"Ledgr admin: {_uma_linha(acao, 60)} · {_uma_linha(razao_social, 60)}",
+        texto=texto,
+        html=_pagina(
+            olho="Painel · alerta",
+            titulo="Ação de operador",
+            destaque="no painel.",
+            mascote="neutro",
+            corpo=corpo_html,
+        ),
         chave_idempotencia=chave_idempotencia,
     )
