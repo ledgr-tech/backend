@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.models import Conciliacao, Configuracao, ExecucaoConciliacao, Extrato, Lancamento
 from app.services.execucoes import calcular_percentual_acerto
+from app.services.travas import competencia_do_extrato
 from main import app
 
 client = TestClient(app)
@@ -70,6 +71,8 @@ def criar_extrato_da_empresa(db_session):
         periodo_inicio: date | None = None,
         periodo_fim: date | None = None,
     ) -> Extrato:
+        if periodo_inicio is not None and periodo_fim is None:
+            periodo_fim = periodo_inicio  # o CHECK do banco exige os dois ou nenhum
         extrato = Extrato(
             empresa_id=empresa_id,
             nome_arquivo=nome_arquivo,
@@ -552,3 +555,348 @@ def test_justificadas_conta_so_divergentes_justificadas_e_zero_nas_nao_atuais(
     decidir("20.00", "justificativa_desfeita")
     contagens = itens_execucoes()[0]["contagens"]
     assert (contagens["justificadas"], contagens["aguardando_aprovacao"]) == (0, 0)
+
+
+# filtro ?competencia= (issue #186, frontend#309)
+
+TEXTO_COMPETENCIA_INVALIDA = "A competência deve estar no formato AAAA-MM, com mês de 01 a 12."
+
+
+@pytest.fixture
+def inserir_execucoes(db_session):
+    """Grava execuções direto na tabela (sem rodar o matching), com `criado_em`
+    crescente pra a ordem da listagem ser previsível. Devolve os ids na ordem
+    de criação."""
+
+    def _inserir(
+        empresa_id, banco: Extrato, sistema: Extrato, quantidade: int = 1, desde: int = 0
+    ) -> list[uuid.UUID]:
+        base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        execucoes = [
+            ExecucaoConciliacao(
+                empresa_id=empresa_id,
+                extrato_banco_id=banco.id,
+                extrato_sistema_id=sistema.id,
+                tolerancia_dias=0,
+                total=1,
+                match_exato=1,
+                match_tolerancia=0,
+                duplicado=0,
+                sem_correspondencia=0,
+                tarifa_bancaria=0,
+                divergente_valor=0,
+                divergente_data=0,
+                criado_em=base + timedelta(minutes=desde + indice),
+            )
+            for indice in range(quantidade)
+        ]
+        db_session.add_all(execucoes)
+        db_session.commit()
+        return [execucao.id for execucao in execucoes]
+
+    return _inserir
+
+
+def _ids(resposta) -> list[str]:
+    return [item["id"] for item in resposta.json()["itens"]]
+
+
+def test_competencia_devolve_so_as_execucoes_do_mes(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    bancos = {
+        "2026-08": criar_extrato_da_empresa(
+            empresa.id, "banco", periodo_inicio=date(2026, 8, 1), periodo_fim=date(2026, 8, 31)
+        ),
+        "2026-09": criar_extrato_da_empresa(
+            empresa.id, "banco", periodo_inicio=date(2026, 9, 1), periodo_fim=date(2026, 9, 30)
+        ),
+        "2026-10": criar_extrato_da_empresa(
+            empresa.id, "banco", periodo_inicio=date(2026, 10, 1), periodo_fim=date(2026, 10, 31)
+        ),
+    }
+    ids = {
+        mes: inserir_execucoes(empresa.id, banco, sistema, quantidade=2, desde=indice * 10)
+        for indice, (mes, banco) in enumerate(bancos.items())
+    }
+
+    for mes, esperados in ids.items():
+        resposta = _get(auth_headers(empresa.id), competencia=mes)
+
+        assert resposta.status_code == 200
+        assert resposta.json()["total"] == 2
+        assert sorted(_ids(resposta)) == sorted(str(id_) for id_ in esperados)
+        assert {item["extrato_banco_id"] for item in resposta.json()["itens"]} == {
+            str(bancos[mes].id)
+        }
+        assert all(item["periodo_inicio"].startswith(mes) for item in resposta.json()["itens"])
+
+
+def test_competencia_sem_execucao_no_mes_devolve_lista_vazia(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_execucoes(empresa.id, banco, sistema)
+
+    resposta = _get(auth_headers(empresa.id), competencia="2026-10")
+
+    assert resposta.status_code == 200
+    assert resposta.json() == {"total": 0, "limit": 20, "offset": 0, "itens": []}
+
+
+def test_competencia_extrato_que_cruza_dois_meses_fica_no_mes_em_que_comeca(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(
+        empresa.id, "banco", periodo_inicio=date(2026, 8, 28), periodo_fim=date(2026, 9, 3)
+    )
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_execucoes(empresa.id, banco, sistema)
+
+    assert _get(auth_headers(empresa.id), competencia="2026-08").json()["total"] == 1
+    assert _get(auth_headers(empresa.id), competencia="2026-09").json()["total"] == 0
+
+
+def test_competencia_coincide_com_competencia_do_extrato_nas_bordas_do_mes(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inicios = [
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 30),
+        date(2026, 10, 1),
+        date(2026, 12, 31),
+        date(2027, 1, 1),
+        date(2028, 2, 29),
+        date(2028, 3, 1),
+    ]
+    extratos = [
+        criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=inicio) for inicio in inicios
+    ]
+    id_da_execucao = {
+        extrato.id: inserir_execucoes(empresa.id, extrato, sistema)[0] for extrato in extratos
+    }
+
+    for competencia in [
+        "2026-08",
+        "2026-09",
+        "2026-10",
+        "2026-12",
+        "2027-01",
+        "2028-02",
+        "2028-03",
+    ]:
+        esperados = {
+            str(id_da_execucao[extrato.id])
+            for extrato in extratos
+            if competencia_do_extrato(extrato) == competencia
+        }
+        resposta = _get(auth_headers(empresa.id), competencia=competencia)
+
+        assert esperados  # cada mês testado tem ao menos um extrato
+        assert set(_ids(resposta)) == esperados, competencia
+        assert resposta.json()["total"] == len(esperados), competencia
+
+
+def test_competencia_total_respeita_o_filtro_e_o_offset_percorre_tudo(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    banco_set = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    banco_out = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 10, 1))
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    esperados = inserir_execucoes(empresa.id, banco_set, sistema, quantidade=13)
+    inserir_execucoes(empresa.id, banco_out, sistema, quantidade=4, desde=100)
+
+    vistos: list[str] = []
+    offset = 0
+    while True:
+        resposta = _get(auth_headers(empresa.id), competencia="2026-09", limit=5, offset=offset)
+        corpo = resposta.json()
+        assert corpo["total"] == 13  # o total não depende da página
+        assert corpo["limit"] == 5 and corpo["offset"] == offset
+        if not corpo["itens"]:
+            break
+        vistos.extend(_ids(resposta))
+        offset += 5
+
+    assert len(vistos) == len(set(vistos)) == 13
+    assert set(vistos) == {str(id_) for id_ in esperados}
+    # mais recente primeiro, igual à rota sem filtro
+    assert vistos == [str(id_) for id_ in reversed(esperados)]
+
+
+def test_competencia_com_mais_execucoes_que_o_limite_maximo(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    """O caso do front: mais de 50 execuções desde o começo do mês."""
+    empresa = criar_empresa()
+    banco = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    inserir_execucoes(empresa.id, banco, sistema, quantidade=120)
+
+    primeira = _get(auth_headers(empresa.id), competencia="2026-09", limit=100).json()
+    segunda = _get(auth_headers(empresa.id), competencia="2026-09", limit=100, offset=100).json()
+
+    assert primeira["total"] == segunda["total"] == 120
+    assert len(primeira["itens"]) == 100
+    assert len(segunda["itens"]) == 20
+
+
+def test_competencia_combina_com_extrato_banco_id(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    banco_a = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    banco_b = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 10))
+    banco_c = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 10, 1))
+    ids_a = inserir_execucoes(empresa.id, banco_a, sistema, quantidade=2)
+    inserir_execucoes(empresa.id, banco_b, sistema, quantidade=3, desde=10)
+    inserir_execucoes(empresa.id, banco_c, sistema, quantidade=1, desde=20)
+    headers = auth_headers(empresa.id)
+
+    so_competencia = _get(headers, competencia="2026-09")
+    as_duas = _get(headers, competencia="2026-09", extrato_banco_id=str(banco_a.id))
+    mes_diferente = _get(headers, competencia="2026-10", extrato_banco_id=str(banco_a.id))
+
+    assert so_competencia.json()["total"] == 5
+    assert as_duas.json()["total"] == 2
+    assert sorted(_ids(as_duas)) == sorted(str(id_) for id_ in ids_a)
+    assert mes_diferente.status_code == 200
+    assert mes_diferente.json()["total"] == 0 and mes_diferente.json()["itens"] == []
+
+
+def test_competencia_extrato_banco_id_inexistente_continua_404(criar_empresa, auth_headers):
+    empresa = criar_empresa()
+
+    resposta = _get(
+        auth_headers(empresa.id), competencia="2026-09", extrato_banco_id=str(uuid.uuid4())
+    )
+
+    assert resposta.status_code == 404
+    assert resposta.json() == {"detail": "Extrato não encontrado."}
+
+
+def test_extrato_do_banco_sem_periodo_inicio_some_com_filtro_e_aparece_sem(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    com_periodo = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    sem_periodo = criar_extrato_da_empresa(empresa.id, "banco")
+    id_com = inserir_execucoes(empresa.id, com_periodo, sistema)[0]
+    id_sem = inserir_execucoes(empresa.id, sem_periodo, sistema, desde=10)[0]
+    headers = auth_headers(empresa.id)
+
+    sem_filtro = _get(headers)
+    com_filtro = _get(headers, competencia="2026-09")
+
+    assert sem_filtro.json()["total"] == 2
+    assert set(_ids(sem_filtro)) == {str(id_com), str(id_sem)}
+    assert com_filtro.json()["total"] == 1
+    assert _ids(com_filtro) == [str(id_com)]
+    # nenhuma competência pega o extrato sem período
+    for competencia in ("2026-08", "2026-09", "2026-10", "1970-01"):
+        assert str(id_sem) not in _ids(_get(headers, competencia=competencia))
+
+
+def test_atual_e_igual_com_e_sem_filtro(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema_1 = criar_extrato_da_empresa(empresa.id, "sistema", nome_arquivo="s1.csv")
+    sistema_2 = criar_extrato_da_empresa(empresa.id, "sistema", nome_arquivo="s2.csv")
+    banco_set = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    banco_out = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 10, 1))
+    # várias rodadas do mesmo extrato do banco: com o mesmo par e com outro sistema
+    inserir_execucoes(empresa.id, banco_set, sistema_1, quantidade=3)
+    inserir_execucoes(empresa.id, banco_set, sistema_2, quantidade=2, desde=10)
+    inserir_execucoes(empresa.id, banco_out, sistema_1, quantidade=2, desde=20)
+    headers = auth_headers(empresa.id)
+
+    sem_filtro = {item["id"]: item["atual"] for item in _get(headers, limit=100).json()["itens"]}
+    com_filtro = _get(headers, competencia="2026-09", limit=100).json()["itens"]
+
+    assert len(com_filtro) == 5
+    assert [item["atual"] for item in com_filtro].count(True) == 2  # uma por par
+    for item in com_filtro:
+        assert item["atual"] == sem_filtro[item["id"]]
+
+
+def test_atual_continua_certo_quando_a_pagina_nao_traz_a_execucao_mais_recente(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    banco = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=date(2026, 9, 1))
+    ids = inserir_execucoes(empresa.id, banco, sistema, quantidade=3)
+
+    # offset=1 pula a mais recente: as duas antigas não podem virar "atual".
+    resposta = _get(auth_headers(empresa.id), competencia="2026-09", limit=2, offset=1)
+
+    assert _ids(resposta) == [str(ids[1]), str(ids[0])]
+    assert [item["atual"] for item in resposta.json()["itens"]] == [False, False]
+
+
+@pytest.mark.parametrize("competencia", ["2026-13", "2026-1", "abc", "2026-00", "", "2026-09-01"])
+def test_competencia_com_formato_invalido_da_422_com_o_texto_de_fechamentos(
+    competencia, criar_empresa, auth_headers
+):
+    empresa = criar_empresa()
+    headers = auth_headers(empresa.id)
+
+    resposta = _get(headers, competencia=competencia)
+    em_fechamentos = client.get(
+        "/fechamentos", headers=headers, params={"competencia": competencia}
+    )
+
+    assert resposta.status_code == 422
+    assert resposta.json() == {"detail": TEXTO_COMPETENCIA_INVALIDA}
+    assert em_fechamentos.status_code == 422
+    assert em_fechamentos.json() == resposta.json()
+
+
+def test_competencia_isolamento_por_empresa_ativa(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa_a = criar_empresa()
+    empresa_b = criar_empresa()
+    banco_a = criar_extrato_da_empresa(empresa_a.id, "banco", periodo_inicio=date(2026, 9, 1))
+    sistema_a = criar_extrato_da_empresa(empresa_a.id, "sistema")
+    banco_b = criar_extrato_da_empresa(empresa_b.id, "banco", periodo_inicio=date(2026, 9, 1))
+    sistema_b = criar_extrato_da_empresa(empresa_b.id, "sistema")
+    ids_a = inserir_execucoes(empresa_a.id, banco_a, sistema_a, quantidade=2)
+    ids_b = inserir_execucoes(empresa_b.id, banco_b, sistema_b, quantidade=3)
+
+    resposta_a = _get(auth_headers(empresa_a.id), competencia="2026-09")
+    resposta_b = _get(auth_headers(empresa_b.id), competencia="2026-09")
+
+    assert resposta_a.json()["total"] == 2
+    assert set(_ids(resposta_a)) == {str(id_) for id_ in ids_a}
+    assert resposta_b.json()["total"] == 3
+    assert set(_ids(resposta_b)) == {str(id_) for id_ in ids_b}
+
+
+def test_sem_competencia_a_rota_responde_como_antes(
+    criar_empresa, criar_extrato_da_empresa, inserir_execucoes, auth_headers
+):
+    empresa = criar_empresa()
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    for indice, inicio in enumerate([date(2026, 8, 1), date(2026, 9, 1), None]):
+        banco = criar_extrato_da_empresa(empresa.id, "banco", periodo_inicio=inicio)
+        inserir_execucoes(empresa.id, banco, sistema, desde=indice * 10)
+
+    corpo = _get(auth_headers(empresa.id)).json()
+
+    assert corpo["total"] == 3 and len(corpo["itens"]) == 3
+    assert list(corpo) == ["total", "limit", "offset", "itens"]
+    horarios = [item["executada_em"] for item in corpo["itens"]]
+    assert horarios == sorted(horarios, reverse=True)
