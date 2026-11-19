@@ -47,7 +47,10 @@ descrição, justificativa, nome de arquivo nem dado das empresas clientes.
 
 Cidade e UF (issue #184) vêm no item da lista e no detalhe, `null` quando a
 conta não os informou. Logs só com ids e o resultado, nunca nome, e-mail,
-cidade, UF nem o termo buscado.
+cidade, UF nem o termo buscado. O termo buscado também não sai no log de
+acesso do uvicorn: `GET /admin/contas?busca=...` leva a busca na query string, e
+o filtro `SemQueryNoAcesso` (app/core/logging.py, issue #234) tira a query de
+toda linha de `uvicorn.access`. Mudar a busca para `POST` ficaria para depois.
 """
 
 import logging
