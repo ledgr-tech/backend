@@ -154,13 +154,9 @@ def test_o_limite_por_ip_e_de_todo_o_admin_nao_de_uma_rota_so(
 ):
     um = operador()
     c = cliente()
-    por_uf = lambda: client.get(
-        "/admin/contas/por-uf", headers=_com_ip(um.headers, IP_A)
-    )
+    por_uf = lambda: client.get("/admin/contas/por-uf", headers=_com_ip(um.headers, IP_A))
     lista = lambda: client.get("/admin/contas", headers=_com_ip(um.headers, IP_A))
-    detalhe = lambda: client.get(
-        f"/admin/contas/{c.conta_id}", headers=_com_ip(um.headers, IP_A)
-    )
+    detalhe = lambda: client.get(f"/admin/contas/{c.conta_id}", headers=_com_ip(um.headers, IP_A))
 
     gastos = [por_uf().status_code, lista().status_code, detalhe().status_code]
 
