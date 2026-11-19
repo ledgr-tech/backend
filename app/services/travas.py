@@ -20,6 +20,7 @@ não colidir com as outras.
 
 import hashlib
 import uuid
+from datetime import date
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -47,6 +48,20 @@ def competencia_do_extrato(extrato: Extrato) -> str | None:
     if extrato.periodo_inicio is None:
         return None
     return extrato.periodo_inicio.strftime("%Y-%m")
+
+
+def intervalo_da_competencia(competencia: str) -> tuple[date, date]:
+    """Primeiro dia do mês e primeiro dia do mês seguinte (fim exclusivo) de uma
+    competência AAAA-MM já validada (`fechamentos.competencia_valida`).
+
+    É a forma em SQL de `competencia_do_extrato`: `periodo_inicio >= inicio` e
+    `periodo_inicio < fim` equivale a `competencia_do_extrato(...) == competencia`
+    (e extrato sem `periodo_inicio` fica fora, como lá), comparando a coluna
+    direto em vez de formatar a data linha a linha."""
+    ano, mes = (int(parte) for parte in competencia.split("-"))
+    inicio = date(ano, mes, 1)
+    fim = date(ano + 1, 1, 1) if mes == 12 else date(ano, mes + 1, 1)
+    return inicio, fim
 
 
 def travar_mes(db: Session, empresa_id: uuid.UUID, competencia: str) -> None:
