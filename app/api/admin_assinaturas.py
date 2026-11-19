@@ -2,8 +2,8 @@
 (issue #169, ADR-025 e ADR-026).
 
 Mesmo prefixo `/admin` e mesma guarda da parte 1 (app/api/admin.py): só o
-operador (403 para os outros, inclusive o admin de conta), login recente de 2
-horas (401), acesso registrado em `acessos_admin`, limite por usuário
+operador (403 para os outros, inclusive o admin de conta), sessão do operador
+de 60 minutos e 20 de inatividade (401, issue #234), acesso registrado em `acessos_admin`, limite por usuário
 (`LIMITE_ADMIN_LEITURA_POR_USUARIO` nas consultas, `LIMITE_ADMIN_ACAO_POR_USUARIO`
 nas ações). Ignora `X-Ledgr-Empresa`.
 

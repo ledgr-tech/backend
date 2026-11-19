@@ -2,10 +2,21 @@
 
 Só para o operador do Ledgr (`operadores_ledgr`), conferido no banco a cada
 requisição por `obter_operador`: quem não é operador recebe 403, inclusive o
-admin de qualquer conta, e o operador com login de mais de
-`LOGIN_RECENTE_OPERADOR` recebe 401 (o front leva ao login de novo). Ignora
-`X-Ledgr-Empresa` e não depende da conta do operador, nem de ela estar
-inativa (app/core/conta_inativa.py deixa o `/admin` de fora).
+admin de qualquer conta, e o operador com sessão vencida recebe 401 (o front
+leva ao login de novo). Ignora `X-Ledgr-Empresa` e não depende da conta do
+operador, nem de ela estar inativa (app/core/conta_inativa.py deixa o `/admin`
+de fora).
+
+Sessão do operador (issue #234): mais curta que a do app. Vale por no máximo
+`LOGIN_RECENTE_OPERADOR` (60 min) desde o login (`auth_time`) e por no máximo
+`INATIVIDADE_OPERADOR` (20 min) desde a última atividade, que é o maior entre
+o login e o último acesso `permitido` do operador em `acessos_admin` (sem
+tabela nova). Os dois vencimentos dão o mesmo 401 (`LOGIN_ANTIGO`) e gravam o
+mesmo resultado, `login_antigo`: o CHECK de `acessos_admin.resultado` não
+muda. A conferência olha o último acesso antes de gravar o da requisição
+atual, e só um acesso `permitido` renova: o 401 nunca estende a sessão. O
+`auth_time` é medido no relógio da aplicação (como no resto do app) e o
+último acesso no do banco, que o gravou, cada um contra o seu.
 
 Toda requisição com sessão válida grava uma linha em `acessos_admin`, numa
 sessão própria e antes da resposta, inclusive as negadas: o usuário, o
@@ -101,7 +112,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-LOGIN_RECENTE_OPERADOR = timedelta(hours=2)
+# Sessão do operador (issue #234): 60 min desde o login (era 2 h) e 20 min sem
+# acessar o painel.
+LOGIN_RECENTE_OPERADOR = timedelta(minutes=60)
+INATIVIDADE_OPERADOR = timedelta(minutes=20)
 RETENCAO_ACESSOS = timedelta(days=365)
 LIMPEZA_POR_ACESSO = 500
 MESES_DE_USO = 3
@@ -174,6 +188,29 @@ def _registrar_acesso(
     )
 
 
+def _sessao_do_operador_vale(db: Session, usuario_id: uuid.UUID, auth_time: int) -> bool:
+    """O login tem no máximo `LOGIN_RECENTE_OPERADOR` e houve atividade nos
+    últimos `INATIVIDADE_OPERADOR`: o próprio login, ou um acesso `permitido`
+    gravado nessa janela (a consulta só olha a janela, no índice de `em`)."""
+    idade_do_login = _agora().timestamp() - auth_time
+    if idade_do_login > LOGIN_RECENTE_OPERADOR.total_seconds():
+        return False
+    if idade_do_login <= INATIVIDADE_OPERADOR.total_seconds():
+        return True
+    return (
+        db.scalar(
+            select(AcessoAdmin.id)
+            .where(
+                AcessoAdmin.usuario_id == usuario_id,
+                AcessoAdmin.resultado == "permitido",
+                AcessoAdmin.em > func.clock_timestamp() - INATIVIDADE_OPERADOR,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def obter_operador(
     request: Request,
     sessao: Annotated[SessaoAutenticada, Depends(obter_sessao_autenticada)],
@@ -188,7 +225,8 @@ def obter_operador(
     if operador is None:
         _registrar_acesso(usuario.id, None, request, "nao_operador")
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_OPERADOR)
-    if _agora().timestamp() - sessao.auth_time > LOGIN_RECENTE_OPERADOR.total_seconds():
+    # Antes de gravar o acesso desta requisição: ela não renova a própria sessão.
+    if not _sessao_do_operador_vale(db, usuario.id, sessao.auth_time):
         _registrar_acesso(usuario.id, operador.id, request, "login_antigo")
         raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail=LOGIN_ANTIGO)
     _registrar_acesso(usuario.id, operador.id, request, "permitido")
