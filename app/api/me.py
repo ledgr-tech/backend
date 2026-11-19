@@ -16,6 +16,19 @@ essencial dos limites); e `situacao` ganhou `pagamento_pendente` e
 pela Stripe; senão traz `status` (o da Stripe), `plano`, `periodo`,
 `periodo_atual_fim` (em UTC) e `cancelar_no_fim_do_periodo`.
 
+`conta_inativa` e `conta_inativada_em` (issue #214) dizem se o operador do
+Ledgr inativou a conta (issue #156, ADR-025): `conta_inativa` é `false` ou
+`true`, e `conta_inativada_em` traz o momento da inativação, em UTC, ou `null`
+com a conta ativa. Os dois estão sempre na resposta, vêm de
+`contas.inativada_em` (já carregada com o usuário, sem consulta a mais) e valem
+para todos os papéis, sem olhar a empresa ativa. Servem para o front desligar
+os botões de escrita desde a entrada, sem esperar o 403 `conta_inativa`. O
+`GET /me` segue respondendo 200 com a conta inativa (leitura é liberada,
+app/core/conta_inativa.py) e nada na rota guarda a situação além da
+requisição: o `/admin` inativa ou reativa e a consulta seguinte já reflete. O
+motivo da inativação (`motivo_inativacao`) é texto do operador e não é
+exposto aqui, de propósito.
+
 `cidade` e `uf` (issue #184) são os da conta, informados no cadastro ou vindos
 da consulta de CNPJ; `null` nas contas anteriores à #184 e nas que não os
 informaram. Não há rota para mudá-los depois do cadastro.
@@ -249,6 +262,18 @@ class MeResponse(BaseModel):
     limites: Limites
     preferencias: Preferencias
     guarda_arquivo_original: bool
+    conta_inativa: bool = Field(
+        description=(
+            "A conta está inativa (issues #156 e #214): somente leitura, com 403 "
+            "`conta_inativa` em toda escrita. Vale para todos os papéis."
+        )
+    )
+    conta_inativada_em: datetime | None = Field(
+        description=(
+            "Quando o operador do Ledgr inativou a conta, em UTC (issue #214); "
+            "`null` com a conta ativa. O motivo da inativação não é exposto."
+        )
+    )
 
 
 def _metodos_login(usuario: Usuario) -> list[str]:
@@ -269,6 +294,7 @@ def obter_dados_da_conta(
     servico: Annotated[ArquivoOriginal | None, Depends(obter_arquivo_original)],
 ) -> MeResponse:
     conta = usuario.conta  # a dependency já carregou o usuário
+    inativada_em = conta.inativada_em
     empresas = db.scalars(
         select(Empresa)
         .where(Empresa.conta_id == conta.id)
@@ -310,6 +336,8 @@ def obter_dados_da_conta(
         ),
         preferencias=_preferencias(usuario),
         guarda_arquivo_original=conta_guarda_o_original(conta, servico),
+        conta_inativa=inativada_em is not None,
+        conta_inativada_em=inativada_em.astimezone(UTC) if inativada_em is not None else None,
     )
 
 

@@ -82,6 +82,9 @@ def test_200_com_todos_os_campos_para_usuario_com_senha(db_session, criar_usuari
         "preferencias": {"tutoriais_dispensados": [], "roteiro_dispensado": False},
         # Flag desligada e conta sem plano (issue #139).
         "guarda_arquivo_original": False,
+        # Conta ativa (issues #156 e #214).
+        "conta_inativa": False,
+        "conta_inativada_em": None,
     }
     assert len(corpo["cnpj"]) == 14
     assert not corpo["cnpj"].isalpha()  # sem máscara (sem pontuação)
