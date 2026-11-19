@@ -214,7 +214,7 @@ def test_resumo_do_mes_tem_os_numeros_da_api_publica(empresa, db_session):
     assert f"{c.pendentes} sem justificativa" in resposta.texto
     assert "1 justificada" in resposta.texto
     assert resposta.texto.endswith("Mês aberto.")
-    assert resposta.links[0].caminho == f"/conciliacoes/{banco.id}"
+    assert resposta.links[0].caminho.startswith(f"/conciliacoes/{banco.id}?sistema=")
     assert resposta.links[0].titulo == "Conciliação de setembro/2026"
     _sem_texto_do_banco(resposta)
 

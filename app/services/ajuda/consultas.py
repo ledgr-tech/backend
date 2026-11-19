@@ -229,8 +229,10 @@ def _links_das_conciliacoes(
         titulos = [f"Conciliação de {mes}"]
     else:
         titulos = [f"Conciliação {i} de {mes}" for i in range(1, len(pares) + 1)]
+    # com o `?sistema=`, como o `caminhoDaConciliacao` do front: sem ele, a
+    # tela mistura as linhas de todos os pares do extrato do banco
     return tuple(
-        LinkDeTela(titulo, f"/conciliacoes/{par.extrato_banco_id}")
+        LinkDeTela(titulo, f"/conciliacoes/{par.extrato_banco_id}?sistema={par.extrato_sistema_id}")
         for titulo, par in zip(titulos, pares, strict=True)
     )
 

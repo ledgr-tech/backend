@@ -118,6 +118,7 @@ def empresa(db_session, criar_usuario, criar_extrato_da_empresa, inserir_lancame
     assert resposta.status_code == 201, resposta.text
     admin.empresa_id = empresa_id
     admin.banco = banco
+    admin.sistema = sistema
     admin.com_empresa = cabecalhos(token, empresa_id)
     admin.sem_empresa = cabecalhos(token)
     return admin
@@ -160,7 +161,7 @@ def test_consulta_responde_com_o_banco_e_o_resultado_nao_vai_ao_provedor(assiste
     assert corpo["links"] == [
         {
             "titulo": "Conciliação de setembro/2026",
-            "caminho": f"/conciliacoes/{empresa.banco.id}",
+            "caminho": f"/conciliacoes/{empresa.banco.id}?sistema={empresa.sistema.id}",
             "tipo": "tela",
         }
     ]
