@@ -22,7 +22,8 @@ conta, os mais antigos primeiro.
   `quantidade_lancamentos`, o período, `total_entradas` e `total_saidas` (a
   soma das positivas e a das negativas, em string) e `expira_em`, para a
   pessoa conferir com o total do relatório: um lançamento que a IA deixou de
-  fora não aparece como erro.
+  fora não aparece como erro. Também `saldo_final` e `saldo_data`, lidos do
+  rascunho gravado (issue #238), nulos quando o arquivo não trouxe saldo.
 - `422` com `detail` em texto, sempre. Fora do schema, também `erros` (até
   50, cada um com `caminho`, `lancamento` e `mensagem`) e `total_erros`.
   Arquivo cortado, vazio, fora de UTF-8, com texto fora do bloco ou JSON
@@ -36,8 +37,9 @@ Revisão (issue #159), por empresa e para todos os papéis, sob
 `/importacoes-ia/{importacao_id}`:
 
 - `GET`: o resumo (quantidade, `total_entradas`, `total_saidas` negativa,
-  período e `expira_em`) e as linhas na ordem de `posicao`, paginadas como
-  `GET /conciliacoes/{id}` (`limit` de 1 a 1000, padrão 100), cada uma com
+  período, `expira_em`, `saldo_final` e `saldo_data`, issue #238) e as
+  linhas na ordem de `posicao`, paginadas como `GET /conciliacoes/{id}`
+  (`limit` de 1 a 1000, padrão 100), cada uma com
   `id`, `numero` (a partir de 1, na ordem atual), `data`, `valor` e
   `descricao`.
 - `PATCH /lancamentos/{lancamento_id}`: corrige `data`, `valor` e/ou
@@ -160,6 +162,8 @@ class ImportacaoResponse(BaseModel):
     total_entradas: Decimal
     total_saidas: Decimal
     expira_em: datetime
+    saldo_final: Decimal | None
+    saldo_data: date | None
 
 
 @router.get("/prompt")
@@ -226,7 +230,9 @@ def importar(
         return _invalida(FORA_DO_SCHEMA, exc)
 
     vencidos = apagar_vencidos(db)
-    rascunho = criar_rascunho(db, ativa.empresa.id, arquivo.filename, len(conteudo), lancamentos)
+    rascunho = criar_rascunho(
+        db, ativa.empresa.id, arquivo.filename, len(conteudo), lancamentos, lida.saldo
+    )
     db.commit()
     db.refresh(rascunho)
     logger.info(
@@ -244,6 +250,8 @@ def importar(
         total_entradas=sum((item.valor for item in lancamentos if item.valor > 0), ZERO),
         total_saidas=sum((item.valor for item in lancamentos if item.valor < 0), ZERO),
         expira_em=(rascunho.criado_em + VALIDADE).replace(tzinfo=UTC),
+        saldo_final=rascunho.saldo_final,
+        saldo_data=rascunho.saldo_data,
     )
 
 
@@ -274,6 +282,8 @@ class ResumoResponse(BaseModel):
     periodo_inicio: date | None
     periodo_fim: date | None
     expira_em: datetime
+    saldo_final: Decimal | None
+    saldo_data: date | None
 
 
 class LancamentoRascunhoResponse(BaseModel):

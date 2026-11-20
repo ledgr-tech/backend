@@ -164,8 +164,10 @@ def test_importacao_com_saldo_e_201(db_session, conta):
     assert resposta.status_code == 201, resposta.text
     assert resposta.json()["quantidade_lancamentos"] == 4
     (extrato,) = _extratos(db_session, c.empresa_id)
-    # A gravação do saldo pertence à parte B da #238.
-    assert (extrato.saldo_final, extrato.saldo_data) == (None, None)
+    assert resposta.json()["saldo_final"] == "-1234.56"
+    assert resposta.json()["saldo_data"] == "2026-09-30"
+    assert str(extrato.saldo_final) == "-1234.56"
+    assert extrato.saldo_data.isoformat() == "2026-09-30"
 
 
 @pytest.mark.parametrize(
