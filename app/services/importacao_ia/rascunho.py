@@ -7,6 +7,12 @@ mesmo `hash_dedup` com `ocorrencia`, mais a `posicao` no JSON. A confirmação
 (#159) renumera `ocorrencia` e refaz o hash pela `posicao`, porque as
 correções do rascunho mudam valor, data e descrição.
 
+Saldo (issue #238): o `saldo_final` e o `saldo_data` que o JSON informa vão
+para o extrato do rascunho e ficam como vieram na revisão e na confirmação.
+O saldo inicial nunca é gravado (app/services/saldo.py): corrigir uma linha
+muda o saldo inicial, não o final. Não há como corrigir o saldo na revisão:
+para trocá-lo, a pessoa importa de novo.
+
 Expira em `VALIDADE` desde o `criado_em`. Vencido, é tratado como
 inexistente (`rascunho_da_empresa` devolve `None`) e apagado aos poucos por
 `apagar_vencidos`, chamada a cada importação nova, no máximo
@@ -50,6 +56,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Extrato, Lancamento, Usuario
 from app.models.extrato import STATUS_RASCUNHO
+from app.parsers.tipos import SaldoExtrato
 from app.services.importacao_ia.leitura import LancamentoImportado
 from app.services.normalizacao import (
     TAMANHO_BLOCO_INSERT,
@@ -89,8 +96,9 @@ def criar_rascunho(
     nome_arquivo: str,
     tamanho_bytes: int,
     lancamentos: list[LancamentoImportado],
+    saldo: SaldoExtrato | None,
 ) -> Extrato:
-    """Grava o rascunho e os lançamentos, sem commit."""
+    """Grava o rascunho, com o saldo do arquivo, e os lançamentos, sem commit."""
     datas = [lancamento.data for lancamento in lancamentos]
     extrato = Extrato(
         id=uuid.uuid4(),
@@ -103,6 +111,8 @@ def criar_rascunho(
         quantidade_lancamentos=len(lancamentos),
         periodo_inicio=min(datas),
         periodo_fim=max(datas),
+        saldo_final=saldo.valor if saldo is not None else None,
+        saldo_data=saldo.data if saldo is not None else None,
     )
     db.add(extrato)
     db.flush()
@@ -185,6 +195,8 @@ class Resumo:
     periodo_inicio: date | None
     periodo_fim: date | None
     expira_em: datetime
+    saldo_final: Decimal | None
+    saldo_data: date | None
 
 
 def resumo(db: Session, rascunho: Extrato) -> Resumo:
@@ -206,6 +218,8 @@ def resumo(db: Session, rascunho: Extrato) -> Resumo:
         periodo_inicio=linha[3],
         periodo_fim=linha[4],
         expira_em=(rascunho.criado_em + VALIDADE).replace(tzinfo=UTC),
+        saldo_final=rascunho.saldo_final,
+        saldo_data=rascunho.saldo_data,
     )
 
 

@@ -132,6 +132,7 @@ def test_lista_o_resumo_e_as_linhas_na_ordem_do_arquivo(db_session, conta):
     )
     assert (resumo["periodo_inicio"], resumo["periodo_fim"]) == ("2026-09-02", "2026-09-10")
     assert "expira_em" in resumo
+    assert (resumo["saldo_final"], resumo["saldo_data"]) == (None, None)
     assert [
         (item["numero"], item["data"], item["valor"], item["descricao"]) for item in corpo["itens"]
     ] == [

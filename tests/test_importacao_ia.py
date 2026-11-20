@@ -99,9 +99,21 @@ def test_prompt_com_as_duas_versoes_e_o_schema(db_session, conta, criar_empresa)
     assert resposta.status_code == 200
     corpo = resposta.json()
     assert set(corpo) == {"versao_schema", "versao_prompt", "prompt", "schema"}
-    assert (corpo["versao_schema"], corpo["versao_prompt"]) == ("1", "1")
+    assert (corpo["versao_schema"], corpo["versao_prompt"]) == ("1", "2")
     assert corpo["prompt"].startswith("Você vai converter")
+    assert 'inclua "saldo_final" e "saldo_data"' in corpo["prompt"]
+    assert "não inclua nenhum dos dois campos e não invente" in corpo["prompt"]
     assert corpo["schema"]["properties"]["versao"] == {"const": "1"}
+    assert set(corpo["schema"]["properties"]) == {
+        "versao",
+        "lancamentos",
+        "saldo_final",
+        "saldo_data",
+    }
+    assert corpo["schema"]["dependentRequired"] == {
+        "saldo_final": ["saldo_data"],
+        "saldo_data": ["saldo_final"],
+    }
 
 
 def test_prompt_exige_login():
@@ -140,6 +152,44 @@ def test_importacao_valida_vira_rascunho(db_session, conta):
     assert [item.ocorrencia for item in lancamentos] == [1, 1, 2, 1]
     assert len({item.hash_dedup for item in lancamentos}) == 4
     assert {item.empresa_id for item in lancamentos} == {c.empresa_id}
+
+
+def test_importacao_com_saldo_e_201(db_session, conta):
+    c = conta()
+    documento = json.loads(VALIDO)
+    documento.update(saldo_final="-1234.56", saldo_data="2026-09-30")
+
+    resposta = _importar(c.headers, json.dumps(documento).encode())
+
+    assert resposta.status_code == 201, resposta.text
+    assert resposta.json()["quantidade_lancamentos"] == 4
+    (extrato,) = _extratos(db_session, c.empresa_id)
+    assert resposta.json()["saldo_final"] == "-1234.56"
+    assert resposta.json()["saldo_data"] == "2026-09-30"
+    assert str(extrato.saldo_final) == "-1234.56"
+    assert extrato.saldo_data.isoformat() == "2026-09-30"
+
+
+@pytest.mark.parametrize(
+    ("campos", "faltante"),
+    [({"saldo_final": "0"}, "saldo_data"), ({"saldo_data": "2026-09-30"}, "saldo_final")],
+)
+def test_importacao_com_saldo_incompleto_e_422(db_session, conta, campos, faltante):
+    c = conta()
+    documento = {**json.loads(VALIDO), **campos}
+
+    resposta = _importar(c.headers, json.dumps(documento).encode())
+
+    assert resposta.status_code == 422
+    assert resposta.json()["erros"] == [
+        {
+            "caminho": faltante,
+            "lancamento": None,
+            "mensagem": "informe saldo_final e saldo_data juntos, ou nenhum dos dois",
+        }
+    ]
+    assert resposta.json()["total_erros"] == 1
+    assert _extratos(db_session, c.empresa_id) == []
 
 
 def test_aceita_bloco_markdown_em_txt(db_session, conta):

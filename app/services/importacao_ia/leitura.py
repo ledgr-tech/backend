@@ -1,7 +1,7 @@
-"""Leitura e validação do JSON da importação via IA (issue #158, ADR-013).
+"""Leitura e validação do JSON da importação via IA (issues #158/#238, ADR-013).
 
-Sem banco: recebe os bytes do arquivo e devolve os lançamentos, ou levanta
-um erro que a rota transforma em 422.
+Sem banco: recebe os bytes do arquivo e devolve os lançamentos e o saldo
+opcional, ou levanta um erro que a rota transforma em 422.
 
 Entrada aceita, depois de tirar o BOM e os espaços das pontas: um JSON que
 começa com `{` ou `[`, ou um único bloco de código markdown (```` ```json ````
@@ -20,6 +20,16 @@ Três tipos de erro:
   (`lancamentos[12].valor`, a partir de 0), o número do lançamento (a partir
   de 1) e uma mensagem em português. `total` conta todos.
 
+Saldo (issue #238): `saldo_final` e `saldo_data` são opcionais no nível do
+arquivo, ainda na versão "1", e vêm os dois ou nenhum (só um é erro de
+schema, no caminho do que falta). `saldo_final` tem o formato e o limite do
+`valor` do lançamento, mas aceita zero e negativo; `saldo_data`, o da `data`.
+Diferente da coluna `saldo` do CSV, saldo ilegível aqui é erro, não `None`:
+a IA escreveu o campo, e a pessoa precisa saber que ele não entrou. `null`
+não é "sem saldo": é erro de formato (sem saldo, os dois campos ficam de
+fora). Os erros de valor e de data do saldo vêm depois dos dos lançamentos; o
+de campo repetido sai antes, com os outros do nível do arquivo.
+
 `ler_campos` (issue #159) valida um lançamento só, no corpo da correção ou
 da linha nova da revisão, com as mesmas regras e mensagens, e o caminho é o
 nome do campo.
@@ -35,11 +45,14 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from app.parsers.tipos import SaldoExtrato
+
 VERSAO_SCHEMA = "1"
 MAXIMO_ERROS = 50
 TAMANHO_MAXIMO_DESCRICAO = 500
 
-CAMPOS_DO_ARQUIVO = ("versao", "lancamentos")
+CAMPOS_DO_SALDO = ("saldo_final", "saldo_data")
+CAMPOS_DO_ARQUIVO = ("versao", "lancamentos", *CAMPOS_DO_SALDO)
 CAMPOS_DO_LANCAMENTO = ("data", "valor", "descricao")
 
 _DATA = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -89,6 +102,12 @@ class LancamentoImportado:
     @property
     def tipo(self) -> str:
         return "credito" if self.valor >= 0 else "debito"
+
+
+@dataclass(frozen=True)
+class ImportacaoLida:
+    lancamentos: list[LancamentoImportado]
+    saldo: SaldoExtrato | None
 
 
 class _Numero:
@@ -230,7 +249,15 @@ class _Erros:
             self.erros.append(ErroDeCampo(caminho=caminho, lancamento=numero, mensagem=mensagem))
 
 
-def _campos(objeto: _Objeto, caminho: str, aceitos: tuple[str, ...], erro, posicao=None) -> None:
+def _campos(
+    objeto: _Objeto,
+    caminho: str,
+    aceitos: tuple[str, ...],
+    erro,
+    posicao=None,
+    *,
+    opcionais: tuple[str, ...] = (),
+) -> None:
     prefixo = f"{caminho}." if caminho else ""
     for chave in objeto.repetidas:
         erro(f"{prefixo}{chave}", "campo repetido: deixe só um", posicao)
@@ -239,11 +266,11 @@ def _campos(objeto: _Objeto, caminho: str, aceitos: tuple[str, ...], erro, posic
             lista = ", ".join(aceitos)
             erro(f"{prefixo}{chave}", f"campo não aceito: aqui o Ledgr só lê {lista}", posicao)
     for chave in aceitos:
-        if chave not in objeto:
+        if chave not in objeto and chave not in opcionais:
             erro(f"{prefixo}{chave}", "campo obrigatório", posicao)
 
 
-def _data(valor: object, caminho: str, erro, posicao: int) -> date | None:
+def _data(valor: object, caminho: str, erro, posicao: int | None) -> date | None:
     if not isinstance(valor, str):
         erro(
             caminho,
@@ -261,7 +288,7 @@ def _data(valor: object, caminho: str, erro, posicao: int) -> date | None:
         return None
 
 
-def _valor(valor: object, caminho: str, erro, posicao: int) -> Decimal | None:
+def _valor_formatado(valor: object, caminho: str, erro, posicao: int | None) -> Decimal | None:
     if _numero(valor):
         erro(
             caminho,
@@ -280,7 +307,11 @@ def _valor(valor: object, caminho: str, erro, posicao: int) -> Decimal | None:
     if len(valor.lstrip("-").split(".")[0]) > _DIGITOS_ANTES_DO_PONTO:
         erro(caminho, f"valor grande demais (veio {_eco(valor)})", posicao)
         return None
-    numero = Decimal(valor)
+    return Decimal(valor)
+
+
+def _valor(valor: object, caminho: str, erro, posicao: int | None) -> Decimal | None:
+    numero = _valor_formatado(valor, caminho, erro, posicao)
     if numero == 0:
         erro(caminho, "valor zero não é lançamento: saldos e totais não entram", posicao)
         return None
@@ -353,9 +384,30 @@ def _lancamentos(lista: object, erro) -> list[LancamentoImportado]:
     return lancamentos
 
 
-def ler_importacao(conteudo: bytes) -> list[LancamentoImportado]:
-    """Os lançamentos do arquivo, na ordem dele. Levanta `ArquivoCortado`,
-    `ArquivoIlegivel` ou `ArquivoForaDoSchema`."""
+def _saldo(documento: _Objeto, erro) -> SaldoExtrato | None:
+    if not any(campo in documento for campo in CAMPOS_DO_SALDO):
+        return None
+    for campo in CAMPOS_DO_SALDO:
+        if campo not in documento:
+            erro(campo, "informe saldo_final e saldo_data juntos, ou nenhum dos dois")
+    valor = (
+        _valor_formatado(documento["saldo_final"], "saldo_final", erro, None)
+        if "saldo_final" in documento
+        else None
+    )
+    data = (
+        _data(documento["saldo_data"], "saldo_data", erro, None)
+        if "saldo_data" in documento
+        else None
+    )
+    if valor is not None and data is not None:
+        return SaldoExtrato(valor=valor, data=data)
+    return None
+
+
+def ler_importacao(conteudo: bytes) -> ImportacaoLida:
+    """Os lançamentos, na ordem do arquivo, e o saldo opcional (issue #238).
+    Levanta `ArquivoCortado`, `ArquivoIlegivel` ou `ArquivoForaDoSchema`."""
     documento = _json(_sem_o_bloco(_texto(conteudo)))
     erro = _Erros()
     if not isinstance(documento, _Objeto):
@@ -365,15 +417,16 @@ def ler_importacao(conteudo: bytes) -> list[LancamentoImportado]:
             f"(veio {_eco(documento)})",
         )
         raise ArquivoForaDoSchema(erro.erros, erro.total)
-    _campos(documento, "", CAMPOS_DO_ARQUIVO, erro)
+    _campos(documento, "", CAMPOS_DO_ARQUIVO, erro, opcionais=CAMPOS_DO_SALDO)
     # Versão desconhecida: os lançamentos são de outro formato, e validá-los
     # pelo v1 só geraria ruído.
     if not _versao(documento, erro):
         raise ArquivoForaDoSchema(erro.erros, erro.total)
     lancamentos = _lancamentos(documento["lancamentos"], erro) if "lancamentos" in documento else []
+    saldo = _saldo(documento, erro)
     if erro.total:
         raise ArquivoForaDoSchema(erro.erros, erro.total)
-    return lancamentos
+    return ImportacaoLida(lancamentos=lancamentos, saldo=saldo)
 
 
 _VALIDADORES = {"data": _data, "valor": _valor, "descricao": _descricao}
