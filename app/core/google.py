@@ -45,7 +45,12 @@ FOLGA_RELOGIO_SEGUNDOS = 10
 
 
 class GoogleIndisponivel(Exception):
-    """`GOOGLE_CLIENT_ID` vazio ou falha ao buscar as chaves: 503."""
+    """`GOOGLE_CLIENT_ID` vazio ou falha ao buscar as chaves: 503. O `motivo`
+    ("desligado", "chaves_indisponiveis") é o que vai para o log."""
+
+    def __init__(self, motivo: str) -> None:
+        super().__init__(motivo)
+        self.motivo = motivo
 
 
 class ContaGoogleInvalida(Exception):
@@ -133,7 +138,7 @@ def identidade_ou_erro_http(id_token: str, logger: logging.Logger, evento: str) 
     try:
         return conferir_id_token(id_token)
     except GoogleIndisponivel as exc:
-        logger.info("%s resultado=%s", evento, exc.args[0])
+        logger.info("%s resultado=%s", evento, exc.motivo)
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE, detail=MENSAGEM_INDISPONIVEL
         ) from exc

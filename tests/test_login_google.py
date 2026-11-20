@@ -123,6 +123,26 @@ def test_falha_ao_buscar_as_chaves_e_503(db_session, google, gerar_cnpj, rota):
     assert response.json() == {"detail": "Login pelo Google indisponível."}
 
 
+@pytest.mark.parametrize(
+    ("desligado", "esperado"),
+    [
+        (True, "login_google resultado=desligado"),
+        (False, "login_google resultado=chaves_indisponiveis"),
+    ],
+)
+def test_motivo_do_503_vai_para_o_log(db_session, google, monkeypatch, caplog, desligado, esperado):
+    if desligado:
+        monkeypatch.setattr(settings, "google_client_id", "")
+    else:
+        google.cliente.falha_de_conexao = True
+
+    with caplog.at_level(logging.INFO, logger="app"):
+        response = _login_google(google.id_token())
+
+    assert response.status_code == 503
+    assert esperado in caplog.text
+
+
 @pytest.mark.parametrize("rota", ROTAS_GOOGLE)
 def test_token_invalido_e_401_nas_rotas_google(db_session, google, gerar_cnpj, rota):
     corpo = _corpos_das_rotas(google.id_token(email_verified=False), gerar_cnpj)[rota]
