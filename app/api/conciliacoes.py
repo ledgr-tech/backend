@@ -48,7 +48,15 @@ ou a do sistema quando não há do banco), valor e id da conciliação. `valor` 
 tratar dinheiro como float. Na raiz, `saldo_inicial`, `saldo_final` e
 `saldo_data` do extrato do banco (issue #118, regras em
 app/services/saldo.py), `null` quando ele não tem saldo; os saldos também são
-Decimal em string.
+Decimal em string. Desde a issue #238, também na raiz: `saldo_sistema`
+(objeto sempre presente, com os mesmos três campos e as mesmas regras, do
+extrato do sistema do filtro `extrato_sistema_id` ou, sem o filtro, da rodada
+mais recente; os três nulos sem conciliação ou quando o filtro aponta para um
+extrato que nunca foi conciliado com este), `diferenca_saldo_final` (saldo
+final do banco menos o do sistema) e `diferenca_saldo_motivo` (`null` quando
+há diferença; senão "sem_saldo_banco", "sem_saldo_sistema" ou
+"datas_diferentes"). O saldo do sistema custa uma consulta, e a rodada
+mais recente é a mesma de `aguardando_aprovacao`, lida uma vez só.
 
 `GET /conciliacoes/{extrato_id}/exportar` (issue #26): exporta em CSV (Excel
 BR — formato em app/services/exportacao.py) o mesmo recorte da listagem
@@ -413,11 +421,21 @@ class ItemConciliacaoResponse(BaseModel):
     gerada_por_ia: bool
 
 
+class SaldoResponse(BaseModel):
+    saldo_inicial: Decimal | None
+    saldo_final: Decimal | None
+    saldo_data: date | None
+
+
 class ConciliacaoListaResponse(BaseModel):
     extrato_id: uuid.UUID
     saldo_inicial: Decimal | None
     saldo_final: Decimal | None
     saldo_data: date | None
+    # Issue #238: o saldo do extrato do sistema da rodada exibida e a diferença.
+    saldo_sistema: SaldoResponse
+    diferenca_saldo_final: Decimal | None
+    diferenca_saldo_motivo: saldo.MotivoSemDiferenca | None
     total: int
     limit: int
     offset: int
@@ -636,23 +654,37 @@ def listar_conciliacoes(
                 gerada_por_ia=getattr(linha, "explicacao_texto", None) is not None,
             )
         )
+    rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_id)
+    saldo_banco = saldo.saldo_do_extrato(db, extrato_banco)
+    # Issue #238: o extrato do sistema do filtro ou, sem ele, o da rodada atual.
+    sistema_exibido = extrato_sistema_id
+    if sistema_exibido is None and rodada is not None:
+        sistema_exibido = rodada.extrato_sistema_id
+    saldo_sistema = saldo.saldo_do_extrato_do_sistema(db, empresa_id, extrato_id, sistema_exibido)
+    diferenca = saldo.diferenca_dos_saldos(saldo_banco, saldo_sistema)
     return ConciliacaoListaResponse(
         extrato_id=extrato_id,
-        **vars(saldo.saldo_do_extrato(db, extrato_banco)),
+        **vars(saldo_banco),
+        saldo_sistema=SaldoResponse(**vars(saldo_sistema)),
+        diferenca_saldo_final=diferenca.valor,
+        diferenca_saldo_motivo=diferenca.motivo,
         total=total,
         limit=limit,
         offset=offset,
-        aguardando_aprovacao=_aguardando_na_rodada_atual(db, empresa_id, extrato_id),
+        aguardando_aprovacao=_aguardando_na_rodada_atual(db, empresa_id, extrato_id, rodada),
         itens=itens,
     )
 
 
 def _aguardando_na_rodada_atual(
-    db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID
+    db: Session,
+    empresa_id: uuid.UUID,
+    extrato_banco_id: uuid.UUID,
+    rodada: decisoes.Rodada | None,
 ) -> int:
-    """Linhas divergentes da rodada mais recente com justificativa aguardando
-    aprovação; 0 sem conciliação. Três consultas, qualquer que seja a página."""
-    rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_banco_id)
+    """Linhas divergentes da rodada mais recente (`rodada`, lida pela
+    listagem) com justificativa aguardando aprovação; 0 sem conciliação. Duas
+    consultas, qualquer que seja a página."""
     if rodada is None:
         return 0
     par = (extrato_banco_id, rodada.extrato_sistema_id)

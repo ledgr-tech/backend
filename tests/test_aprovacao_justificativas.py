@@ -1440,9 +1440,10 @@ def test_get_com_muitos_itens_aprovados_tem_numero_fixo_de_consultas(db_session,
         pequena, _ = selects_da_chamada(quem, 3)
         cheia, campos = selects_da_chamada(quem, quantidade)
         assert pequena == cheia, quem
-        # O teto de `test_get_emite_poucos_selects_...` (9), mais o fechamento
-        # do mês e os aprovadores da página.
-        assert cheia <= 11, quem
+        # O teto de `test_get_emite_poucos_selects_...` (10, com o saldo do
+        # sistema da issue #238), mais o fechamento do mês e os aprovadores
+        # da página.
+        assert cheia <= 12, quem
         # E o cálculo por item bate com a regra: o admin desfaz o do removido e o
         # da migração; o gestor, só os que ele mesmo aprovou.
         esperado = {
