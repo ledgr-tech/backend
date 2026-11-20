@@ -1,7 +1,7 @@
 """Regras das decisões por linha (issue #83): chave da linha, rodada, decisão
 em vigor e contagem de justificadas. Único lugar com essas regras, usado por
-`GET /conciliacoes/{extrato_id}`, `POST /conciliacoes/{extrato_id}/decisoes`
-e `GET /execucoes`.
+`GET /conciliacoes/{extrato_id}`, `POST /conciliacoes/{extrato_id}/decisoes`,
+`POST /conciliacoes/{extrato_id}/decisoes/lote` e `GET /execucoes`.
 
 Uma linha "diverge" quando o status não é `match_exato`, `match_tolerancia`
 nem `match_agrupado` (as cinco categorias de divergência), mesma regra de
@@ -24,6 +24,13 @@ conciliado com ele, na ordem da PRIMEIRA execução de cada par em
 `execucoes_conciliacao`. Reconciliar o mesmo par não cria rodada nova, e a
 rodada mais recente é a de maior N, não a execução mais nova (reconciliar a
 v1 depois da v2 não torna a v1 a rodada de agora).
+
+Lote (issue #237): as justificativas gravadas juntas pelo
+`POST /conciliacoes/{extrato_id}/decisoes/lote` têm o mesmo `lote_id`.
+Cada uma continua sendo a justificativa de uma linha, com as regras acima
+(nasce aguardando aprovação, é aprovada ou rejeitada linha a linha).
+`tamanhos_dos_lotes` conta as linhas de cada lote numa consulta agrupada.
+`MAXIMO_LINHAS_POR_LOTE` vale para o lote de justificar e para o de aprovar.
 """
 
 import hashlib
@@ -50,6 +57,8 @@ TIPOS_APROVACAO = ("justificativa_aprovada", "justificativa_rejeitada")
 # do admin em app/api/conciliacoes.py.
 TIPO_APROVACAO_DESFEITA = "aprovacao_desfeita"
 AUTOR_APROVACAO_DA_MIGRACAO = "Ledgr (atualização de 21/10)"
+# Linhas por pedido nos dois lotes: justificar (issue #237) e aprovar (issue #132).
+MAXIMO_LINHAS_POR_LOTE = 500
 
 SituacaoJustificativa = Literal["pendente", "aprovada"]
 
@@ -206,6 +215,7 @@ class Evento:
     autor: str
     em: datetime
     rodada: int
+    lote_id: uuid.UUID | None
 
 
 def como_evento(evento: DecisaoLinha) -> Evento:
@@ -215,7 +225,30 @@ def como_evento(evento: DecisaoLinha) -> Evento:
         autor=evento.autor_nome,
         em=evento.em,
         rodada=evento.rodada,
+        lote_id=evento.lote_id,
     )
+
+
+def tamanhos_dos_lotes(
+    db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID, lotes: set[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    """Quantas linhas cada lote tem (issue #237), numa consulta agrupada,
+    qualquer que seja o número de lotes. É o tamanho do lote quando foi feito:
+    não muda se uma das linhas for justificada de novo ou rejeitada depois."""
+    if not lotes:
+        return {}
+    return {
+        lote_id: quantidade
+        for lote_id, quantidade in db.execute(
+            select(DecisaoLinha.lote_id, func.count(func.distinct(DecisaoLinha.chave)))
+            .where(
+                DecisaoLinha.empresa_id == empresa_id,
+                DecisaoLinha.extrato_banco_id == extrato_banco_id,
+                DecisaoLinha.lote_id.in_(sorted(lotes)),
+            )
+            .group_by(DecisaoLinha.lote_id)
+        )
+    }
 
 
 def _vigentes_das_linhas(
