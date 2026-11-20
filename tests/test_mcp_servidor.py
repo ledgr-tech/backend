@@ -174,7 +174,21 @@ def cenario(
             )
             assert r.status_code == 200, r.text
 
-        decidir(valores[1][0], "justificada", JUSTIFICATIVA_SECRETA)
+        # A justificativa é feita em lote (issue #237): o MCP não pode mostrar o lote.
+        r = cliente_http.post(
+            f"/conciliacoes/{extratos['banco'].id}/decisoes/lote",
+            headers=headers,
+            json={
+                "tipo": "justificada",
+                "texto": JUSTIFICATIVA_SECRETA,
+                "chaves": [
+                    i["chave"]
+                    for i in itens
+                    if i["lancamento_banco"] and i["lancamento_banco"]["valor"] == valores[1][0]
+                ],
+            },
+        )
+        assert r.json()["processadas"] == 1, r.text
         decidir(valores[2][0], "conferida")
         fechado = cliente_http.post(
             "/fechamentos",
@@ -323,6 +337,8 @@ def test_saidas_nao_tem_descricao_justificativa_ressalva_nomes_nem_arquivo(cenar
             '"cidade"',
             '"uf"',
             "extrato.csv",
+            "lote_id",
+            "lote_tamanho",
         ):
             assert proibido not in saida, (nome, proibido)
 

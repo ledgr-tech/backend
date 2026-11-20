@@ -107,6 +107,19 @@ def conta(
             )
             assert resposta.status_code == 200, resposta.text
 
+        def justificar_em_lote(banco, valores, texto):
+            chaves = [
+                item["chave"]
+                for item in itens_do_app(banco)
+                if item["lancamento_banco"] and item["lancamento_banco"]["valor"] in valores
+            ]
+            resposta = client.post(
+                f"/conciliacoes/{banco.id}/decisoes/lote",
+                headers=headers,
+                json={"tipo": "justificada", "texto": texto, "chaves": chaves},
+            )
+            assert resposta.json()["processadas"] == len(valores), resposta.text
+
         def fechar(ressalva=None):
             corpo = {"competencia": "2026-09"}
             if ressalva is not None:
@@ -126,6 +139,7 @@ def conta(
             par=par,
             itens_do_app=itens_do_app,
             decidir=decidir,
+            justificar_em_lote=justificar_em_lote,
             fechar=fechar,
         )
 
@@ -424,6 +438,32 @@ def _mes_com_tudo(c):
     c.decidir(banco, "-5.50", "conferida")
     c.fechar(ressalva=RESSALVA_SECRETA)
     return banco, sistema
+
+
+def test_respostas_da_v1_nao_tem_o_lote_da_justificativa(conta):
+    """Issue #237: a justificativa em lote sai na /v1 como a de uma linha,
+    sem `lote_id` nem `lote_tamanho`."""
+    c = conta()
+    banco, _ = c.par(
+        [("10.00", "a"), ("20.00", "b"), ("33.30", "d")], [("10.00", "a"), ("7.00", "x")]
+    )
+    c.justificar_em_lote(banco, {"20.00", "33.30"}, JUSTIFICATIVA_SECRETA)
+    lote_id = next(i for i in c.itens_do_app(banco) if i["decisao"])["decisao"]["lote_id"]
+    assert lote_id
+    token = c.criar_chave()["chave"]
+
+    respostas = [
+        _v1(token, f"/empresas/{c.empresa_id}/resumo", competencia="2026-09"),
+        _v1(token, f"/empresas/{c.empresa_id}/conciliacoes", competencia="2026-09"),
+        _v1(token, f"/empresas/{c.empresa_id}/divergencias", competencia="2026-09", limit=200),
+    ]
+
+    for resposta in respostas:
+        assert resposta.status_code == 200, resposta.text
+        for proibido in ("lote_id", "lote_tamanho", lote_id, JUSTIFICATIVA_SECRETA):
+            assert proibido not in resposta.text, (resposta.url, proibido)
+    situacoes = {i["situacao"] for i in respostas[2].json()["itens"]}
+    assert "justificada" in situacoes
 
 
 def test_respostas_da_v1_nao_tem_descricao_justificativa_ressalva_nem_nomes(conta):

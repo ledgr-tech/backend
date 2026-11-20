@@ -156,6 +156,38 @@ Com a competência do extrato do banco fechada, dá 409 antes de calcular a
 rodada (issue #86). Erros de regra saem como 422 com `detail` em texto, porque o front só mostra
 o motivo quando `detail` é string. Nunca loga o texto da justificativa nem a
 descrição de lançamento.
+
+Justificativa em lote (issue #237): `POST /conciliacoes/{extrato_id}/decisoes/lote`
+com `{ tipo: "justificada", texto, chaves }` justifica várias linhas da rodada
+mais recente com o mesmo texto, por qualquer papel. `tipo` só aceita
+"justificada" por enquanto; `chaves` vai de 1 a `MAXIMO_LINHAS_POR_LOTE`
+(500), cada uma com 1 a 64 caracteres. As validações são as da justificativa
+de uma linha, com as mesmas funções e na mesma ordem: extrato do banco da
+empresa ativa (404 igual, 422 para o extrato do sistema), travas e mês
+fechado (409, mesma mensagem), rodada mais recente (404) e texto (422, mesmas
+mensagens). Cada chave é ignorada, sem erro, quando não está na rodada atual
+(`nao_encontrada`), a linha não diverge (`nao_diverge`), já apareceu no pedido
+(`repetida`) ou, com `APROVACAO_JUSTIFICATIVAS_HABILITADA` ligada, tem
+justificativa aprovada em vigor (`aprovada`; na rota de uma linha isso é o
+409 acima). Linha com justificativa pendente recebe a nova e conta como
+processada, como justificar de novo uma linha. Com a flag desligada, cada
+justificativa do lote nasce aprovada (`_aprovar_junto`). As linhas da rodada
+saem de UMA consulta e os eventos das chaves de outra, qualquer que seja o
+tamanho do lote. Tudo numa transação: grava todas as válidas ou nenhuma. A
+resposta é `{ processadas, ignoradas, ignoradas_por_motivo, lote_id }`;
+pedido sem nenhuma válida é 200 com `processadas` 0 e `lote_id` `null`. Sem
+limite de requisições, como a rota de uma linha. O log traz ids, contagens e
+resultado, nunca o texto nem as chaves.
+
+Todas as justificativas do lote têm o mesmo `lote_id` (coluna em
+`decisoes_linha`). Na listagem, `decisao` traz `lote_id` e `lote_tamanho`
+(quantas linhas o lote tinha), os dois `null` fora de lote; o tamanho sai de
+UMA consulta agrupada para a página inteira. Os itens de `eventos` trazem
+`lote_id`, mas não `lote_tamanho`. A resposta do POST de uma linha traz os
+mesmos dois campos, `null` salvo quando a decisão em vigor devolvida é uma
+justificativa feita em lote (aprovar ou desfazer a aprovação de uma linha dele). Nenhum dos dois sai na API pública `/v1`, no MCP, no relatório
+público nem no CSV. Aprovar o lote todo é `POST /justificativas/lote` com
+`lote_id` (app/api/justificativas.py).
 """
 
 import logging
@@ -350,6 +382,9 @@ class DecisaoResponse(BaseModel):
     situacao: decisoes.SituacaoJustificativa | None = None
     aprovada_por: str | None = None
     aprovada_em: datetime | None = None
+    # Issue #237: o lote da justificativa feita em lote; `null` fora dele. É
+    # dado do evento, então sai em `decisao` e nos itens de `eventos`.
+    lote_id: uuid.UUID | None = None
 
 
 class DecisaoEmVigorResponse(DecisaoResponse):
@@ -366,6 +401,15 @@ class DecisaoEmVigorResponse(DecisaoResponse):
         ),
         examples=[True],
     )
+    lote_tamanho: int | None = Field(
+        default=None,
+        description=(
+            "Quantas linhas a justificativa em lote tinha quando foi feita (issue #237), "
+            'para o "justificada junto com outras N linhas". `null` fora de lote. Só em '
+            "`decisao`, não nos itens de `eventos`."
+        ),
+        examples=[3],
+    )
 
 
 def _evento_response(evento: DecisaoLinha) -> DecisaoResponse:
@@ -373,8 +417,12 @@ def _evento_response(evento: DecisaoLinha) -> DecisaoResponse:
 
 
 def _decisao_response(
-    vigente: decisoes.DecisaoEmVigor | None, pode_desfazer_aprovacao: bool
+    vigente: decisoes.DecisaoEmVigor | None,
+    pode_desfazer_aprovacao: bool,
+    tamanhos_dos_lotes: dict[uuid.UUID, int],
 ) -> DecisaoEmVigorResponse | None:
+    """`tamanhos_dos_lotes` vem de `decisoes.tamanhos_dos_lotes`, carregado
+    uma vez para a página inteira."""
     if vigente is None:
         return None
     aprovacao = vigente.aprovacao
@@ -384,7 +432,16 @@ def _decisao_response(
         aprovada_por=aprovacao.autor_nome if aprovacao is not None else None,
         aprovada_em=aprovacao.em if aprovacao is not None else None,
         pode_desfazer_aprovacao=pode_desfazer_aprovacao,
+        lote_tamanho=tamanhos_dos_lotes.get(vigente.evento.lote_id),
     )
+
+
+def _lotes_em_vigor(vigentes: list[decisoes.DecisaoEmVigor | None]) -> set[uuid.UUID]:
+    return {
+        vigente.evento.lote_id
+        for vigente in vigentes
+        if vigente is not None and vigente.evento.lote_id is not None
+    }
 
 
 class GrupoResponse(BaseModel):
@@ -612,6 +669,8 @@ def listar_conciliacoes(
     contexto = desfazer_aprovacao.carregar_contexto(
         db, usuario, empresa_id, extrato_banco, vigentes
     )
+    # O tamanho dos lotes da página numa consulta agrupada (issue #237).
+    tamanhos = decisoes.tamanhos_dos_lotes(db, empresa_id, extrato_id, _lotes_em_vigor(vigentes))
 
     itens = []
     for linha, chave, vigente in zip(linhas, chaves, vigentes, strict=True):
@@ -629,7 +688,7 @@ def listar_conciliacoes(
                 lancamento_sistema=_lancamento_ou_none(linha, "sistema"),
                 chave=chave,
                 decisao=_decisao_response(
-                    vigente, desfazer_aprovacao.pode_desfazer_aprovacao(contexto, vigente)
+                    vigente, desfazer_aprovacao.pode_desfazer_aprovacao(contexto, vigente), tamanhos
                 ),
                 eventos=[_evento_response(evento) for evento in eventos],
                 explicacao=getattr(linha, "explicacao_texto", None),
@@ -784,14 +843,23 @@ def _recusa_http(recusa: Recusa) -> HTTPException:
     raise AssertionError(f"motivo sem erro HTTP: {recusa}")
 
 
-def _aprovar_junto(db: Session, justificativa: DecisaoLinha) -> None:
+def _aprovar_junto(db: Session, justificativas: list[DecisaoLinha]) -> None:
     """Aprovação de quem justificou, na mesma transação, com a flag de
-    aprovação desligada. O `em` dela é o da justificativa mais um
+    aprovação desligada. O `em` de cada uma é o da justificativa mais um
     microssegundo: a ordem dos eventos decide a decisão em vigor, e dois
-    INSERTs seguidos podem cair no mesmo instante do `clock_timestamp()`."""
+    INSERTs seguidos podem cair no mesmo instante do `clock_timestamp()`.
+    Recebe a lista do lote (issue #237): o `em` de todas sai de UM SELECT
+    depois do flush, nunca um por justificativa. A aprovação não leva o
+    `lote_id` (o CHECK só o aceita na `justificada`)."""
     db.flush()
-    db.refresh(justificativa, ["em"])
-    db.add(
+    em_por_id = dict(
+        db.execute(
+            select(DecisaoLinha.id, DecisaoLinha.em).where(
+                DecisaoLinha.id.in_([justificativa.id for justificativa in justificativas])
+            )
+        ).all()
+    )
+    db.add_all(
         DecisaoLinha(
             empresa_id=justificativa.empresa_id,
             extrato_banco_id=justificativa.extrato_banco_id,
@@ -802,9 +870,41 @@ def _aprovar_junto(db: Session, justificativa: DecisaoLinha) -> None:
             autor_nome=justificativa.autor_nome,
             rodada=justificativa.rodada,
             extrato_sistema_id=justificativa.extrato_sistema_id,
-            em=justificativa.em + timedelta(microseconds=1),
+            em=em_por_id[justificativa.id] + timedelta(microseconds=1),
         )
+        for justificativa in justificativas
     )
+
+
+def _rodada_atual(
+    db: Session, empresa_id: uuid.UUID, extrato_banco_id: uuid.UUID
+) -> decisoes.Rodada:
+    """A rodada mais recente, ou 404. Calculada depois das travas."""
+    rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_banco_id)
+    if rodada is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Este extrato ainda não foi conciliado.",
+        )
+    return rodada
+
+
+def _texto_da_justificativa(texto: str | None) -> str:
+    """O texto aparado da justificativa, ou 422 vazio ou grande demais."""
+    texto = (texto or "").strip()
+    if not texto:
+        raise _regra_violada("A justificativa precisa de um texto.")
+    if len(texto) > TAMANHO_MAXIMO_JUSTIFICATIVA:
+        raise _regra_violada(
+            f"A justificativa pode ter até {TAMANHO_MAXIMO_JUSTIFICATIVA} caracteres."
+        )
+    return texto
+
+
+def _presa_pela_aprovacao(vigente: decisoes.DecisaoEmVigor | None) -> bool:
+    """Com a aprovação ligada, a justificativa aprovada em vigor não aceita
+    `TIPOS_QUE_TIRAM_A_APROVACAO` até quem aprovou desfazer (issue #164)."""
+    return settings.aprovacao_justificativas_habilitada and decisoes.justificativa_aprovada(vigente)
 
 
 @router.post("/{extrato_id}/decisoes", response_model=DecisaoEmVigorResponse | None)
@@ -834,12 +934,7 @@ def registrar_decisao(
     # decisão espera a rodada; e um fechamento em andamento é esperado.
     _garantir_mes_aberto(db, empresa_id, extrato_banco)
 
-    rodada = decisoes.rodada_mais_recente(db, empresa_id, extrato_id)
-    if rodada is None:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="Este extrato ainda não foi conciliado.",
-        )
+    rodada = _rodada_atual(db, empresa_id, extrato_id)
 
     linha = _linha_da_chave(db, empresa_id, extrato_id, rodada.extrato_sistema_id, corpo.chave)
     if linha is None:
@@ -852,13 +947,7 @@ def registrar_decisao(
 
     texto = None
     if corpo.tipo == "justificada":
-        texto = (corpo.texto or "").strip()
-        if not texto:
-            raise _regra_violada("A justificativa precisa de um texto.")
-        if len(texto) > TAMANHO_MAXIMO_JUSTIFICATIVA:
-            raise _regra_violada(
-                f"A justificativa pode ter até {TAMANHO_MAXIMO_JUSTIFICATIVA} caracteres."
-            )
+        texto = _texto_da_justificativa(corpo.texto)
     elif corpo.tipo in decisoes.TIPOS_DESFAZER:
         eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
         vigente = decisoes.decisao_vigente(eventos.get(corpo.chave, []))
@@ -898,7 +987,7 @@ def registrar_decisao(
     # a aprovação (issue #164). Com a flag desligada, nada muda.
     if corpo.tipo in TIPOS_QUE_TIRAM_A_APROVACAO and settings.aprovacao_justificativas_habilitada:
         eventos = decisoes.carregar_eventos(db, empresa_id, extrato_id, {corpo.chave})
-        if decisoes.justificativa_aprovada(decisoes.decisao_vigente(eventos.get(corpo.chave, []))):
+        if _presa_pela_aprovacao(decisoes.decisao_vigente(eventos.get(corpo.chave, []))):
             raise HTTPException(
                 status_code=http_status.HTTP_409_CONFLICT, detail=JUSTIFICATIVA_APROVADA
             )
@@ -916,7 +1005,7 @@ def registrar_decisao(
     )
     db.add(evento)
     if corpo.tipo == "justificada" and not settings.aprovacao_justificativas_habilitada:
-        _aprovar_junto(db, evento)
+        _aprovar_junto(db, [evento])
     db.commit()
 
     if corpo.tipo in decisoes.TIPOS_DESFAZER or corpo.tipo == "justificativa_rejeitada":
@@ -926,4 +1015,118 @@ def registrar_decisao(
     contexto = desfazer_aprovacao.carregar_contexto(
         db, usuario, empresa_id, extrato_banco, [vigente]
     )
-    return _decisao_response(vigente, desfazer_aprovacao.pode_desfazer_aprovacao(contexto, vigente))
+    # Aprovar uma linha de um lote devolve o lote dela, como a listagem.
+    tamanhos = decisoes.tamanhos_dos_lotes(db, empresa_id, extrato_id, _lotes_em_vigor([vigente]))
+    return _decisao_response(
+        vigente, desfazer_aprovacao.pode_desfazer_aprovacao(contexto, vigente), tamanhos
+    )
+
+
+class DecisaoLoteRequest(BaseModel):
+    """Corpo do lote (issue #237). `tipo` só aceita "justificada" nesta
+    rodada; é `Literal` para aceitar outros depois sem quebrar quem já manda."""
+
+    tipo: Literal["justificada"]
+    texto: str | None = None
+    chaves: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=64)]],
+        Field(min_length=1, max_length=decisoes.MAXIMO_LINHAS_POR_LOTE),
+    ]
+
+
+class IgnoradasPorMotivo(BaseModel):
+    nao_encontrada: int
+    nao_diverge: int
+    repetida: int
+    aprovada: int
+
+
+class DecisaoLoteResponse(BaseModel):
+    processadas: int
+    ignoradas: int
+    ignoradas_por_motivo: IgnoradasPorMotivo
+    lote_id: uuid.UUID | None
+
+
+@router.post("/{extrato_id}/decisoes/lote", response_model=DecisaoLoteResponse)
+def registrar_decisoes_em_lote(
+    extrato_id: uuid.UUID,
+    corpo: DecisaoLoteRequest,
+    ativa: Annotated[EmpresaAtiva, Depends(obter_empresa_ativa)],
+    db: Annotated[Session, Depends(get_db)],
+) -> DecisaoLoteResponse:
+    usuario, empresa_id = ativa.usuario, ativa.empresa.id
+    # Mesmas validações e na mesma ordem da justificativa de uma linha.
+    extrato_banco = _validar_extrato_banco(db, extrato_id, empresa_id)
+    _garantir_mes_aberto(db, empresa_id, extrato_banco)
+    rodada = _rodada_atual(db, empresa_id, extrato_id)
+    texto = _texto_da_justificativa(corpo.texto)
+
+    # As linhas da rodada numa consulta só, e os eventos das chaves pedidas em
+    # outra: nada de uma consulta por chave.
+    consulta, _ = _construir_consulta_itens(empresa_id, extrato_id, None, rodada.extrato_sistema_id)
+    status_por_chave = {_chave(linha): linha.status for linha in db.execute(consulta)}
+    eventos = decisoes.carregar_eventos(
+        db, empresa_id, extrato_id, set(corpo.chaves) & status_por_chave.keys()
+    )
+
+    ignoradas = dict.fromkeys(IgnoradasPorMotivo.model_fields, 0)
+    alvos: list[str] = []
+    vistas: set[str] = set()
+    for chave in corpo.chaves:
+        if chave in vistas:
+            ignoradas["repetida"] += 1
+            continue
+        vistas.add(chave)
+        if chave not in status_por_chave:
+            ignoradas["nao_encontrada"] += 1
+        elif not decisoes.diverge(status_por_chave[chave]):
+            ignoradas["nao_diverge"] += 1
+        elif _presa_pela_aprovacao(decisoes.decisao_vigente(eventos.get(chave, []))):
+            ignoradas["aprovada"] += 1
+        else:
+            alvos.append(chave)
+
+    lote_id = uuid.uuid4() if alvos else None
+    justificativas = [
+        DecisaoLinha(
+            empresa_id=empresa_id,
+            extrato_banco_id=extrato_id,
+            chave=chave,
+            tipo=corpo.tipo,
+            texto=texto,
+            usuario_id=usuario.id,
+            autor_nome=usuario.nome,
+            rodada=rodada.numero,
+            extrato_sistema_id=rodada.extrato_sistema_id,
+            lote_id=lote_id,
+        )
+        for chave in alvos
+    ]
+    db.add_all(justificativas)
+    if justificativas and not settings.aprovacao_justificativas_habilitada:
+        _aprovar_junto(db, justificativas)
+    db.commit()
+
+    total_ignoradas = sum(ignoradas.values())
+    logger.info(
+        "decisoes_lote empresa_id=%s extrato_banco_id=%s lote_id=%s tipo=%s resultado=%s "
+        "processadas=%d ignoradas=%d nao_encontrada=%d nao_diverge=%d repetida=%d aprovada=%d",
+        empresa_id,
+        extrato_id,
+        lote_id,
+        corpo.tipo,
+        "gravado" if alvos else "nada_a_gravar",
+        len(alvos),
+        total_ignoradas,
+        ignoradas["nao_encontrada"],
+        ignoradas["nao_diverge"],
+        ignoradas["repetida"],
+        ignoradas["aprovada"],
+    )
+    return DecisaoLoteResponse(
+        processadas=len(alvos),
+        ignoradas=total_ignoradas,
+        ignoradas_por_motivo=IgnoradasPorMotivo(**ignoradas),
+        lote_id=lote_id,
+    )

@@ -8,9 +8,11 @@ rejeição uma a uma estão em `POST /conciliacoes/{extrato_id}/decisoes`, com a
 mesmas regras (app/services/decisoes.py).
 
 Corpo: `acao` ("aprovar" ou "rejeitar"), `motivo` (opcional, só na rejeição,
-com o tamanho máximo da justificativa) e exatamente um entre `competencia`
-("AAAA-MM") e `itens` (até `MAXIMO_ITENS` pares `extrato_banco_id` e `chave`).
-Os dois, ou nenhum, é 422.
+com o tamanho máximo da justificativa) e exatamente uma de três formas:
+`competencia` ("AAAA-MM"), `itens` (até `MAXIMO_ITENS` pares
+`extrato_banco_id` e `chave`) ou `lote_id` com `extrato_banco_id` (issue
+#237). Mais de uma forma, nenhuma, ou `extrato_banco_id` sem `lote_id` (e
+vice-versa), é 422.
 
 - Com `competencia`: todas as justificativas aguardando aprovação dos pares da
   competência, com a regra de pares do fechamento (a rodada mais recente de
@@ -19,6 +21,14 @@ Os dois, ou nenhum, é 422.
   recente do extrato do banco; os outros (já decididos, linha que não diverge,
   extrato de outra empresa ou inexistente, repetidos) são ignorados e
   contados em `ignoradas`, sem erro.
+- Com `lote_id` (issue #237): as linhas da rodada mais recente do extrato do
+  banco cuja justificativa em vigor é desse lote (feito em
+  `POST /conciliacoes/{extrato_id}/decisoes/lote`) e está aguardando
+  aprovação. Linha do lote já aprovada, rejeitada ou justificada de novo
+  fora do lote fica de fora. Como na `competencia`, `ignoradas` é sempre 0.
+  Lote de outro extrato, extrato de outra empresa ou inexistente: nada é
+  processado, sem erro. Serve para o front aprovar o lote todo sem ter
+  todas as chaves na página.
 
 Tudo numa transação, com as travas na ordem fixa de app/services/travas.py:
 as do mês (compartilhadas, em ordem de competência) e depois as dos extratos
@@ -26,7 +36,8 @@ do banco envolvidos, em ordem de id. Mês fechado é 409, com a mesma mensagem
 das outras decisões, e nada é gravado. Cada aprovação ou rejeição é um evento
 em `decisoes_linha`, de quem chamou, na rodada mais recente.
 
-Resposta: `{ processadas, ignoradas }`. Nunca loga o motivo nem a chave.
+Resposta: `{ processadas, ignoradas }`. Nunca loga o motivo nem a chave; loga
+a forma usada.
 """
 
 import logging
@@ -54,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/justificativas", tags=["justificativas"])
 
-MAXIMO_ITENS = 500
+MAXIMO_ITENS = decisoes.MAXIMO_LINHAS_POR_LOTE
 
 obter_admin_ou_gestor = exigir_papel("admin", "gestor")
 
@@ -69,11 +80,17 @@ class LoteRequest(BaseModel):
     motivo: Annotated[str | None, Field(max_length=TAMANHO_MAXIMO_JUSTIFICATIVA)] = None
     competencia: str | None = None
     itens: Annotated[list[ItemLote] | None, Field(min_length=1, max_length=MAXIMO_ITENS)] = None
+    # Issue #237: o lote de justificativas e o extrato do banco dele.
+    lote_id: uuid.UUID | None = None
+    extrato_banco_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
-    def _um_entre_competencia_e_itens(self) -> "LoteRequest":
-        if (self.competencia is None) == (self.itens is None):
-            raise ValueError("informe exatamente um entre competencia e itens")
+    def _uma_forma_so(self) -> "LoteRequest":
+        formas = (self.competencia, self.itens, self.lote_id)
+        if sum(forma is not None for forma in formas) != 1:
+            raise ValueError("informe exatamente um entre competencia, itens e lote_id")
+        if (self.lote_id is None) != (self.extrato_banco_id is None):
+            raise ValueError("lote_id e extrato_banco_id vão juntos")
         if self.competencia is not None and not fechamentos.competencia_valida(self.competencia):
             raise ValueError("competencia deve estar no formato AAAA-MM, com mês de 01 a 12")
         motivo = (self.motivo or "").strip() or None
@@ -136,12 +153,16 @@ def decidir_em_lote(
             )
         )
     else:
+        if corpo.itens is not None:
+            ids = {item.extrato_banco_id for item in corpo.itens}
+        else:
+            ids = {corpo.extrato_banco_id}
         extratos = list(
             db.scalars(
                 select(Extrato).where(
                     Extrato.empresa_id == empresa_id,
                     Extrato.origem == "banco",
-                    Extrato.id.in_({item.extrato_banco_id for item in corpo.itens}),
+                    Extrato.id.in_(ids),
                 )
             )
         )
@@ -156,13 +177,23 @@ def decidir_em_lote(
         {(banco, rodada.extrato_sistema_id) for banco, rodada in rodadas.items()},
     )
 
-    if corpo.itens is None:
-        alvos = sorted(aguardando)
-        ignoradas = 0
-    else:
+    if corpo.itens is not None:
+        forma = "itens"
         pedidos = [(item.extrato_banco_id, item.chave) for item in corpo.itens]
         alvos = sorted(set(pedidos) & set(aguardando))
         ignoradas = len(pedidos) - len(alvos)
+    elif corpo.lote_id is not None:
+        forma = "lote_id"
+        alvos = sorted(
+            linha
+            for linha, vigente in aguardando.items()
+            if vigente.evento.lote_id == corpo.lote_id
+        )
+        ignoradas = 0
+    else:
+        forma = "competencia"
+        alvos = sorted(aguardando)
+        ignoradas = 0
 
     tipo = "justificativa_aprovada" if corpo.acao == "aprovar" else "justificativa_rejeitada"
     for banco, chave in alvos:
@@ -182,8 +213,9 @@ def decidir_em_lote(
         )
     db.commit()
     logger.info(
-        "justificativas_lote acao=%s processadas=%d ignoradas=%d",
+        "justificativas_lote acao=%s forma=%s processadas=%d ignoradas=%d",
         corpo.acao,
+        forma,
         len(alvos),
         ignoradas,
     )
