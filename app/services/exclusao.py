@@ -14,9 +14,11 @@ As consultas pedem `incluir_removidas`: a empresa removida é justamente o que a
 limpeza apaga, e o filtro de sessão de app/models/empresa.py a esconderia.
 """
 
+import hashlib
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.orm import Session
@@ -46,6 +48,7 @@ from app.models import (
     OperadorLedgr,
     PagamentoStripe,
     PedidoAutorizacaoOAuth,
+    RegistroExclusao,
     TokenEmail,
     TokenOAuth,
     UsoAssistente,
@@ -68,11 +71,13 @@ class Escopo:
         return self.empresa_id is None
 
     def empresas(self):
-        """Os ids das empresas do escopo, como subconsulta."""
+        """Os ids das empresas do escopo, como subconsulta. A opção
+        `incluir_removidas` vale para a execução inteira, não para a subconsulta:
+        quem executa uma consulta que usa isto passa `COM_REMOVIDAS`."""
         consulta = select(Empresa.id).where(Empresa.conta_id == self.conta_id)
         if self.empresa_id is not None:
             consulta = consulta.where(Empresa.id == self.empresa_id)
-        return consulta.execution_options(**COM_REMOVIDAS)
+        return consulta
 
     def extratos(self):
         return select(Extrato.id).where(Extrato.empresa_id.in_(self.empresas()))
@@ -197,7 +202,7 @@ def apagar_linhas(db: Session, escopo: Escopo, etapas=ETAPAS) -> dict[str, int]:
     conta = db.scalar(select(Conta).where(Conta.id == escopo.conta_id).with_for_update())
     if conta is None:
         raise LookupError("conta não encontrada")
-    db.execute(escopo.empresas().with_for_update())
+    db.execute(escopo.empresas().with_for_update(), execution_options=COM_REMOVIDAS)
     contagens = {}
     for model, condicao in etapas:
         filtro = condicao(escopo)
@@ -209,3 +214,78 @@ def apagar_linhas(db: Session, escopo: Escopo, etapas=ETAPAS) -> dict[str, int]:
         )
         contagens[model.__tablename__] = resultado.rowcount
     return contagens
+
+
+# Em `registros_exclusao.contagens`, ao lado das tabelas: quantos objetos o
+# R2 apagou. Só entra quando o R2 estava configurado.
+CHAVE_CONTAGEM_ARQUIVOS = "arquivos_originais_r2"
+
+
+def hash_cnpj(cnpj: str) -> str:
+    return hashlib.sha256(cnpj.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class Exclusao:
+    registro_id: uuid.UUID
+    # Na ordem de `ETAPAS`; o JSONB do registro não guarda a ordem das chaves.
+    contagens: dict[str, int]
+
+
+def empresas_vencidas(db: Session, agora: datetime) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """`(conta_id, empresa_id)` das empresas removidas cujo prazo para restaurar
+    acabou (`apagar_em` até `agora`), da que venceu primeiro para a última."""
+    linhas = db.execute(
+        select(Empresa.conta_id, Empresa.id)
+        .where(Empresa.removida_em.is_not(None), Empresa.apagar_em <= agora)
+        .order_by(Empresa.apagar_em, Empresa.id)
+        .execution_options(**COM_REMOVIDAS)
+    ).all()
+    return [(conta_id, empresa_id) for conta_id, empresa_id in linhas]
+
+
+def travar_se_vencida(db: Session, empresa_id: uuid.UUID, agora: datetime) -> Empresa | None:
+    """A empresa removida e vencida, com a linha travada, ou `None` se ela foi
+    restaurada ou apagada desde a listagem. Quem restaura trava a mesma linha:
+    com a trava aqui, restaurar e apagar nunca passam os dois."""
+    return db.scalar(
+        select(Empresa)
+        .where(
+            Empresa.id == empresa_id,
+            Empresa.removida_em.is_not(None),
+            Empresa.apagar_em <= agora,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True, **COM_REMOVIDAS)
+    )
+
+
+def apagar_empresa(
+    db: Session,
+    empresa: Empresa,
+    executado_por: str,
+    arquivos_originais: int | None = None,
+) -> Exclusao:
+    """Apaga uma empresa REMOVIDA e tudo o que é dela, grava o registro e NÃO
+    faz commit: quem chama apaga o R2 antes e decide a transação. Recusa a
+    empresa ativa, para um id errado nunca apagar dados de quem está usando.
+
+    No `registros_exclusao`, `empresa_id` guarda o id da EMPRESA e
+    `cnpj_sha256` o hash do CNPJ dela (na exclusão da conta, o id e o CNPJ da
+    conta); a contagem de `contas` é 0."""
+    if empresa.removida_em is None:
+        raise ValueError("a empresa não está removida")
+    contagens = apagar_linhas(db, Escopo(empresa.conta_id, empresa.id))
+    if arquivos_originais is not None:
+        contagens[CHAVE_CONTAGEM_ARQUIVOS] = arquivos_originais
+    registro_id = uuid.uuid4()
+    db.add(
+        RegistroExclusao(
+            id=registro_id,
+            empresa_id=empresa.id,
+            cnpj_sha256=hash_cnpj(empresa.cnpj),
+            contagens=contagens,
+            executado_por=executado_por,
+        )
+    )
+    return Exclusao(registro_id=registro_id, contagens=contagens)

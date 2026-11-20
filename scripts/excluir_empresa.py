@@ -49,11 +49,9 @@ CNPJ mascarado. Do R2, só a contagem e o nome da classe de um erro.
 """
 
 import argparse
-import hashlib
 import sys
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -78,15 +76,18 @@ from app.services.arquivo_original import (
     armazenamento_do_ambiente,
     prefixo_da_conta,
 )
-from app.services.exclusao import ETAPAS, Escopo
+from app.services.exclusao import (
+    CHAVE_CONTAGEM_ARQUIVOS,
+    ETAPAS,
+    Escopo,
+    Exclusao,
+    hash_cnpj,
+)
 
 # Tem `empresa_id`, mas fica: é o registro da própria exclusão.
 TABELAS_QUE_FICAM = frozenset({RegistroExclusao.__tablename__})
 
 
-# Em `registros_exclusao.contagens`, ao lado das tabelas: quantos objetos o
-# script apagou no R2. Só entra quando o R2 estava configurado.
-CHAVE_CONTAGEM_ARQUIVOS = "arquivos_originais_r2"
 SEM_VARIAVEIS_DO_R2 = (
     "Sem as variáveis ARQUIVO_ORIGINAL_R2_* no ambiente, os arquivos originais ficariam "
     "no R2. Nada foi apagado."
@@ -112,19 +113,8 @@ def _extratos_da_conta(conta_id: uuid.UUID):
     return Escopo(conta_id).extratos()
 
 
-def hash_cnpj(cnpj: str) -> str:
-    return hashlib.sha256(cnpj.encode()).hexdigest()
-
-
 def cnpj_mascarado(cnpj: str) -> str:
     return f"{cnpj[:2]}.***.***/****-{cnpj[-2:]}"
-
-
-@dataclass(frozen=True)
-class Exclusao:
-    registro_id: uuid.UUID
-    # Na ordem de `ETAPAS`; o JSONB do registro não guarda a ordem das chaves.
-    contagens: dict[str, int]
 
 
 def excluir_conta(
@@ -221,10 +211,11 @@ def _armazenamento_do_ambiente() -> Armazenamento | None:
 
 
 def _extratos_com_original(db: Session, conta_id: uuid.UUID) -> int:
+    # Com as empresas removidas (issue #215): o original delas também está no R2.
     return db.scalar(
-        select(func.count()).where(
-            Extrato.id.in_(_extratos_da_conta(conta_id)), Extrato.arquivo_chave.is_not(None)
-        )
+        select(func.count())
+        .where(Extrato.id.in_(_extratos_da_conta(conta_id)), Extrato.arquivo_chave.is_not(None))
+        .execution_options(**servico.COM_REMOVIDAS)
     )
 
 
