@@ -5,7 +5,8 @@ métodos de login. Desde a issue #133 (ADR-019), a conta é o tenant: vêm
 `conta_id`, o `papel` do usuário ('admin', 'gestor' ou 'analista'), a razão
 social e o CNPJ da conta, e `empresas`, as empresas clientes da conta (id,
 razão social e CNPJ), ordenadas pela razão social, para o seletor da empresa
-ativa. Ignora o cabeçalho `X-Ledgr-Empresa`. `plano`, `teste_termina_em` (em
+ativa. A empresa removida (issue #215, `DELETE /empresas/{id}`) não entra, e
+`limites.empresas.usadas` não a conta. Ignora o cabeçalho `X-Ledgr-Empresa`. `plano`, `teste_termina_em` (em
 UTC) e `situacao` (issue #122) são da conta, para todos os usuários dela: a
 mesma conta do `POST /empresa/plano` (app/api/plano.py) e do bloqueio do
 `POST /conciliacoes`. Desde as issues #166 e #167 (ADR-026), `plano` é o da

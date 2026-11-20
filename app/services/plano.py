@@ -2,7 +2,8 @@
 e limites de empresas e usuários por plano (issue #133, ADR-019).
 
 Limites: `empresas_usadas` e `usuarios_usados` são a única conta do que a conta
-usa, para o 402 do `POST /empresas` e do `POST /empresa/convites` e para os
+usa (empresa removida não conta: o filtro de sessão de app/models/empresa.py a
+esconde, issue #215; restaurar confere o limite de novo), para o 402 do `POST /empresas` e do `POST /empresa/convites` e para os
 `limites` do `GET /me` nunca divergirem. Usuários são os ativos mais os
 convites pendentes: o convite pendente já ocupa a vaga, e o aceite não é
 barrado pelo limite. `barrar_no_limite` levanta o 402, igual para todos os
