@@ -102,14 +102,13 @@ def conta(
                 for i in itens
                 if i["lancamento_banco"] and i["lancamento_banco"]["valor"] == "-20.00"
             )
-            assert (
-                client.post(
-                    f"/conciliacoes/{banco.id}/decisoes",
-                    headers=c.headers["gestor"],
-                    json={"chave": tarifa, "tipo": "justificada", "texto": "Tarifa do mês"},
-                ).status_code
-                == 200
+            # Em lote (issue #237): o relatório não pode mostrar o lote.
+            lote = client.post(
+                f"/conciliacoes/{banco.id}/decisoes/lote",
+                headers=c.headers["gestor"],
+                json={"tipo": "justificada", "texto": "Tarifa do mês", "chaves": [tarifa]},
             )
+            assert lote.json()["processadas"] == 1, lote.text
             fechado = client.post(
                 "/fechamentos",
                 headers=c.headers["admin"],
@@ -454,10 +453,11 @@ def test_relatorio_tem_exatamente_os_campos_da_lista(db_session, conta):
     assert set(par) == set(CAMPOS_DO_RELATORIO["par"])
     for linha in par["justificadas"] + par["pendentes"]:
         assert set(linha) == set(CAMPOS_DA_LINHA)
-    # Nenhum identificador interno nem e-mail em lugar nenhum.
+    # Nenhum identificador interno nem e-mail em lugar nenhum (nem o lote, #237).
     bruto = _consultar(token).text
     assert not UUID.search(bruto)
     assert "@" not in bruto
+    assert "lote" not in bruto
 
 
 def test_relatorio_traz_o_que_o_pdf_mostra(db_session, conta):
