@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # pergunta (a Central inteira na entrada), uns US$ 7 por mês no pior caso
     # do limite global.
     assistente_habilitado: bool = False
+    # Dados da empresa no assistente (issue #223, ADR-028): com esta flag e uma
+    # empresa ativa, o assistente também responde consultas simples (meses,
+    # resumo, divergências, em aberto e saldo). O modelo só interpreta a
+    # pergunta; nenhum dado da empresa vai ao provedor. Desligada por padrão.
+    assistente_dados_habilitado: bool = False
     ajuda_conteudo_url: str = ""
     assistente_maximo_conteudo_caracteres: PositiveInt = 60000
     assistente_limite_diario_conta: PositiveInt = 100
@@ -94,12 +99,24 @@ class Settings(BaseSettings):
     email_responder_para: str = ""
     email_timeout_segundos: float = 10.0
     frontend_url: str = ""
+    # Alerta por e-mail a cada ação de operador no /admin (issue #234): os
+    # endereços da equipe interna, separados por vírgula. Vazio, ou com o e-mail
+    # desligado (EMAIL_HABILITADO), nada é enviado. Texto, não `list`: o
+    # pydantic-settings leria uma lista como JSON. Use `alertas_admin_destinatarios`.
+    alertas_admin_emails: str = ""
 
     # Rate limit (issue #64): segredo que o servidor do Next manda junto com o
     # IP do navegador, em app/core/rate_limit.py. Vazio, o IP repassado é
     # ignorado e o limite de /login, /register e /senha/* volta a ser um só
     # para todos os usuários do front. Mesmo valor nos dois lados.
     ledgr_segredo_proxy: str = ""
+    # Limite por IP no /admin/* (issue #234), somado ao limite por usuário. Nasce
+    # DESLIGADO: o front só repassa o IP do navegador (X-Ledgr-IP-Cliente com
+    # X-Ledgr-Segredo-Proxy) nas rotas públicas, então no /admin todo pedido
+    # chega com o IP da Vercel e os operadores se bloqueariam entre si. Ligar só
+    # quando o front avisar que repassa o IP nas chamadas ao /admin. Desligado, o
+    # comportamento é o de antes.
+    admin_limite_por_ip_habilitado: bool = False
 
     # Login pelo Google (issue #73): o client id do client OAuth da Ledgr no
     # Google Cloud, o mesmo que o NextAuth usa na Vercel. O backend confere
@@ -262,6 +279,16 @@ class Settings(BaseSettings):
                 "não é true. Chave live só com STRIPE_MODO_LIVE=true, de propósito."
             )
         return self
+
+    def alertas_admin_destinatarios(self) -> list[str]:
+        """Os endereços de `ALERTAS_ADMIN_EMAILS`, sem espaços, sem repetidos
+        (maiúsculas não contam) e sem item que não seja um endereço."""
+        vistos: dict[str, str] = {}
+        for item in self.alertas_admin_emails.split(","):
+            email = item.strip()
+            if "@" in email and not any(c.isspace() for c in email):
+                vistos.setdefault(email.lower(), email)
+        return list(vistos.values())
 
     def stripe_disponivel(self) -> bool:
         """A flag está ligada e há chave: as rotas de cobrança podem falar com a

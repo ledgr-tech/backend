@@ -1,6 +1,6 @@
 """Os e-mails transacionais montados com dados fixos, para os testes do molde.
 
-`CASOS` tem um caso por mensagem de `app/services/email/mensagens.py` (os 10
+`CASOS` tem um caso por mensagem de `app/services/email/mensagens.py` (os 11
 e-mails); `VARIANTES` cobre os ramos que mudam o texto: sem link, com a
 empresa sem acesso, cupom sem código. O texto e o assunto de todos estão
 fixados em `tests/fixtures/emails_texto.json`.
@@ -57,6 +57,16 @@ CASOS = {
         codigo=CODIGO,
         validade="30/11/2026",
         link_assinatura=f"{BASE}/assinatura",
+    ),
+    "alerta_admin": lambda nome=NOME, razao=RAZAO_SOCIAL: m.mensagem_alerta_admin(
+        para="equipe@x.com",
+        operador_nome=nome,
+        operador_email="olga@ledgr.com.br",
+        conta_id="5f0c2f0e-8a54-4b1a-9a43-0e3d5d7d3c11",
+        razao_social=razao,
+        acao="Conta inativada",
+        quando="19/11/2026 às 10:30:00",
+        motivo="Pedido do cliente",
     ),
 }
 

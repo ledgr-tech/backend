@@ -17,6 +17,12 @@ nesta ordem:
    `--forwarded-allow-ips="*"` no uvicorn não serve: ele usa o primeiro).
    Supõe exatamente um proxy na frente.
 3. O IP da conexão (rodando local, sem proxy).
+
+O `/admin/*` (issue #234) tem, além do limite por usuário, um limite por IP
+(`limite_admin_leitura_por_ip` e `limite_admin_acao_por_ip`), só com
+`ADMIN_LIMITE_POR_IP_HABILITADO` ligada. Desligada, a rota se comporta como
+antes: o front só repassa o IP do navegador nas rotas públicas, e no `/admin`
+todo pedido chegaria com o IP da Vercel, o mesmo para todos os operadores.
 """
 
 import hmac
@@ -124,6 +130,9 @@ LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 LIMITE_PREFERENCIAS_POR_USUARIO = "30/minute"
 # Favoritar e desfavoritar empresa (issue #157): um clique por empresa no seletor.
 LIMITE_FAVORITAS_POR_USUARIO = "30/minute"
+# Busca do topo do app (issue #220): o front consulta enquanto a pessoa digita,
+# com espera entre as teclas; o limite só barra o abuso.
+LIMITE_BUSCA_POR_USUARIO = "120/minute"
 # Revisão da importação via IA (issue #159): corrigir, remover, adicionar e
 # confirmar. A pessoa corrige linha a linha conferindo o PDF.
 LIMITE_REVISAO_IMPORTACAO_POR_USUARIO = "60/minute"
@@ -147,6 +156,31 @@ LIMITE_LOGOUT_POR_USUARIO = "30/minute"
 # do token), leituras e ações em contadores separados.
 LIMITE_ADMIN_LEITURA_POR_USUARIO = "60/minute"
 LIMITE_ADMIN_ACAO_POR_USUARIO = "10/minute"
+# Por IP, somado ao por usuário e atrás de ADMIN_LIMITE_POR_IP_HABILITADO (issue
+# #234, desligada por padrão). Cada categoria tem um contador só para todo o
+# `/admin` (escopo compartilhado), não um por rota.
+LIMITE_ADMIN_LEITURA_POR_IP = "120/minute"
+LIMITE_ADMIN_ACAO_POR_IP = "30/minute"
+
+
+def _admin_limite_por_ip_desligado() -> bool:
+    return not settings.admin_limite_por_ip_habilitado
+
+
+# Os valores entram por função, lidos a cada requisição (como a flag), para o
+# teste poder trocá-los sem recarregar o módulo.
+limite_admin_leitura_por_ip = limiter.shared_limit(
+    lambda: LIMITE_ADMIN_LEITURA_POR_IP,
+    scope="admin_leitura_por_ip",
+    key_func=ip_do_cliente,
+    exempt_when=_admin_limite_por_ip_desligado,
+)
+limite_admin_acao_por_ip = limiter.shared_limit(
+    lambda: LIMITE_ADMIN_ACAO_POR_IP,
+    scope="admin_acao_por_ip",
+    key_func=ip_do_cliente,
+    exempt_when=_admin_limite_por_ip_desligado,
+)
 
 
 def _claims_do_token(request: Request) -> dict | None:

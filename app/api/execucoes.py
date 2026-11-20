@@ -5,7 +5,8 @@ rodada de `POST /conciliacoes` (app/api/conciliacoes.py), não só a última.
 Exige JWT (app/core/auth.py, ADR-003): sempre filtra pela empresa ativa
 (cabeçalho `X-Ledgr-Empresa`, conferido contra a conta do token desde a issue
 #133), nunca recebe esse id por parâmetro. Query params: `limit` (1 a 100,
-default 20), `offset` (>= 0) e `extrato_banco_id` (opcional, issue #82).
+default 20), `offset` (>= 0), `extrato_banco_id` (opcional, issue #82) e
+`competencia` (opcional, AAAA-MM, issue #186).
 Ordem: `criado_em` desc, `id` desc (mais recente primeiro, desempate
 estável pra paginar). Empresa sem nenhuma execução devolve 200 com lista
 vazia.
@@ -27,6 +28,22 @@ subconsulta, antes do `row_number()`: como a window function já particiona
 por `extrato_banco_id`, filtrar ali não muda quais linhas são "atual" dentro
 do par, só remove os outros extratos do banco da consulta. `total` passa a
 contar só as execuções filtradas.
+
+`competencia` (issue #186, pedido do front em frontend#309: a visão geral soma
+o mês em foco e, com mais de 50 execuções, deixava de somar) devolve só as
+execuções daquela competência. A regra é a do fechamento
+(`competencia_do_extrato`, app/services/travas.py): o mês de `periodo_inicio`
+do EXTRATO DO BANCO da execução; extrato que cruza dois meses fica no mês em
+que começa. Extrato do banco sem `periodo_inicio` não tem competência: some
+com o filtro e continua aparecendo sem ele. Formato inválido dá 422 com o
+mesmo texto de `GET /fechamentos?competencia=` (app/core/competencia.py).
+Combina com `extrato_banco_id`, `limit` e `offset`; `total` respeita o filtro.
+Diferente de `extrato_banco_id`, o filtro entra DEPOIS do `row_number()`
+(na consulta externa): `atual` é calculado sobre todas as execuções da
+empresa, então é idêntico ao da resposta sem o filtro. (Como todas as rodadas
+de um extrato do banco caem na mesma competência, filtrar antes daria o mesmo
+resultado; ficar depois é a garantia explícita.) A contagem de `total` não usa
+a window function: junta com o extrato do banco só quando `competencia` vem.
 
 `executada_em` sai em UTC explícito (sufixo `Z`/`+00:00` no JSON): a coluna
 `criado_em` é `TIMESTAMP` sem timezone e o `now()` do Postgres está em UTC
@@ -74,10 +91,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.auth import obter_empresa_id_ativa
+from app.core.competencia import intervalo_da_competencia_ou_422
 from app.core.database import get_db
 from app.models import ExecucaoConciliacao, Extrato
 from app.models.extrato import STATUS_RASCUNHO
@@ -157,14 +175,48 @@ def _extrato_nao_encontrado() -> HTTPException:
     )
 
 
-@router.get("", response_model=ExecucaoListaResponse)
+def _na_competencia(periodo_inicio, intervalo: tuple[date, date]):
+    """`periodo_inicio` (coluna) dentro do mês da competência. NULL não casa."""
+    inicio, fim = intervalo
+    return and_(periodo_inicio >= inicio, periodo_inicio < fim)
+
+
+@router.get(
+    "",
+    response_model=ExecucaoListaResponse,
+    summary="Histórico de execuções de conciliação da empresa ativa",
+)
 def listar_execucoes(
     empresa_id: Annotated[uuid.UUID, Depends(obter_empresa_id_ativa)],
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
-    extrato_banco_id: Annotated[uuid.UUID | None, Query()] = None,
+    extrato_banco_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Só as rodadas deste extrato do banco (404 se não for da empresa)."),
+    ] = None,
+    competencia: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Competência AAAA-MM (ex.: 2026-09). Devolve só as execuções cujo extrato do "
+                "banco começa nesse mês (mês de `periodo_inicio`, a mesma regra do fechamento). "
+                "Extrato do banco sem `periodo_inicio` não tem competência: não aparece com este "
+                "filtro, e continua aparecendo sem ele. `total` respeita o filtro e `atual` é o "
+                "mesmo da listagem sem filtro. Formato inválido: 422."
+            ),
+            examples=["2026-09"],
+        ),
+    ] = None,
 ) -> ExecucaoListaResponse:
+    """Histórico de execuções da empresa ativa, da mais recente para a mais antiga.
+
+    Filtros opcionais, combináveis: `extrato_banco_id` e `competencia` (AAAA-MM,
+    mês de `periodo_inicio` do extrato do banco da execução; extrato do banco sem
+    `periodo_inicio` fica fora de qualquer competência). Sem filtros devolve tudo,
+    como antes.
+    """
+    intervalo = intervalo_da_competencia_ou_422(competencia) if competencia is not None else None
     if extrato_banco_id is not None:
         extrato = db.get(Extrato, extrato_banco_id)
         if extrato is None or extrato.empresa_id != empresa_id or extrato.status == STATUS_RASCUNHO:
@@ -211,14 +263,23 @@ def listar_execucoes(
         .subquery()
     )
 
+    consulta = select(subconsulta)
+    consulta_total = select(func.count()).select_from(ExecucaoConciliacao).where(*filtros)
+    if intervalo is not None:
+        # Fora da subconsulta, depois do row_number(): `atual` sai do conjunto
+        # completo da empresa. A contagem junta com o extrato do banco só aqui.
+        consulta = consulta.where(_na_competencia(subconsulta.c.periodo_inicio, intervalo))
+        consulta_total = consulta_total.join(
+            Extrato,
+            ExecucaoConciliacao.extrato_banco_id == Extrato.id,
+        ).where(_na_competencia(Extrato.periodo_inicio, intervalo))
     consulta = (
-        select(subconsulta)
-        .order_by(subconsulta.c.criado_em.desc(), subconsulta.c.id.desc())
+        consulta.order_by(subconsulta.c.criado_em.desc(), subconsulta.c.id.desc())
         .limit(limit)
         .offset(offset)
     )
     linhas = db.execute(consulta).all()
-    total = db.scalar(select(func.count()).select_from(ExecucaoConciliacao).where(*filtros))
+    total = db.scalar(consulta_total)
     justificativas = contar_justificativas(
         db,
         empresa_id,

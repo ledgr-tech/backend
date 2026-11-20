@@ -109,22 +109,33 @@ class ParDoMes:
     nome_arquivo_sistema: str
 
 
-def pares_do_mes(db: Session, empresa_id: uuid.UUID, competencia: str) -> list[ParDoMes]:
-    """O par da rodada mais recente de cada extrato do banco da competência,
-    com a execução atual dele. Três consultas."""
+def pares_dos_meses(
+    db: Session, empresa_id: uuid.UUID, competencias: list[str]
+) -> dict[str, list[ParDoMes]]:
+    """Os pares de vários meses de uma vez (a regra de `pares_do_mes`, para a
+    comparação entre meses): para cada extrato do banco das competências, o
+    par da rodada mais recente, com a execução atual. Mês sem par fica fora do
+    dicionário. Três consultas, qualquer que seja o número de meses."""
+    if not competencias:
+        return {}
+    competencia_do_banco = func.to_char(Extrato.periodo_inicio, "YYYY-MM")
     bancos = {
-        linha.id: linha.nome_arquivo
+        linha.id: (linha.nome_arquivo, linha.competencia)
         for linha in db.execute(
-            select(Extrato.id, Extrato.nome_arquivo).where(
+            select(
+                Extrato.id,
+                Extrato.nome_arquivo,
+                competencia_do_banco.label("competencia"),
+            ).where(
                 Extrato.empresa_id == empresa_id,
                 Extrato.origem == "banco",
-                func.to_char(Extrato.periodo_inicio, "YYYY-MM") == competencia,
+                competencia_do_banco.in_(competencias),
             )
         )
     }
     rodadas = decisoes.rodadas_mais_recentes(db, empresa_id, list(bancos))
     if not rodadas:
-        return []
+        return {}
 
     extrato_sistema = aliased(Extrato)
     execucoes = db.execute(
@@ -149,20 +160,31 @@ def pares_do_mes(db: Session, empresa_id: uuid.UUID, competencia: str) -> list[P
         )
     ).all()
 
-    return sorted(
-        (
+    por_mes: dict[str, list[ParDoMes]] = defaultdict(list)
+    for execucao, nome_arquivo_sistema in execucoes:
+        nome_arquivo_banco, competencia = bancos[execucao.extrato_banco_id]
+        por_mes[competencia].append(
             ParDoMes(
                 extrato_banco_id=execucao.extrato_banco_id,
                 extrato_sistema_id=execucao.extrato_sistema_id,
                 rodada=rodadas[execucao.extrato_banco_id].numero,
                 execucao=execucao,
-                nome_arquivo_banco=bancos[execucao.extrato_banco_id],
+                nome_arquivo_banco=nome_arquivo_banco,
                 nome_arquivo_sistema=nome_arquivo_sistema,
             )
-            for execucao, nome_arquivo_sistema in execucoes
-        ),
-        key=lambda par: (par.nome_arquivo_banco, str(par.extrato_banco_id)),
-    )
+        )
+    return {
+        competencia: sorted(
+            pares, key=lambda par: (par.nome_arquivo_banco, str(par.extrato_banco_id))
+        )
+        for competencia, pares in por_mes.items()
+    }
+
+
+def pares_do_mes(db: Session, empresa_id: uuid.UUID, competencia: str) -> list[ParDoMes]:
+    """O par da rodada mais recente de cada extrato do banco da competência,
+    com a execução atual dele. Três consultas."""
+    return pares_dos_meses(db, empresa_id, [competencia]).get(competencia, [])
 
 
 def resumo_do_mes(db: Session, empresa_id: uuid.UUID, pares: list[ParDoMes]) -> dict:

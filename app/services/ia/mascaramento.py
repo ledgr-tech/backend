@@ -102,13 +102,25 @@ def mascarar_texto(texto: str) -> str:
     histórico do assistente da Central de ajuda (issue #137), que podem ter
     até 1.000 caracteres. É o modo "mascarada": o filtro de termos apagaria
     a pergunta."""
+    return mascarar_numeros_longos(mascarar_identificadores(texto))
+
+
+def mascarar_identificadores(texto: str) -> str:
+    """Só os identificadores (e-mail, CNPJ, CPF e telefone), sem o último passo
+    das sequências longas: o assistente com dados (issue #223, ADR-028) troca
+    valores e datas por marcadores entre os dois passos, porque "123.456,78"
+    tem 6 dígitos e viraria `[NUMERO]`."""
     mascarado = _PADRAO_EMAIL.sub("[EMAIL]", texto)
     mascarado = _PADRAO_CNPJ_PONTUADO.sub("[CNPJ]", mascarado)
     mascarado = _PADRAO_CNPJ_CRU.sub("[CNPJ]", mascarado)
     mascarado = _PADRAO_CPF_PONTUADO.sub("[CPF]", mascarado)
     mascarado = _PADRAO_CPF_CRU.sub("[CPF]", mascarado)
-    mascarado = _PADRAO_TELEFONE.sub("[TELEFONE]", mascarado)
-    return _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, mascarado)
+    return _PADRAO_TELEFONE.sub("[TELEFONE]", mascarado)
+
+
+def mascarar_numeros_longos(texto: str) -> str:
+    """O último passo da máscara: sequência de 6 ou mais dígitos vira `[NUMERO]`."""
+    return _PADRAO_SEQUENCIA_DIGITOS.sub(_substituir_numero_longo, texto)
 
 
 # Termos bancários e de operação que podem chegar ao provedor no modo

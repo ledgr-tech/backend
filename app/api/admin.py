@@ -2,10 +2,21 @@
 
 Só para o operador do Ledgr (`operadores_ledgr`), conferido no banco a cada
 requisição por `obter_operador`: quem não é operador recebe 403, inclusive o
-admin de qualquer conta, e o operador com login de mais de
-`LOGIN_RECENTE_OPERADOR` recebe 401 (o front leva ao login de novo). Ignora
-`X-Ledgr-Empresa` e não depende da conta do operador, nem de ela estar
-inativa (app/core/conta_inativa.py deixa o `/admin` de fora).
+admin de qualquer conta, e o operador com sessão vencida recebe 401 (o front
+leva ao login de novo). Ignora `X-Ledgr-Empresa` e não depende da conta do
+operador, nem de ela estar inativa (app/core/conta_inativa.py deixa o `/admin`
+de fora).
+
+Sessão do operador (issue #234): mais curta que a do app. Vale por no máximo
+`LOGIN_RECENTE_OPERADOR` (60 min) desde o login (`auth_time`) e por no máximo
+`INATIVIDADE_OPERADOR` (20 min) desde a última atividade, que é o maior entre
+o login e o último acesso `permitido` do operador em `acessos_admin` (sem
+tabela nova). Os dois vencimentos dão o mesmo 401 (`LOGIN_ANTIGO`) e gravam o
+mesmo resultado, `login_antigo`: o CHECK de `acessos_admin.resultado` não
+muda. A conferência olha o último acesso antes de gravar o da requisição
+atual, e só um acesso `permitido` renova: o 401 nunca estende a sessão. O
+`auth_time` é medido no relógio da aplicação (como no resto do app) e o
+último acesso no do banco, que o gravou, cada um contra o seu.
 
 Toda requisição com sessão válida grava uma linha em `acessos_admin`, numa
 sessão própria e antes da resposta, inclusive as negadas: o usuário, o
@@ -35,6 +46,19 @@ apaga até `LIMPEZA_POR_ACESSO` linhas vencidas.
   `/piloto` (`ativo` e `motivo`): gravam o estado em `contas` e um evento em
   `eventos_conta`. Repetir dá 409.
 
+Limite por IP (issue #234): além do limite por usuário, o `/admin/*` tem 120
+leituras e 30 ações por minuto por IP (`LIMITE_ADMIN_*_POR_IP`, app/core/
+rate_limit.py), só com `ADMIN_LIMITE_POR_IP_HABILITADO` ligada. Vem desligada:
+o front só repassa o IP do navegador (`X-Ledgr-IP-Cliente` com
+`X-Ledgr-Segredo-Proxy`) nas rotas públicas, e sem isso todo pedido ao `/admin`
+chega com o IP da Vercel e os operadores se bloqueariam entre si.
+
+Alerta (issue #234): cada ação de operador que muda uma conta, as três acima e
+as de assinatura e cupom (app/api/admin_assinaturas.py), avisa a equipe interna
+por e-mail depois do commit e da resposta (`ALERTAS_ADMIN_EMAILS`, regras em
+app/services/alerta_admin.py). Ação recusada não avisa, e falha no envio nunca
+falha a ação.
+
 Pagamentos, cancelamentos, vencimentos e cupons (issue #169) ficam em
 app/api/admin_assinaturas.py, no mesmo prefixo e com a mesma guarda.
 
@@ -47,7 +71,10 @@ descrição, justificativa, nome de arquivo nem dado das empresas clientes.
 
 Cidade e UF (issue #184) vêm no item da lista e no detalhe, `null` quando a
 conta não os informou. Logs só com ids e o resultado, nunca nome, e-mail,
-cidade, UF nem o termo buscado.
+cidade, UF nem o termo buscado. O termo buscado também não sai no log de
+acesso do uvicorn: `GET /admin/contas?busca=...` leva a busca na query string, e
+o filtro `SemQueryNoAcesso` (app/core/logging.py, issue #234) tira a query de
+toda linha de `uvicorn.access`. Mudar a busca para `POST` ficaria para depois.
 """
 
 import logging
@@ -56,13 +83,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.empresas import _MASCARA_CNPJ, _SEM_ACENTO_PYTHON, _nome_normalizado
+from app.api.empresas import _MASCARA_CNPJ
 from app.core import plano
 from app.core.auth import SessaoAutenticada, _agora, obter_sessao_autenticada
 from app.core.database import SessionLocal, get_db
@@ -71,8 +98,11 @@ from app.core.rate_limit import (
     LIMITE_ADMIN_ACAO_POR_USUARIO,
     LIMITE_ADMIN_LEITURA_POR_USUARIO,
     chave_por_usuario,
+    limite_admin_acao_por_ip,
+    limite_admin_leitura_por_ip,
     limiter,
 )
+from app.core.sem_acento import sem_acento, sem_acento_sql
 from app.models import (
     AcessoAdmin,
     AssinaturaStripe,
@@ -90,14 +120,20 @@ from app.models import (
     PagamentoStripe,
     Usuario,
 )
+from app.services import alerta_admin
 from app.services.convites import condicoes_pendente
+from app.services.email import ProvedorDeEmail
+from app.services.email.envio import obter_provedor_email_dependencia
 from app.services.plano import FUSO_DA_FRANQUIA
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-LOGIN_RECENTE_OPERADOR = timedelta(hours=2)
+# Sessão do operador (issue #234): 60 min desde o login (era 2 h) e 20 min sem
+# acessar o painel.
+LOGIN_RECENTE_OPERADOR = timedelta(minutes=60)
+INATIVIDADE_OPERADOR = timedelta(minutes=20)
 RETENCAO_ACESSOS = timedelta(days=365)
 LIMPEZA_POR_ACESSO = 500
 MESES_DE_USO = 3
@@ -170,6 +206,29 @@ def _registrar_acesso(
     )
 
 
+def _sessao_do_operador_vale(db: Session, usuario_id: uuid.UUID, auth_time: int) -> bool:
+    """O login tem no máximo `LOGIN_RECENTE_OPERADOR` e houve atividade nos
+    últimos `INATIVIDADE_OPERADOR`: o próprio login, ou um acesso `permitido`
+    gravado nessa janela (a consulta só olha a janela, no índice de `em`)."""
+    idade_do_login = _agora().timestamp() - auth_time
+    if idade_do_login > LOGIN_RECENTE_OPERADOR.total_seconds():
+        return False
+    if idade_do_login <= INATIVIDADE_OPERADOR.total_seconds():
+        return True
+    return (
+        db.scalar(
+            select(AcessoAdmin.id)
+            .where(
+                AcessoAdmin.usuario_id == usuario_id,
+                AcessoAdmin.resultado == "permitido",
+                AcessoAdmin.em > func.clock_timestamp() - INATIVIDADE_OPERADOR,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def obter_operador(
     request: Request,
     sessao: Annotated[SessaoAutenticada, Depends(obter_sessao_autenticada)],
@@ -184,7 +243,8 @@ def obter_operador(
     if operador is None:
         _registrar_acesso(usuario.id, None, request, "nao_operador")
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=SO_OPERADOR)
-    if _agora().timestamp() - sessao.auth_time > LOGIN_RECENTE_OPERADOR.total_seconds():
+    # Antes de gravar o acesso desta requisição: ela não renova a própria sessão.
+    if not _sessao_do_operador_vale(db, usuario.id, sessao.auth_time):
         _registrar_acesso(usuario.id, operador.id, request, "login_antigo")
         raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail=LOGIN_ANTIGO)
     _registrar_acesso(usuario.id, operador.id, request, "permitido")
@@ -358,9 +418,7 @@ def _filtro_da_busca(busca: str | None):
     if not texto:
         return None
     condicoes = [
-        _nome_normalizado(Conta.razao_social).contains(
-            texto.translate(_SEM_ACENTO_PYTHON).lower(), autoescape=True
-        ),
+        sem_acento_sql(Conta.razao_social).contains(sem_acento(texto), autoescape=True),
         Conta.id.in_(
             select(Usuario.conta_id).where(
                 Usuario.papel == "admin",
@@ -581,11 +639,34 @@ def _conflito(detalhe: str) -> HTTPException:
     return HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=detalhe)
 
 
+def _alertar(
+    tarefas: BackgroundTasks,
+    provedor: ProvedorDeEmail | None,
+    quem: OperadorAutenticado,
+    conta: Conta,
+    tipo: str,
+    motivo: str | None = None,
+    detalhe: str | None = None,
+) -> None:
+    """Alerta à equipe interna (issue #234), para chamar DEPOIS do commit da
+    ação: o envio sai depois da resposta e nunca a falha."""
+    alerta_admin.agendar(
+        tarefas,
+        provedor,
+        operador=quem.usuario,
+        conta=conta,
+        tipo=tipo,
+        motivo=motivo,
+        detalhe=detalhe,
+    )
+
+
 # --- rotas ----------------------------------------------------------------------------
 
 
 @router.get("/contas", response_model=ContaListaResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def listar_contas(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -625,6 +706,7 @@ def listar_contas(
 
 @router.get("/contas/por-uf", response_model=ContasPorUfResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def contar_contas_por_uf(
     request: Request,
     _operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
@@ -661,6 +743,7 @@ def contar_contas_por_uf(
 
 @router.get("/contas/{conta_id}", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_LEITURA_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_leitura_por_ip
 def detalhar_conta(
     request: Request,
     conta_id: uuid.UUID,
@@ -672,12 +755,15 @@ def detalhar_conta(
 
 @router.post("/contas/{conta_id}/inativar", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def inativar_conta(
     request: Request,
     conta_id: uuid.UUID,
     corpo: MotivoRequest,
+    tarefas: BackgroundTasks,
     operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     conta = _conta(db, conta_id, travar=True)
     if conta.inativada_em is not None:
@@ -688,17 +774,21 @@ def inativar_conta(
     db.commit()
     db.refresh(conta)
     logger.info("admin_conta acao=inativada conta_id=%s", conta.id)
+    _alertar(tarefas, provedor, operador, conta, "inativada", corpo.motivo)
     return _detalhe(db, conta)
 
 
 @router.post("/contas/{conta_id}/reativar", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def reativar_conta(
     request: Request,
     conta_id: uuid.UUID,
     corpo: MotivoRequest,
+    tarefas: BackgroundTasks,
     operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     conta = _conta(db, conta_id, travar=True)
     if conta.inativada_em is None:
@@ -709,17 +799,21 @@ def reativar_conta(
     db.commit()
     db.refresh(conta)
     logger.info("admin_conta acao=reativada conta_id=%s", conta.id)
+    _alertar(tarefas, provedor, operador, conta, "reativada", corpo.motivo)
     return _detalhe(db, conta)
 
 
 @router.post("/contas/{conta_id}/piloto", response_model=ContaDetalheResponse)
 @limiter.limit(LIMITE_ADMIN_ACAO_POR_USUARIO, key_func=chave_por_usuario)
+@limite_admin_acao_por_ip
 def definir_piloto(
     request: Request,
     conta_id: uuid.UUID,
     corpo: PilotoRequest,
+    tarefas: BackgroundTasks,
     operador: Annotated[OperadorAutenticado, Depends(obter_operador)],
     db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
 ) -> ContaDetalheResponse:
     conta = _conta(db, conta_id, travar=True)
     if conta.assinatura_ativa == corpo.ativo:
@@ -735,4 +829,12 @@ def definir_piloto(
     db.commit()
     db.refresh(conta)
     logger.info("admin_conta acao=piloto ativo=%s conta_id=%s", corpo.ativo, conta.id)
+    _alertar(
+        tarefas,
+        provedor,
+        operador,
+        conta,
+        "piloto_ligado" if corpo.ativo else "piloto_desligado",
+        corpo.motivo,
+    )
     return _detalhe(db, conta)

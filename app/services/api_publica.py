@@ -58,6 +58,7 @@ def situacao_da_linha(vigente: decisoes.DecisaoEmVigor | None) -> Situacao:
 
 @dataclass(frozen=True)
 class Divergencia:
+    conciliacao_id: uuid.UUID
     extrato_banco_id: uuid.UUID
     chave: str
     categoria: str
@@ -65,6 +66,10 @@ class Divergencia:
     valor: Decimal
     lado: Lado
     situacao: Situacao
+    # O valor do lançamento do sistema quando a linha tem os dois lados (o
+    # `valor` acima é o do banco): o "em aberto" do assistente (issue #223)
+    # usa a diferença, como a Visão geral do front. Fora da `DivergenciaV1`.
+    valor_sistema: Decimal | None = None
 
 
 def linhas_divergentes(
@@ -78,6 +83,7 @@ def linhas_divergentes(
     lanc_sistema = aliased(Lancamento)
     linhas = db.execute(
         select(
+            Conciliacao.id,
             Conciliacao.extrato_banco_id,
             Conciliacao.status,
             Conciliacao.lancamento_banco_id,
@@ -124,6 +130,7 @@ def linhas_divergentes(
         tem_sistema = linha.lancamento_sistema_id is not None
         resultado.append(
             Divergencia(
+                conciliacao_id=linha.id,
                 extrato_banco_id=linha.extrato_banco_id,
                 chave=chave,
                 categoria=linha.status,
@@ -135,6 +142,7 @@ def linhas_divergentes(
                 situacao=situacao_da_linha(
                     decisoes.decisao_vigente(eventos.get((linha.extrato_banco_id, chave), []))
                 ),
+                valor_sistema=linha.sistema_valor if tem_banco and tem_sistema else None,
             )
         )
     return sorted(resultado, key=lambda d: (d.data, d.valor, str(d.extrato_banco_id), d.chave))
@@ -372,6 +380,53 @@ def conciliacoes_do_mes(db: Session, empresa_id: uuid.UUID, competencia: str) ->
     return ConciliacoesV1(competencia=competencia, itens=itens)
 
 
+Ordenar = Literal["data", "valor"]
+Ordem = Literal["asc", "desc"]
+
+
+def listar_divergencias(
+    db: Session,
+    empresa_id: uuid.UUID,
+    competencia: str,
+    categoria: str | None = None,
+    situacao: str | None = None,
+    valor_minimo: Decimal | None = None,
+    valor_maximo: Decimal | None = None,
+    ordenar_por: Ordenar = "data",
+    ordem: Ordem = "asc",
+) -> list[Divergencia]:
+    """As divergências do mês depois dos filtros e da ordenação, sem paginar.
+    `valor_minimo` e `valor_maximo` valem sobre o valor absoluto (entrada e
+    saída entram igual). Por data (padrão) a ordem é a de `linhas_divergentes`;
+    por valor, a do valor absoluto, desempatada pela data, extrato e chave."""
+    pares = fechamentos.pares_do_mes(db, empresa_id, competencia)
+    linhas = [
+        d
+        for d in linhas_divergentes(db, empresa_id, pares)
+        if (categoria is None or d.categoria == categoria)
+        and (situacao is None or d.situacao == situacao)
+        and (valor_minimo is None or abs(d.valor) >= valor_minimo)
+        and (valor_maximo is None or abs(d.valor) <= valor_maximo)
+    ]
+    if ordenar_por == "valor":
+        linhas.sort(key=lambda d: (abs(d.valor), d.data, str(d.extrato_banco_id), d.chave))
+    if ordem == "desc":
+        linhas.reverse()
+    return linhas
+
+
+def divergencia_v1(divergencia: Divergencia) -> DivergenciaV1:
+    return DivergenciaV1(
+        extrato_banco_id=divergencia.extrato_banco_id,
+        chave=divergencia.chave,
+        categoria=divergencia.categoria,
+        data=divergencia.data,
+        valor=divergencia.valor,
+        lado=divergencia.lado,
+        situacao=divergencia.situacao,
+    )
+
+
 def divergencias_do_mes(
     db: Session,
     empresa_id: uuid.UUID,
@@ -381,19 +436,13 @@ def divergencias_do_mes(
     limit: int = LIMITE_PADRAO,
     offset: int = 0,
 ) -> DivergenciasV1:
-    pares = fechamentos.pares_do_mes(db, empresa_id, competencia)
-    linhas = [
-        d
-        for d in linhas_divergentes(db, empresa_id, pares)
-        if (categoria is None or d.categoria == categoria)
-        and (situacao is None or d.situacao == situacao)
-    ]
+    linhas = listar_divergencias(db, empresa_id, competencia, categoria, situacao)
     return DivergenciasV1(
         competencia=competencia,
         total=len(linhas),
         limit=limit,
         offset=offset,
-        itens=[DivergenciaV1(**vars(d)) for d in linhas[offset : offset + limit]],
+        itens=[divergencia_v1(d) for d in linhas[offset : offset + limit]],
     )
 
 

@@ -12,6 +12,9 @@ import os
 import subprocess
 import sys
 
+import pytest
+
+from app.core.logging import SemQueryNoAcesso, configurar_logs
 from app.services import normalizacao
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -94,3 +97,81 @@ def test_falha_inesperada_loga_a_classe_e_nao_a_mensagem(criar_extrato, caplog, 
     assert "classe=RuntimeError" in caplog.text
     assert DADO_PESSOAL not in caplog.text
     assert all(registro.exc_info is None for registro in caplog.records)
+
+
+# --- query string fora do log de acesso (issue #234) ----------------------------------
+
+ACESSO = '%s - "%s %s HTTP/%s" %d'
+
+
+def _registro_de_acesso(caminho, *, args=None) -> logging.LogRecord:
+    return logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg=ACESSO,
+        args=args if args is not None else ("127.0.0.1:5000", "GET", caminho, "1.1", 200),
+        exc_info=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("caminho", "esperado"),
+    [
+        ("/admin/contas?busca=teste%40exemplo.com", "/admin/contas"),
+        ("/admin/contas?busca=12.345.678%2F0001-90&limit=20", "/admin/contas"),
+        ("/me?", "/me"),
+        ("/admin/contas", "/admin/contas"),
+        ("/", "/"),
+        ("/extratos/abc%3Fdef", "/extratos/abc%3Fdef"),  # "?" do caminho vem codificado
+    ],
+)
+def test_filtro_tira_a_query_e_mantem_o_resto_da_linha(caminho, esperado):
+    registro = _registro_de_acesso(caminho)
+
+    assert SemQueryNoAcesso().filter(registro) is True
+
+    assert registro.getMessage() == f'127.0.0.1:5000 - "GET {esperado} HTTP/1.1" 200'
+    assert registro.args[:2] == ("127.0.0.1:5000", "GET")
+    assert registro.args[3:] == ("1.1", 200)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [(), ("so-um",), ("a", "b"), ("a", "b", 3, "d", 5), {"caminho": "/x?y=1"}, None],
+    ids=["vazio", "um", "dois", "caminho_nao_texto", "dict", "sem_args"],
+)
+def test_filtro_nao_quebra_com_args_inesperados(args):
+    registro = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 0, "msg", (), None)
+    registro.args = args  # direto: o construtor do LogRecord já recusa um dict assim
+    antes = registro.args
+
+    assert SemQueryNoAcesso().filter(registro) is True
+
+    assert registro.args == antes
+
+
+def test_configurar_logs_instala_o_filtro_uma_vez_so():
+    acesso = logging.getLogger("uvicorn.access")
+    configurar_logs()
+    configurar_logs()
+
+    assert [f for f in acesso.filters if isinstance(f, SemQueryNoAcesso)] != []
+    assert len([f for f in acesso.filters if isinstance(f, SemQueryNoAcesso)]) == 1
+
+
+def test_linha_de_acesso_sem_a_busca_no_stderr():
+    """Como o uvicorn: logger `uvicorn.access` com o formato dele, depois de
+    importar `main`."""
+    processo = _rodar_com_main(
+        "log = logging.getLogger('uvicorn.access')\n"
+        "log.setLevel('INFO')\n"
+        "log.addHandler(logging.StreamHandler())\n"  # o uvicorn real instala o dele
+        "log.info('%s - \"%s %s HTTP/%s\" %d', '1.2.3.4:5', 'GET', "
+        "'/admin/contas?busca=pessoa%40exemplo.com', '1.1', 401)"
+    )
+
+    assert processo.returncode == 0, processo.stderr
+    assert "pessoa" not in processo.stderr + processo.stdout
+    assert '1.2.3.4:5 - "GET /admin/contas HTTP/1.1" 401' in processo.stderr + processo.stdout

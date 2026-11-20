@@ -149,7 +149,13 @@ def test_os_tres_papeis_perguntam_e_recebem_os_links(db_session, assistente, usu
     assert resposta.json() == {
         "resposta": "1. Clique em Enviar extrato.\n2. Escolha o arquivo.",
         "respondida": True,
-        "links": [{"titulo": "Enviar um extrato", "caminho": "/ajuda/extratos#enviar-extrato"}],
+        "links": [
+            {
+                "titulo": "Enviar um extrato",
+                "caminho": "/ajuda/extratos#enviar-extrato",
+                "tipo": "ajuda",
+            }
+        ],
     }
     (recebida,) = provedor.recebidas
     assert recebida.pergunta == "Como envio um extrato?"
@@ -174,9 +180,17 @@ def test_citacao_inexistente_e_descartada_e_links_limitados_a_tres(db_session, a
     links = _perguntar(headers).json()["links"]
 
     assert links == [
-        {"titulo": "Conciliar dois extratos", "caminho": "/ajuda/conciliacao#conciliar"},
-        {"titulo": "Enviar um extrato", "caminho": "/ajuda/extratos#enviar-extrato"},
-        {"titulo": "Fechar o mês", "caminho": "/ajuda/fechamento#fechar-mes"},
+        {
+            "titulo": "Conciliar dois extratos",
+            "caminho": "/ajuda/conciliacao#conciliar",
+            "tipo": "ajuda",
+        },
+        {
+            "titulo": "Enviar um extrato",
+            "caminho": "/ajuda/extratos#enviar-extrato",
+            "tipo": "ajuda",
+        },
+        {"titulo": "Fechar o mês", "caminho": "/ajuda/fechamento#fechar-mes", "tipo": "ajuda"},
     ]
 
 
