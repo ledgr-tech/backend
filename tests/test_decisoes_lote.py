@@ -758,6 +758,178 @@ def test_listagem_com_pagina_cheia_de_lotes_tem_numero_fixo_de_consultas(db_sess
     assert pequena == cheia
 
 
+# --- aprovar o lote todo (POST /justificativas/lote com lote_id) ------------------------
+
+
+def test_aprovar_por_lote_id_pega_so_as_pendentes_do_lote(db_session, cenario):
+    c = cenario()
+    banco = c.par()
+    lote_id = c.justificar(banco, [c.chave(banco, v) for v in ("20.00", "30.00", "40.00")]).json()[
+        "lote_id"
+    ]
+    assert c.decidir("analista", banco, "99.00", "justificada", "fora do lote").status_code == 200
+    assert c.decidir("gestor", banco, "30.00", "justificativa_aprovada").status_code == 200
+    assert c.decidir("analista", banco, "40.00", "justificada", "de novo").status_code == 200
+
+    resposta = c.aprovar_lote(lote_id=lote_id, extrato_banco_id=str(banco.id))
+
+    assert resposta.status_code == 200
+    assert resposta.json() == {"processadas": 1, "ignoradas": 0}
+    vinte = c.item(banco, "20.00")["decisao"]
+    assert (vinte["situacao"], vinte["aprovada_por"], vinte["lote_id"]) == (
+        "aprovada",
+        "Gestor da Silva",
+        lote_id,
+    )
+    assert c.item(banco, "30.00")["decisao"]["situacao"] == "aprovada"
+    assert c.item(banco, "40.00")["decisao"]["situacao"] == "pendente"
+    assert c.item(banco, "99.00")["decisao"]["situacao"] == "pendente"
+    # A aprovação não leva o lote.
+    aprovacoes = [e for e in _eventos(db_session, banco) if e.tipo == "justificativa_aprovada"]
+    assert {e.lote_id for e in aprovacoes} == {None}
+
+
+def test_rejeitar_por_lote_id(db_session, cenario):
+    c = cenario()
+    banco = c.par()
+    lote_id = c.justificar(banco, [c.chave(banco, v) for v in ("20.00", "30.00")]).json()["lote_id"]
+
+    resposta = client.post(
+        "/justificativas/lote",
+        headers=c.headers["admin"],
+        json={
+            "acao": "rejeitar",
+            "motivo": "faltou o comprovante",
+            "lote_id": lote_id,
+            "extrato_banco_id": str(banco.id),
+        },
+    )
+
+    assert resposta.json() == {"processadas": 2, "ignoradas": 0}
+    assert c.item(banco, "20.00")["decisao"] is None
+    assert c.item(banco, "30.00")["decisao"] is None
+
+
+def test_aprovar_uma_linha_do_lote_devolve_o_lote_dela(db_session, cenario):
+    c = cenario()
+    banco = c.par()
+    lote_id = c.justificar(banco, [c.chave(banco, v) for v in ("20.00", "30.00")]).json()["lote_id"]
+
+    resposta = c.decidir("gestor", banco, "20.00", "justificativa_aprovada")
+
+    decisao = resposta.json()
+    assert (decisao["situacao"], decisao["lote_id"], decisao["lote_tamanho"]) == (
+        "aprovada",
+        lote_id,
+        2,
+    )
+
+
+def test_aprovar_por_lote_id_de_outro_extrato_ou_outra_empresa_nao_processa(db_session, cenario):
+    c = cenario()
+    banco = c.par()
+    outro_banco = c.par()
+    lote_id = c.justificar(banco, [c.chave(banco, "20.00")]).json()["lote_id"]
+    outra_conta = cenario()
+    banco_da_outra = outra_conta.par()
+
+    respostas = [
+        c.aprovar_lote(lote_id=lote_id, extrato_banco_id=str(outro_banco.id)),
+        c.aprovar_lote(lote_id=lote_id, extrato_banco_id=str(uuid.uuid4())),
+        c.aprovar_lote(lote_id=str(uuid.uuid4()), extrato_banco_id=str(banco.id)),
+        outra_conta.aprovar_lote(lote_id=lote_id, extrato_banco_id=str(banco.id)),
+        outra_conta.aprovar_lote(lote_id=lote_id, extrato_banco_id=str(banco_da_outra.id)),
+    ]
+
+    for resposta in respostas:
+        assert resposta.status_code == 200
+        assert resposta.json() == {"processadas": 0, "ignoradas": 0}
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "pendente"
+
+
+@pytest.mark.parametrize(
+    "corpo",
+    [
+        {"lote_id": "L", "extrato_banco_id": "B", "competencia": "2026-09"},
+        {"lote_id": "L", "extrato_banco_id": "B", "itens": "ITENS"},
+        {"lote_id": "L", "extrato_banco_id": "B", "competencia": "2026-09", "itens": "ITENS"},
+        {"lote_id": "L"},
+        {"extrato_banco_id": "B"},
+        {"extrato_banco_id": "B", "competencia": "2026-09"},
+        {"lote_id": "nao-e-uuid", "extrato_banco_id": "B"},
+        {},
+    ],
+    ids=[
+        "com_competencia",
+        "com_itens",
+        "as_tres",
+        "lote_sem_extrato",
+        "extrato_sem_lote",
+        "extrato_com_competencia",
+        "lote_invalido",
+        "nenhuma",
+    ],
+)
+def test_aprovar_com_formas_juntas_ou_nenhuma_e_422(db_session, cenario, corpo):
+    c = cenario()
+    banco = c.par()
+    lote_id = c.justificar(banco, [c.chave(banco, "20.00")]).json()["lote_id"]
+    trocas = {
+        "L": lote_id,
+        "B": str(banco.id),
+        "ITENS": [{"extrato_banco_id": str(banco.id), "chave": c.chave(banco, "20.00")}],
+    }
+    corpo = {k: trocas.get(v, v) if isinstance(v, str) else v for k, v in corpo.items()}
+
+    resposta = c.aprovar_lote(**corpo)
+
+    assert resposta.status_code == 422
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "pendente"
+
+
+def test_analista_nao_aprova_por_lote_id(db_session, cenario):
+    c = cenario()
+    banco = c.par()
+    lote_id = c.justificar(banco, [c.chave(banco, "20.00")]).json()["lote_id"]
+
+    resposta = c.aprovar_lote("analista", lote_id=lote_id, extrato_banco_id=str(banco.id))
+
+    assert resposta.status_code == 403
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "pendente"
+
+
+def test_aprovar_por_lote_id_em_mes_fechado_e_409(db_session, cenario):
+    c = cenario()
+    banco = c.par()
+    chave = c.chave(banco, "20.00")
+    extrato_sistema_id = c.item(banco, "20.00")["extrato_sistema_id"]
+    assert c.fechar().status_code == 201
+    # Uma justificativa de lote pendente gravada direto: a API não justifica em mês fechado.
+    lote_id = uuid.uuid4()
+    usuario = c.usuarios["analista"]
+    db_session.add(
+        DecisaoLinha(
+            empresa_id=c.empresa_id,
+            extrato_banco_id=banco.id,
+            chave=chave,
+            tipo="justificada",
+            texto="direto no banco",
+            usuario_id=usuario.id,
+            autor_nome=usuario.nome,
+            rodada=1,
+            extrato_sistema_id=extrato_sistema_id,
+            lote_id=lote_id,
+        )
+    )
+    db_session.commit()
+
+    resposta = c.aprovar_lote(lote_id=str(lote_id), extrato_banco_id=str(banco.id))
+
+    assert resposta.status_code == 409
+    assert resposta.json() == MES_FECHADO
+    assert c.item(banco, "20.00")["decisao"]["situacao"] == "pendente"
+
+
 # --- onde os campos novos não aparecem --------------------------------------------------
 
 
@@ -788,6 +960,7 @@ def test_campos_novos_so_nas_rotas_do_app_que_os_usam(db_session, cenario):
         "DecisaoResponse",
         "DecisaoEmVigorResponse",
         "DecisaoLoteResponse",
+        "LoteRequest",
     }
     alcancam = _alcancam(esquemas, com_o_campo("lote_id") | com_o_campo("lote_tamanho"))
     operacoes = {
@@ -800,6 +973,7 @@ def test_campos_novos_so_nas_rotas_do_app_que_os_usam(db_session, cenario):
         "GET /conciliacoes/{extrato_id}",
         "POST /conciliacoes/{extrato_id}/decisoes",
         "POST /conciliacoes/{extrato_id}/decisoes/lote",
+        "POST /justificativas/lote",
     }
     # A /v1 tem OpenAPI próprio: nenhum dos dois campos.
     v1 = client.get("/v1/openapi.json")
