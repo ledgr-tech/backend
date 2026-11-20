@@ -47,3 +47,34 @@ def test_outra_tabela_nova_continua_tendo_de_nascer_vazia():
     depois = _inventario(empresas=1, contas=1, tabela_nova=1)
 
     assert _resultado(antes, depois) is False
+
+
+# --- issue #215: colunas de remoção em `empresas` ---------------------------------------
+
+REMOVIDAS = "`empresas.removida_em` existe e nenhuma empresa nasceu removida (issue #215)"
+
+
+def _removidas(antes: Inventario, depois: Inventario) -> bool:
+    (conferencia,) = [c for c in conferir(antes, depois, ["head"]) if c.nome == REMOVIDAS]
+    return conferencia.passou
+
+
+def _com_removidas(removidas: int | None, **contagens: int) -> Inventario:
+    inventario = _inventario(**contagens)
+    inventario.empresas_removidas = removidas
+    return inventario
+
+
+def test_dump_anterior_a_migracao_ganha_a_coluna_sem_empresa_removida():
+    assert _removidas(_com_removidas(None, empresas=3), _com_removidas(0, empresas=3)) is True
+
+
+def test_dump_posterior_a_migracao_mantem_as_removidas():
+    assert _removidas(_com_removidas(2, empresas=5), _com_removidas(2, empresas=5)) is True
+
+
+@pytest.mark.parametrize(("antes", "depois"), [(None, 1), (0, 3), (2, 1), (1, None), (None, None)])
+def test_empresa_que_nasce_removida_ou_coluna_ausente_reprova(antes, depois):
+    assert (
+        _removidas(_com_removidas(antes, empresas=5), _com_removidas(depois, empresas=5)) is False
+    )

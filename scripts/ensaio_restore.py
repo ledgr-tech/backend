@@ -60,6 +60,10 @@ TOLERANCIA_DIAS_MAXIMA = 5
 # linhas: `contas` nasce com uma conta por empresa (issue #133, ADR-019). As
 # outras tabelas novas continuam tendo de nascer vazias.
 TABELAS_PREENCHIDAS_PELA_MIGRACAO = {"contas": "empresas"}
+
+CONFERENCIA_EMPRESAS_REMOVIDAS = (
+    "`empresas.removida_em` existe e nenhuma empresa nasceu removida (issue #215)"
+)
 SEGUNDOS_ESPERA_BANCO = 90
 CAMINHO_DUMP_NO_CONTAINER = "/tmp/ensaio.dump"
 
@@ -207,6 +211,9 @@ class Inventario:
     column_default: str
     acima_do_maximo: int | None
     constraint_presente: bool
+    # Empresas com `removida_em` (issue #215); `None` quando a coluna ainda não
+    # existe (dump anterior à migração, antes de ela rodar).
+    empresas_removidas: int | None = None
 
 
 def coletar_inventario(container: str) -> Inventario:
@@ -267,6 +274,18 @@ def coletar_inventario(container: str) -> Inventario:
         )
         != "0"
     )
+    empresas_removidas: int | None = None
+    if (
+        _escalar(
+            container,
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' "
+            "AND table_name = 'empresas' AND column_name = 'removida_em'",
+        )
+        != "0"
+    ):
+        empresas_removidas = int(
+            _escalar(container, "SELECT count(*) FROM empresas WHERE removida_em IS NOT NULL")
+        )
     return Inventario(
         versoes_alembic=versoes,
         contagens=contagens,
@@ -274,6 +293,7 @@ def coletar_inventario(container: str) -> Inventario:
         column_default=column_default,
         acima_do_maximo=acima_do_maximo,
         constraint_presente=constraint_presente,
+        empresas_removidas=empresas_removidas,
     )
 
 
@@ -382,6 +402,20 @@ def conferir(antes: Inventario, depois: Inventario, heads: list[str]) -> list[Co
             f"constraint `{CONSTRAINT_TOLERANCIA}` presente",
             depois.constraint_presente,
             "presente" if depois.constraint_presente else "ausente",
+        )
+    )
+    # Issue #215: as empresas que já existiam seguem ativas (a migração só
+    # acrescenta colunas nulas), e as removidas de um dump novo seguem removidas.
+    antes_removidas = antes.empresas_removidas or 0
+    conferencias.append(
+        Conferencia(
+            CONFERENCIA_EMPRESAS_REMOVIDAS,
+            depois.empresas_removidas is not None and depois.empresas_removidas == antes_removidas,
+            (
+                "coluna `empresas.removida_em` ausente"
+                if depois.empresas_removidas is None
+                else f"{antes_removidas} → {depois.empresas_removidas} empresa(s) removida(s)"
+            ),
         )
     )
     return conferencias
