@@ -17,6 +17,7 @@ from app.api.convites import router as convites_router
 from app.api.documentacao_publica import registrar_acesso
 from app.api.documentacao_publica import router as documentacao_publica_router
 from app.api.empresa import router as empresa_router
+from app.api.empresas import ConflitoDeEmpresa, tratar_conflito
 from app.api.empresas import router as empresas_router
 from app.api.equipe import router as equipe_router
 from app.api.execucoes import router as execucoes_router
@@ -76,6 +77,7 @@ app.middleware("http")(registrar_acesso)
 app.add_exception_handler(RateLimitExceeded, limite_excedido)
 app.add_exception_handler(RequestValidationError, tratar_validacao)
 app.add_exception_handler(conta_inativa.ContaInativaError, conta_inativa.tratar)
+app.add_exception_handler(ConflitoDeEmpresa, tratar_conflito)
 
 app.include_router(auth_router)
 app.include_router(senha_router)

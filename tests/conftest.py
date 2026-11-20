@@ -556,8 +556,13 @@ def criar_conta(db_session):
     db_session.rollback()
     for conta_id in contas_criadas:
         # Empresas criadas pela API (POST /empresas), fora de `criar_empresa`.
+        # Inclusive as removidas (issue #215): o filtro de sessão as esconderia.
         for empresa_id in list(
-            db_session.scalars(select(Empresa.id).where(Empresa.conta_id == conta_id))
+            db_session.scalars(
+                select(Empresa.id)
+                .where(Empresa.conta_id == conta_id)
+                .execution_options(incluir_removidas=True)
+            )
         ):
             _apagar_empresa(db_session, empresa_id)
         db_session.query(DecisaoLinha).filter(
@@ -639,7 +644,11 @@ def apagar_contas_por_cnpj(db_session, cnpjs: list[str]) -> None:
     passam pelas fábricas. Sem commit."""
     conta_ids = list(db_session.scalars(select(Conta.id).where(Conta.cnpj.in_(cnpjs))))
     empresa_ids = list(
-        db_session.scalars(select(Empresa.id).where(Empresa.conta_id.in_(conta_ids)))
+        db_session.scalars(
+            select(Empresa.id)
+            .where(Empresa.conta_id.in_(conta_ids))
+            .execution_options(incluir_removidas=True)
+        )
     )
     for empresa_id in empresa_ids:
         _apagar_empresa(db_session, empresa_id)

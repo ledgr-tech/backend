@@ -467,6 +467,54 @@ def mensagem_conta_desativada(
     )
 
 
+def mensagem_empresa_removida(
+    *,
+    para: str,
+    nome: str,
+    razao_social: str,
+    removida_por: str,
+    restaurar_ate: str,
+    chave_idempotencia: str | None = None,
+) -> MensagemEmail:
+    """Aviso de que uma empresa cliente foi removida da conta (issue #215),
+    para o admin da conta e para quem removeu. `restaurar_ate` já vem como data
+    legível (dd/mm/aaaa): até esse dia dá para restaurar, e depois os dados da
+    empresa são apagados de vez."""
+    texto = (
+        f"Olá, {nome}.\n\n"
+        f"A empresa {razao_social} foi removida da conta por {removida_por}.\n\n"
+        f"Ela some das listas na hora, e os dados dela ficam guardados até {restaurar_ate}. "
+        "Até esse dia, o admin ou um gestor pode restaurá-la na tela Empresas. Depois "
+        "dele, os dados são apagados de vez e não dá mais para recuperá-los.\n\n"
+        "Se não foi uma remoção esperada, restaure a empresa ou avise o nosso suporte.\n\n"
+        "Equipe Ledgr"
+    )
+    corpo_html = (
+        _p(f"Olá, {escape(nome)}.")
+        + _ficha(("Empresa", razao_social), ("Removida por", removida_por))
+        + _p(
+            "Ela some das listas na hora, e os dados dela ficam guardados até "
+            f"<strong>{escape(restaurar_ate)}</strong>. Até esse dia, o admin ou um gestor "
+            "pode restaurá-la na tela Empresas. Depois dele, os dados são apagados de vez e "
+            "não dá mais para recuperá-los."
+        )
+        + _aviso("Se não foi uma remoção esperada, restaure a empresa ou avise o nosso suporte.")
+    )
+    return MensagemEmail(
+        para=para,
+        assunto="Uma empresa foi removida da sua conta na Ledgr",
+        texto=texto,
+        html=_pagina(
+            olho="Empresas · removida",
+            titulo="Empresa",
+            destaque="removida.",
+            mascote="neutro",
+            corpo=corpo_html,
+        ),
+        chave_idempotencia=chave_idempotencia,
+    )
+
+
 def mascarar_email(email: str) -> str:
     """`nome@dominio.com` vira `n***@dominio.com`: o aviso ao e-mail atual diz
     para onde a troca vai sem entregar o endereço inteiro (issue #149)."""
