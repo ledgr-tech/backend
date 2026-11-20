@@ -230,8 +230,9 @@ def test_resumo_do_grupo_sai_de_uma_consulta_agregada_por_pagina(conta, lote_de_
     assert any(i["grupo"] for i in itens_pequena)
     assert sum(bool(i["grupo"]) for i in itens_cheia) == 11
     # não cresce com a página: o resumo é uma consulta só, não uma por linha
-    # (9 da listagem sem grupo, ver tests/test_conciliacoes.py, mais a dos grupos)
-    assert selects_pequena == selects_cheia <= 10
+    # (10 da listagem sem grupo, ver tests/test_conciliacoes.py, mais a dos
+    # grupos; a 10ª é o saldo do sistema da issue #238)
+    assert selects_pequena == selects_cheia <= 11
 
 
 # --- decisão

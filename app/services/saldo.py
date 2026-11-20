@@ -16,17 +16,29 @@ Consultas: `saldo_do_extrato` faz uma só (linhas não lidas e soma juntas), e
 nenhuma para extrato sem saldo. Para uma página de extratos,
 `somar_lancamentos_ate_saldo_data` soma todos numa consulta agrupada, nunca
 uma por extrato.
+
+Saldo do sistema na comparação (issue #238): `saldo_do_extrato_do_sistema`
+dá o saldo do extrato do sistema de um par, com as mesmas regras, numa
+consulta só (o extrato, as linhas não lidas e a soma juntos), e só quando o
+par já foi conciliado (há execução dele em `execucoes_conciliacao`): um
+extrato do sistema de outra empresa, inexistente ou nunca conciliado com
+aquele extrato do banco dá os três campos nulos. `diferenca_dos_saldos`,
+sem banco, é o saldo final do banco menos o do sistema, calculado só quando
+os dois existem e têm a mesma `saldo_data`; senão, `None` e o motivo, nesta
+ordem: "sem_saldo_banco", "sem_saldo_sistema", "datas_diferentes". O motivo é
+contrato com o front, que escreve o texto: não muda.
 """
 
 import uuid
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Extrato, Lancamento, LinhaInvalida
+from app.models import ExecucaoConciliacao, Extrato, Lancamento, LinhaInvalida
 
 
 @dataclass(frozen=True)
@@ -37,6 +49,14 @@ class Saldo:
 
 
 SEM_SALDO = Saldo(saldo_inicial=None, saldo_final=None, saldo_data=None)
+
+MotivoSemDiferenca = Literal["sem_saldo_banco", "sem_saldo_sistema", "datas_diferentes"]
+
+
+@dataclass(frozen=True)
+class DiferencaDeSaldo:
+    valor: Decimal | None
+    motivo: MotivoSemDiferenca | None
 
 
 def montar_saldo(
@@ -92,3 +112,63 @@ def saldo_do_extrato(db: Session, extrato: Extrato) -> Saldo:
     )
     contagem, total = db.execute(select(linhas_nao_lidas, soma)).one()
     return montar_saldo(extrato.saldo_final, extrato.saldo_data, contagem, total)
+
+
+def saldo_do_extrato_do_sistema(
+    db: Session,
+    empresa_id: uuid.UUID,
+    extrato_banco_id: uuid.UUID,
+    extrato_sistema_id: uuid.UUID | None,
+) -> Saldo:
+    """Saldo do extrato do sistema do par (issue #238): nenhuma consulta sem
+    extrato do sistema, senão uma. Nulo quando o par nunca foi conciliado
+    (regra no docstring do módulo)."""
+    if extrato_sistema_id is None:
+        return SEM_SALDO
+    conciliado = (
+        select(ExecucaoConciliacao.id)
+        .where(
+            ExecucaoConciliacao.empresa_id == empresa_id,
+            ExecucaoConciliacao.extrato_banco_id == extrato_banco_id,
+            ExecucaoConciliacao.extrato_sistema_id == extrato_sistema_id,
+        )
+        .exists()
+    )
+    linhas_nao_lidas = (
+        select(func.count())
+        .where(LinhaInvalida.extrato_id == Extrato.id)
+        .correlate(Extrato)
+        .scalar_subquery()
+    )
+    soma = (
+        select(func.coalesce(func.sum(Lancamento.valor), 0))
+        .where(
+            Lancamento.empresa_id == Extrato.empresa_id,
+            Lancamento.extrato_id == Extrato.id,
+            Lancamento.data <= Extrato.saldo_data,
+        )
+        .correlate(Extrato)
+        .scalar_subquery()
+    )
+    linha = db.execute(
+        select(Extrato.saldo_final, Extrato.saldo_data, linhas_nao_lidas, soma).where(
+            Extrato.id == extrato_sistema_id,
+            Extrato.empresa_id == empresa_id,
+            conciliado,
+        )
+    ).one_or_none()
+    if linha is None:
+        return SEM_SALDO
+    return montar_saldo(*linha)
+
+
+def diferenca_dos_saldos(banco: Saldo, sistema: Saldo) -> DiferencaDeSaldo:
+    """Saldo final do banco menos o do sistema, ou `None` e o motivo (regra
+    e ordem dos motivos no docstring do módulo). Não consulta o banco."""
+    if banco.saldo_final is None:
+        return DiferencaDeSaldo(valor=None, motivo="sem_saldo_banco")
+    if sistema.saldo_final is None:
+        return DiferencaDeSaldo(valor=None, motivo="sem_saldo_sistema")
+    if banco.saldo_data != sistema.saldo_data:
+        return DiferencaDeSaldo(valor=None, motivo="datas_diferentes")
+    return DiferencaDeSaldo(valor=banco.saldo_final - sistema.saldo_final, motivo=None)

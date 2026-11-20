@@ -444,6 +444,10 @@ def test_get_extrato_sem_conciliacao_devolve_lista_vazia(
         "saldo_inicial": None,
         "saldo_final": None,
         "saldo_data": None,
+        # Issue #238: sem conciliação, o saldo do sistema vem nulo.
+        "saldo_sistema": {"saldo_inicial": None, "saldo_final": None, "saldo_data": None},
+        "diferenca_saldo_final": None,
+        "diferenca_saldo_motivo": "sem_saldo_banco",
         "total": 0,
         "aguardando_aprovacao": 0,
         "limit": 100,
@@ -603,9 +607,10 @@ def test_get_emite_poucos_selects_e_nao_cresce_com_o_tamanho_da_pagina(
     # usuário do token (issue #75, uma busca por chave primária), empresa ativa
     # (issue #133, outra busca por chave primária), validação do extrato, query
     # dos itens (com join) e contagem; e, desde a issue #132, a rodada atual,
-    # as linhas divergentes dela e os eventos, para `aguardando_aprovacao`:
-    # sem N+1
-    assert pequena <= 9 and cheia <= 9
+    # as linhas divergentes dela e os eventos, para `aguardando_aprovacao`;
+    # e, desde a issue #238, o saldo do extrato do sistema (a rodada é a
+    # mesma): sem N+1
+    assert pequena <= 10 and cheia <= 10
     assert pequena == cheia
 
 
