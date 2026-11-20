@@ -164,9 +164,11 @@ class _Marcador:
         return self._marcador("DATA", self.datas, DataMarcada(dia, mes, ano))
 
     def _restaurar(self, texto: str) -> str:
-        for indice, final in enumerate(self._reservados):
-            texto = texto.replace(chr(_PRIMEIRO_RESERVADO + indice), final)
-        return texto
+        # Uma passada só: um `replace` por reservado percorria o texto inteiro a
+        # cada um (quadrático em quem tem muitos valores).
+        return texto.translate(
+            {_PRIMEIRO_RESERVADO + indice: final for indice, final in enumerate(self._reservados)}
+        )
 
     def marcar(self, texto: str) -> str:
         texto = mascarar_identificadores(texto)
