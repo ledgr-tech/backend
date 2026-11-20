@@ -16,8 +16,17 @@ from app.core.config import settings
 # conecta, proxy do Railway com Public Access desligado, etc.) fica pendurada
 # no timeout de TCP do SO — minutos, não segundos — em vez de falhar rápido.
 # Não muda nada pra quem já conecta normalmente (CI, Railway acessível).
+#
+# hide_parameters (issue #34): sem ele, a mensagem de todo erro do SQLAlchemy
+# termina com `[parameters: ...]`, os valores da consulta (descrição de
+# lançamento, e-mail, nome), e qualquer `str(exc)` leva o dado. O DETAIL do
+# Postgres continua na mensagem; quem garante o log sem ele é a regra da #34 e
+# o filtro do `uvicorn.error` (app/core/logging.py).
 engine = create_engine(
-    settings.database_url, pool_pre_ping=True, connect_args={"connect_timeout": 10}
+    settings.database_url,
+    pool_pre_ping=True,
+    hide_parameters=True,
+    connect_args={"connect_timeout": 10},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
