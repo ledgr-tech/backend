@@ -3,7 +3,10 @@
 O nome do arquivo ficou do tempo em que a empresa era o tenant. Desde a issue
 #133 (ADR-019), o tenant é a CONTA, e este script exclui a conta inteira: os
 usuários, os convites, todas as empresas clientes dela e os dados de cada uma.
-Excluir uma empresa cliente sozinha fica para a issue #138.
+Uma empresa cliente sozinha não passa por aqui: quem a remove é a conta, pelo
+`DELETE /empresas/{id}` (issue #215), e os dados dela saem 30 dias depois por
+scripts/apagar_empresas_removidas.py. O que sai de cada tabela é a lógica de
+app/services/exclusao.py, a mesma dos dois scripts.
 
 Não há rota para isto: a pessoa desativa a própria conta pelo `DELETE /me`,
 e a exclusão dos dados é um processo interno, feito pelo time depois de
@@ -60,7 +63,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-from sqlalchemy import ColumnElement, Engine, create_engine, delete, func, select
+from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -68,109 +71,14 @@ from app.core.banco_local import BancoNaoLocal, exigir_banco_local
 from app.core.cnpj import normalizar as normalizar_cnpj
 from app.core.config import settings
 from app.core.plano import STATUS_EM_ANDAMENTO
-from app.models import (
-    AssinaturaStripe,
-    Base,
-    ChaveApi,
-    CodigoOAuth,
-    Conciliacao,
-    ConexaoMcp,
-    Configuracao,
-    Conta,
-    Convite,
-    CupomEnviado,
-    DecisaoLinha,
-    Empresa,
-    EmpresaFavorita,
-    EventoConta,
-    ExecucaoConciliacao,
-    ExplicacaoDivergencia,
-    Extrato,
-    Fechamento,
-    Lancamento,
-    LinhaInvalida,
-    LinkRelatorio,
-    OperadorLedgr,
-    PagamentoStripe,
-    PedidoAutorizacaoOAuth,
-    RegistroExclusao,
-    TokenEmail,
-    TokenOAuth,
-    UsoAssistente,
-    Usuario,
-)
+from app.models import Conta, Empresa, Extrato, RegistroExclusao, Usuario
+from app.services import exclusao as servico
 from app.services.arquivo_original import (
     Armazenamento,
     armazenamento_do_ambiente,
     prefixo_da_conta,
 )
-
-
-def _empresas_da_conta(conta_id: uuid.UUID):
-    return select(Empresa.id).where(Empresa.conta_id == conta_id)
-
-
-def _extratos_da_conta(conta_id: uuid.UUID):
-    return select(Extrato.id).where(Extrato.empresa_id.in_(_empresas_da_conta(conta_id)))
-
-
-def _usuarios_da_conta(conta_id: uuid.UUID):
-    return select(Usuario.id).where(Usuario.conta_id == conta_id)
-
-
-def _conexoes_da_conta(conta_id: uuid.UUID):
-    return select(ConexaoMcp.id).where(ConexaoMcp.conta_id == conta_id)
-
-
-def _da_conta(coluna_empresa_id):
-    """Condição das tabelas por `empresa_id`: as linhas de todas as empresas da conta."""
-    return lambda c: coluna_empresa_id.in_(_empresas_da_conta(c))
-
-
-# Ordem das FKs, conferida nos models: quem aponta para uma tabela sai antes
-# dela. As tabelas por `empresa_id` saem pelas empresas da conta;
-# `linhas_invalidas` e `tokens_email` saem pelo extrato e pelo usuário;
-# `tokens_oauth` e `codigos_oauth`, pela conexão MCP (issue #136);
-# `empresas_favoritas`, pelo `conta_id` dela (issue #157), antes de usuários e
-# empresas; `links_relatorio` (issue #165), antes dos fechamentos;
-# `cupons_enviados` (issue #169), `eventos_conta` e `operadores_ledgr` (issue
-# #156), antes dos usuários;
-# `assinaturas_stripe` e `pagamentos_stripe` (issues #166 e #167), antes da
-# conta. Apagar a conta não cancela nada na Stripe: o script recusa a conta com
-# assinatura em andamento. O
-# `acessos_admin` fica: não tem FK nem `conta_id`, é o registro de quem do
-# Ledgr consultou a conta. Os `clientes_oauth` ficam: não são de nenhuma conta.
-# tests/test_excluir_empresa.py confere a ordem e que nenhuma tabela ligada à
-# conta ou às empresas dela ficou de fora.
-ETAPAS: tuple[tuple[type[Base], Callable[[uuid.UUID], ColumnElement[bool]]], ...] = (
-    (ExplicacaoDivergencia, _da_conta(ExplicacaoDivergencia.empresa_id)),
-    (DecisaoLinha, _da_conta(DecisaoLinha.empresa_id)),
-    (Conciliacao, _da_conta(Conciliacao.empresa_id)),
-    (ExecucaoConciliacao, _da_conta(ExecucaoConciliacao.empresa_id)),
-    (LinkRelatorio, _da_conta(LinkRelatorio.empresa_id)),
-    (Fechamento, _da_conta(Fechamento.empresa_id)),
-    (LinhaInvalida, lambda c: LinhaInvalida.extrato_id.in_(_extratos_da_conta(c))),
-    (Lancamento, _da_conta(Lancamento.empresa_id)),
-    (Extrato, _da_conta(Extrato.empresa_id)),
-    (Convite, lambda c: Convite.conta_id == c),
-    (ChaveApi, lambda c: ChaveApi.conta_id == c),
-    (TokenOAuth, lambda c: TokenOAuth.conexao_id.in_(_conexoes_da_conta(c))),
-    (CodigoOAuth, lambda c: CodigoOAuth.conexao_id.in_(_conexoes_da_conta(c))),
-    (ConexaoMcp, lambda c: ConexaoMcp.conta_id == c),
-    (PedidoAutorizacaoOAuth, lambda c: PedidoAutorizacaoOAuth.conta_id == c),
-    (TokenEmail, lambda c: TokenEmail.usuario_id.in_(_usuarios_da_conta(c))),
-    (Configuracao, _da_conta(Configuracao.empresa_id)),
-    (EmpresaFavorita, lambda c: EmpresaFavorita.conta_id == c),
-    (CupomEnviado, lambda c: CupomEnviado.conta_id == c),
-    (EventoConta, lambda c: EventoConta.conta_id == c),
-    (PagamentoStripe, lambda c: PagamentoStripe.conta_id == c),
-    (AssinaturaStripe, lambda c: AssinaturaStripe.conta_id == c),
-    (OperadorLedgr, lambda c: OperadorLedgr.usuario_id.in_(_usuarios_da_conta(c))),
-    (Usuario, lambda c: Usuario.conta_id == c),
-    (Empresa, lambda c: Empresa.conta_id == c),
-    (UsoAssistente, lambda c: UsoAssistente.conta_id == c),
-    (Conta, lambda c: Conta.id == c),
-)
+from app.services.exclusao import ETAPAS, Escopo
 
 # Tem `empresa_id`, mas fica: é o registro da própria exclusão.
 TABELAS_QUE_FICAM = frozenset({RegistroExclusao.__tablename__})
@@ -192,17 +100,16 @@ MOTIVO_ASSINATURA_EM_ANDAMENTO = (
 
 
 def tabelas_apagadas() -> list[str]:
-    return [model.__tablename__ for model, _ in ETAPAS]
+    return servico.tabelas_apagadas(ETAPAS)
 
 
 def contar_linhas(db: Session, conta_id: uuid.UUID) -> dict[str, int]:
     """Quantas linhas de cada tabela são da conta, na ordem de `ETAPAS`."""
-    return {
-        model.__tablename__: db.scalar(
-            select(func.count()).select_from(model).where(cond(conta_id))
-        )
-        for model, cond in ETAPAS
-    }
+    return servico.contar_linhas(db, Escopo(conta_id), ETAPAS)
+
+
+def _extratos_da_conta(conta_id: uuid.UUID):
+    return Escopo(conta_id).extratos()
 
 
 def hash_cnpj(cnpj: str) -> str:
@@ -227,25 +134,14 @@ def excluir_conta(
     arquivos_originais: int | None = None,
 ) -> Exclusao:
     """Apaga a conta, as empresas dela e tudo o que é delas, grava o registro e
-    faz o commit, numa transação só. Qualquer erro desfaz tudo e sobe.
-
-    A linha da conta e as das empresas dela são travadas antes de tudo: as
-    tabelas com `empresa_id` têm FK para a empresa, e usuários, convites e
-    empresas, para a conta, então um upload ou cadastro simultâneo espera e
-    depois falha pela FK, em vez de deixar linha órfã."""
+    faz o commit, numa transação só. Qualquer erro desfaz tudo e sobe. A
+    ordem, as travas e as condições estão em app/services/exclusao.py."""
     try:
-        conta = db.scalar(select(Conta).where(Conta.id == conta_id).with_for_update())
+        conta = db.get(Conta, conta_id)
         if conta is None:
             raise LookupError("conta não encontrada")
-        db.execute(select(Empresa.id).where(Empresa.conta_id == conta_id).with_for_update())
         cnpj = conta.cnpj
-        contagens = {}
-        for model, cond in ETAPAS:
-            resultado = db.execute(
-                delete(model).where(cond(conta_id)),
-                execution_options={"synchronize_session": False},
-            )
-            contagens[model.__tablename__] = resultado.rowcount
+        contagens = servico.apagar_linhas(db, Escopo(conta_id), ETAPAS)
         if arquivos_originais is not None:
             contagens[CHAVE_CONTAGEM_ARQUIVOS] = arquivos_originais
         registro_id = uuid.uuid4()

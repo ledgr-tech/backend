@@ -86,11 +86,17 @@ class Armazenamento(Protocol):
 
 
 def chave_do_objeto(conta_id: uuid.UUID, empresa_id: uuid.UUID, extrato_id: uuid.UUID) -> str:
-    return f"{prefixo_da_conta(conta_id)}empresas/{empresa_id}/{extrato_id}"
+    return f"{prefixo_da_empresa(conta_id, empresa_id)}{extrato_id}"
 
 
 def prefixo_da_conta(conta_id: uuid.UUID) -> str:
     return f"contas/{conta_id}/"
+
+
+def prefixo_da_empresa(conta_id: uuid.UUID, empresa_id: uuid.UUID) -> str:
+    """Os arquivos originais de uma empresa cliente, para apagá-los quando ela é
+    removida de vez (issue #215)."""
+    return f"{prefixo_da_conta(conta_id)}empresas/{empresa_id}/"
 
 
 def ler_chave_de_cifra(valor: str) -> bytes | None:
