@@ -109,10 +109,13 @@ def conciliacoes_no_mes(db: Session, conta_id: uuid.UUID, instante: datetime | N
         .group_by(ExecucaoConciliacao.extrato_banco_id)
         .subquery()
     )
+    # Com as empresas removidas (issue #215): a conciliação já aconteceu, e
+    # remover a empresa não devolve a franquia do mês.
     return db.scalar(
         select(func.count())
         .select_from(primeiras)
-        .where(primeiras.c.primeira >= inicio, primeiras.c.primeira < fim)
+        .where(primeiras.c.primeira >= inicio, primeiras.c.primeira < fim),
+        execution_options={"incluir_removidas": True},
     )
 
 

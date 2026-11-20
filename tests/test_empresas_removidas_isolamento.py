@@ -27,6 +27,7 @@ from test_links_relatorio import INVALIDO, _consultar, _criar, conta  # noqa: F4
 from test_links_relatorio import _flag_ligada as _link_publico_ligado  # noqa: F401 - autouse
 from test_mcp_oauth import RECURSO, mcp  # noqa: F401 - fixture
 
+from app.api import admin
 from app.core.auth import (
     CABECALHO_EMPRESA,
     PREFIXO_TOKEN_MCP,
@@ -42,8 +43,11 @@ from app.models import (
     ConexaoMcp,
     Empresa,
     EmpresaFavorita,
+    ExecucaoConciliacao,
+    ExplicacaoDivergencia,
     TokenOAuth,
 )
+from app.services import plano
 from app.services.ajuda import consultas
 from app.services.ia import geracao
 from main import app
@@ -424,3 +428,84 @@ def test_favorita_da_empresa_removida_volta_na_restauracao(db_session, equipe):
         .select_from(EmpresaFavorita)
         .where(EmpresaFavorita.empresa_id == equipe.cliente.id)
     )
+
+
+# --- consumo: remover não devolve franquia, uso nem limite do provedor -------------------
+
+
+def _execucao(db_session, empresa, criar_extrato_da_empresa):
+    banco = criar_extrato_da_empresa(empresa.id, "banco")
+    sistema = criar_extrato_da_empresa(empresa.id, "sistema")
+    db_session.add(
+        ExecucaoConciliacao(
+            empresa_id=empresa.id,
+            extrato_banco_id=banco.id,
+            extrato_sistema_id=sistema.id,
+            tolerancia_dias=0,
+            total=1,
+            match_exato=1,
+            match_tolerancia=0,
+            duplicado=0,
+            sem_correspondencia=0,
+            tarifa_bancaria=0,
+            divergente_valor=0,
+            divergente_data=0,
+        )
+    )
+    db_session.commit()
+
+
+def test_remover_a_empresa_nao_devolve_a_franquia_de_conciliacoes_do_mes(
+    db_session, equipe, criar_extrato_da_empresa
+):
+    _execucao(db_session, equipe.cliente, criar_extrato_da_empresa)
+    assert plano.conciliacoes_no_mes(db_session, equipe.conta_id) == 1
+
+    equipe.remover()
+
+    db_session.rollback()
+    assert plano.conciliacoes_no_mes(db_session, equipe.conta_id) == 1
+    me = client.get("/me", headers=equipe.headers).json()
+    assert me["limites"]["conciliacoes"]["usadas"] == 1
+
+
+def test_o_uso_do_painel_conta_a_conciliacao_da_empresa_removida_mas_nao_a_empresa(
+    db_session, equipe, criar_extrato_da_empresa
+):
+    _execucao(db_session, equipe.cliente, criar_extrato_da_empresa)
+    antes = admin._uso(db_session, equipe.conta_id, datetime.now(UTC))
+    assert (antes.empresas, antes.conciliacoes_total) == (2, 1)
+
+    equipe.remover()
+
+    db_session.rollback()
+    depois = admin._uso(db_session, equipe.conta_id, datetime.now(UTC))
+    assert (depois.empresas, depois.conciliacoes_total) == (1, 1)
+    assert depois.extratos_do_banco_por_mes == antes.extratos_do_banco_por_mes
+
+
+def test_remover_a_empresa_nao_zera_o_limite_diario_de_explicacoes_da_conta(
+    db_session, equipe, monkeypatch
+):
+    monkeypatch.setattr(settings, "llm_limite_diario_conta", 1)
+    monkeypatch.setattr(settings, "llm_limite_diario_global", 100_000)
+    db_session.add(
+        ExplicacaoDivergencia(
+            empresa_id=equipe.cliente.id,
+            chave=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+            status="gerada",
+            provedor="falso",
+            modelo="falso",
+            versao_prompt="1",
+            texto="Explicação de teste.",
+            tokens_entrada=1,
+            tokens_saida=1,
+        )
+    )
+    db_session.commit()
+    assert geracao._limite_atingido(db_session, equipe.principal.id) is True
+
+    equipe.remover()
+
+    db_session.rollback()
+    assert geracao._limite_atingido(db_session, equipe.principal.id) is True

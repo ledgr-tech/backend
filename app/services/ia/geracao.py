@@ -233,7 +233,10 @@ def _limite_atingido(db: Session, empresa_id: uuid.UUID) -> bool:
         .where(
             ExplicacaoDivergencia.empresa_id.in_(empresas_da_conta),
             ExplicacaoDivergencia.criado_em >= hoje,
-        )
+        ),
+        # Com as empresas removidas (issue #215): o gasto com o provedor já
+        # aconteceu, e remover a empresa não zera o limite do dia da conta.
+        execution_options={"incluir_removidas": True},
     )
     contagem_global = db.scalar(
         select(func.count())
