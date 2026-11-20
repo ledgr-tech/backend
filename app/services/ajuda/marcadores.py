@@ -78,12 +78,19 @@ _COMPETENCIA = re.compile(
     rf"|\b(?:em|ano|desde|até|ate)\s+20\d{{2}}(?!\d)",
     re.IGNORECASE,
 )
-_SEQUENCIA_COM_HIFEN_OU_ESPACO = re.compile(r"\d+(?:[\-\s]\d+)+")
+# Sem o `(?<!\d)`, uma sequência longa de dígitos sem separador era varrida até o
+# fim a partir de cada dígito (quadrático, CodeQL py/polynomial-redos). O casamento
+# mais à esquerda sempre começa no primeiro dígito da sequência, então o resultado
+# é o mesmo.
+_SEQUENCIA_COM_HIFEN_OU_ESPACO = re.compile(r"(?<!\d)\d+(?:[\-\s]\d+)+")
 _DIA_DE_MES = re.compile(rf"(?<!\d)(\d{{1,2}})\s+de\s+({_MES})\b", re.IGNORECASE)
 _DIA_BARRA_MES = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?![\d/])")
 _DIA_SOLTO = re.compile(r"\b(dia)\s+(\d{1,2})(?!\d)", re.IGNORECASE)
+# Na primeira alternativa, o sinal leva os espaços depois dele junto, `(?:-\s*)?`:
+# com `\s*-?\s*`, os dois `\s*` disputavam os mesmos espaços depois de "R$"
+# (quadrático, CodeQL py/polynomial-redos). Casa o mesmo texto.
 _VALOR = re.compile(
-    r"R\$\s*-?\s*\d[\d.]*(?:,\d{1,2})?(?![\d,])"
+    r"R\$\s*(?:-\s*)?\d[\d.]*(?:,\d{1,2})?(?![\d,])"
     r"|(?<![\d,.])-?\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?(?![\d,.])"
     r"|(?<![\d,.])-?\d+,\d{1,2}(?![\d,.])"
     r"|(?<![\d,.])-?\d+\.\d{2}(?![\d,.])"
@@ -157,9 +164,11 @@ class _Marcador:
         return self._marcador("DATA", self.datas, DataMarcada(dia, mes, ano))
 
     def _restaurar(self, texto: str) -> str:
-        for indice, final in enumerate(self._reservados):
-            texto = texto.replace(chr(_PRIMEIRO_RESERVADO + indice), final)
-        return texto
+        # Uma passada só: um `replace` por reservado percorria o texto inteiro a
+        # cada um (quadrático em quem tem muitos valores).
+        return texto.translate(
+            {_PRIMEIRO_RESERVADO + indice: final for indice, final in enumerate(self._reservados)}
+        )
 
     def marcar(self, texto: str) -> str:
         texto = mascarar_identificadores(texto)
