@@ -44,7 +44,10 @@ def _com(**campos) -> dict:
 
 
 def test_schema_valido_na_ordem_do_arquivo():
-    lancamentos = ler_importacao(_bytes(VALIDO))
+    lida = ler_importacao(_bytes(VALIDO))
+    lancamentos = lida.lancamentos
+
+    assert lida.saldo is None
 
     assert [(item.posicao, item.data, item.valor, item.descricao) for item in lancamentos] == [
         (0, date(2026, 9, 5), Decimal("-1234.56"), "Pagamento fornecedor"),
@@ -69,7 +72,7 @@ def test_schema_valido_na_ordem_do_arquivo():
 def test_aceita_json_puro_ou_num_bloco_markdown(embrulho):
     conteudo = embrulho.replace("{}", json.dumps(VALIDO)).encode("utf-8")
 
-    assert len(ler_importacao(conteudo)) == 3
+    assert len(ler_importacao(conteudo).lancamentos) == 3
 
 
 # --- texto em volta, vazio e encoding -------------------------------------------------
@@ -165,7 +168,7 @@ def test_bloco_markdown_sem_fechamento_e_corte(texto):
 def test_aspas_escapadas_nao_enganam_o_corte():
     texto = _bytes(_com(descricao='Cheque "nominal" \\ "x"'))
 
-    assert ler_importacao(texto)[0].descricao == 'Cheque "nominal" \\ "x"'
+    assert ler_importacao(texto).lancamentos[0].descricao == 'Cheque "nominal" \\ "x"'
     with pytest.raises(ArquivoCortado):
         ler_importacao(texto[: texto.index(b"nominal") + 9])
 
@@ -214,6 +217,9 @@ def test_campo_desconhecido_na_raiz_e_no_lancamento():
     assert ("total", None) in [(c, n) for c, n, _ in erros]
     assert ("lancamentos[0].saldo", 1) in [(c, n) for c, n, _ in erros]
     mensagens = {caminho: mensagem for caminho, _, mensagem in erros}
+    assert mensagens["total"] == (
+        "campo não aceito: aqui o Ledgr só lê versao, lancamentos, saldo_final, saldo_data"
+    )
     assert mensagens["lancamentos[0].saldo"] == (
         "campo não aceito: aqui o Ledgr só lê data, valor, descricao"
     )
@@ -302,7 +308,7 @@ def test_valor_invalido(valor, trecho):
 
 
 def test_valor_no_limite_da_coluna():
-    assert ler_importacao(_bytes(_com(valor="-999999999999.99")))[0].valor == Decimal(
+    assert ler_importacao(_bytes(_com(valor="-999999999999.99"))).lancamentos[0].valor == Decimal(
         "-999999999999.99"
     )
 
@@ -377,13 +383,15 @@ def test_um_lancamento_ruim_rejeita_o_arquivo_inteiro():
 def test_prompt_registra_as_duas_versoes():
     prompt = prompt_atual()
 
-    assert (prompt.versao_schema, prompt.versao_prompt) == ("1", "1")
+    assert (prompt.versao_schema, prompt.versao_prompt) == ("1", "2")
     assert prompt.texto.startswith("Você vai converter")
     assert "<!--" not in prompt.texto
     for trecho in (
         "Não resuma, não abrevie e não use reticências",
         'Valor entre parênteses, como (1.234,56), é saída: escreva "-1234.56"',
         "Sinal de menos depois do número, como 1.234,56-, também é saída",
+        'inclua "saldo_final" e "saldo_data"',
+        "não inclua os dois campos e não invente",
     ):
         assert trecho in prompt.texto
 
@@ -394,8 +402,93 @@ def test_schema_bate_com_a_leitura():
 
     assert schema["additionalProperties"] is False and item["additionalProperties"] is False
     assert schema["properties"]["versao"] == {"const": "1"}
+    assert set(schema["properties"]) == {"versao", "lancamentos", "saldo_final", "saldo_data"}
+    assert set(schema["required"]) == {"versao", "lancamentos"}
+    assert schema["dependentRequired"] == {
+        "saldo_final": ["saldo_data"],
+        "saldo_data": ["saldo_final"],
+    }
+    assert schema["properties"]["saldo_final"]["type"] == "string"
+    assert schema["properties"]["saldo_data"]["type"] == "string"
+    assert schema["properties"]["saldo_final"]["pattern"] == item["properties"]["valor"]["pattern"]
+    assert schema["properties"]["saldo_data"]["pattern"] == item["properties"]["data"]["pattern"]
     assert set(item["required"]) == {"data", "valor", "descricao"}
     assert item["properties"]["descricao"]["maxLength"] == 500
     # O exemplo do prompt passa na leitura.
     exemplo = prompt_atual().texto.split("\n\n")[2]
-    assert len(ler_importacao(exemplo.encode())) == 1
+    lida = ler_importacao(exemplo.encode())
+    assert len(lida.lancamentos) == 1
+    assert lida.saldo.valor == Decimal("2500.00")
+    assert lida.saldo.data == date(2026, 9, 30)
+
+
+@pytest.mark.parametrize("valor", ["2500.00", "0", "0.00", "-1234.56", "-999999999999.99"])
+def test_saldo_opcional(valor):
+    lida = ler_importacao(_bytes({**VALIDO, "saldo_final": valor, "saldo_data": "2026-09-30"}))
+
+    assert len(lida.lancamentos) == 3
+    assert lida.saldo.valor == Decimal(valor)
+    assert lida.saldo.data == date(2026, 9, 30)
+
+
+@pytest.mark.parametrize(
+    ("campos", "faltante"),
+    [({"saldo_final": "0"}, "saldo_data"), ({"saldo_data": "2026-09-30"}, "saldo_final")],
+)
+def test_saldo_exige_os_dois_campos(campos, faltante):
+    assert _erros({**VALIDO, **campos}) == [
+        (faltante, None, "informe saldo_final e saldo_data juntos, ou nenhum dos dois")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("valor", "trecho"),
+    [
+        ("1.234,56", "use número com ponto decimal e no máximo duas casas"),
+        (1234.56, 'use o número entre aspas, como "-1234.56" (veio 1234.56, sem aspas)'),
+        ("1234567890123", 'valor grande demais (veio "1234567890123")'),
+    ],
+)
+def test_saldo_final_invalido(valor, trecho):
+    (erro,) = _erros({**VALIDO, "saldo_final": valor, "saldo_data": "2026-09-30"})
+
+    assert erro[:2] == ("saldo_final", None)
+    assert trecho in erro[2]
+
+
+@pytest.mark.parametrize(
+    ("data", "mensagem"),
+    [
+        ("30/09/2026", 'use o formato AAAA-MM-DD, como "2026-09-05" (veio "30/09/2026")'),
+        ("2026-02-30", 'essa data não existe (veio "2026-02-30")'),
+    ],
+)
+def test_saldo_data_invalida(data, mensagem):
+    assert _erros({**VALIDO, "saldo_final": "0", "saldo_data": data}) == [
+        ("saldo_data", None, mensagem)
+    ]
+
+
+def test_erros_do_saldo_depois_dos_lancamentos():
+    erros = _erros({**_com(valor="0"), "saldo_final": "inválido", "saldo_data": "ontem"})
+
+    assert [(c, n) for c, n, _ in erros] == [
+        ("lancamentos[0].valor", 1),
+        ("saldo_final", None),
+        ("saldo_data", None),
+    ]
+
+
+def test_versao_desconhecida_nao_valida_saldo():
+    erros = _erros({**VALIDO, "versao": "2", "saldo_final": "inválido"})
+
+    assert [(c, n) for c, n, _ in erros] == [("versao", None)]
+
+
+@pytest.mark.parametrize("campo", ["saldo_final", "saldo_data"])
+def test_saldo_com_campo_repetido(campo):
+    documento = _bytes({**VALIDO, "saldo_final": "0", "saldo_data": "2026-09-30"})
+    valor = '"0"' if campo == "saldo_final" else '"2026-09-30"'
+    documento = documento[:-1] + f', "{campo}": {valor}}}'.encode()
+
+    assert _erros(documento) == [(campo, None, "campo repetido: deixe só um")]

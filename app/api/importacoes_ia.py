@@ -216,7 +216,8 @@ def importar(
         )
 
     try:
-        lancamentos = ler_importacao(conteudo)
+        lida = ler_importacao(conteudo)
+        lancamentos = lida.lancamentos
     except ArquivoCortado:
         return _invalida(ARQUIVO_CORTADO)
     except ArquivoIlegivel as exc:
