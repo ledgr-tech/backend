@@ -66,5 +66,9 @@
   "alerta_admin": {
     "assunto": "Ledgr admin: Conta inativada · Telha Certa Ltda",
     "texto": "Olá, equipe.\n\nUm operador fez uma ação no painel administrativo do Ledgr.\n\nOperador: Ana (olga@ledgr.com.br)\nConta: Telha Certa Ltda (5f0c2f0e-8a54-4b1a-9a43-0e3d5d7d3c11)\nAção: Conta inativada\nQuando: 19/11/2026 às 10:30:00\nMotivo: Pedido do cliente\n\nSe não foi uma ação combinada, revise o acesso desse operador."
+  },
+  "empresa_removida": {
+    "assunto": "Uma empresa foi removida da sua conta na Ledgr",
+    "texto": "Olá, Ana.\n\nA empresa Telha Certa Ltda foi removida da conta por Gil Gestor.\n\nEla some das listas na hora, e os dados dela ficam guardados até 20/12/2026. Até esse dia, o admin ou um gestor pode restaurá-la na tela Empresas. Depois dele, os dados são apagados de vez e não dá mais para recuperá-los.\n\nSe não foi uma remoção esperada, restaure a empresa ou avise o nosso suporte.\n\nEquipe Ledgr"
   }
 }

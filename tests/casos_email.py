@@ -1,6 +1,6 @@
 """Os e-mails transacionais montados com dados fixos, para os testes do molde.
 
-`CASOS` tem um caso por mensagem de `app/services/email/mensagens.py` (os 11
+`CASOS` tem um caso por mensagem de `app/services/email/mensagens.py` (os 12
 e-mails); `VARIANTES` cobre os ramos que mudam o texto: sem link, com a
 empresa sem acesso, cupom sem código. O texto e o assunto de todos estão
 fixados em `tests/fixtures/emails_texto.json`.
@@ -37,6 +37,14 @@ CASOS = {
     ),
     "conta_desativada": lambda nome=NOME, razao=RAZAO_SOCIAL: m.mensagem_conta_desativada(
         para="a@x.com", nome=nome, razao_social_sem_acesso=razao
+    ),
+    "empresa_removida": lambda nome=NOME, razao=RAZAO_SOCIAL: m.mensagem_empresa_removida(
+        para="a@x.com",
+        nome=nome,
+        razao_social=razao,
+        removida_por="Gil Gestor",
+        restaurar_ate="20/12/2026",
+        chave_idempotencia="empresa-removida-teste",
     ),
     "confirmacao_troca_email": lambda nome=NOME, razao=RAZAO_SOCIAL: (
         m.mensagem_confirmacao_troca_email(
