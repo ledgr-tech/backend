@@ -17,7 +17,7 @@ mesmo `DATABASE_URL` e as variáveis `ARQUIVO_ORIGINAL_R2_*` do serviço da API)
 Idempotente: o que já foi apagado não aparece de novo, e rodar duas vezes
 seguidas não faz nada na segunda. Uma empresa por transação: a falha de uma
 (o R2 fora do ar, por exemplo) desfaz só ela, e as outras seguem. A linha da
-empresa é travada antes de tudo, a mesma trava do `restaurar`: se alguém
+conta e a linha da empresa são travadas antes de tudo, nessa ordem, a mesma do `restaurar`: se alguém
 restaurou depois da listagem, a empresa é pulada, e o R2 só é apagado depois
 da trava, para uma restauração nunca ficar sem os arquivos. Se o R2 falhar,
 nada é apagado do banco. Sem as variáveis do R2 no ambiente e com algum extrato
@@ -82,6 +82,7 @@ def _extratos_com_original(db: Session, escopo: servico.Escopo) -> int:
 
 def apagar_uma(
     db: Session,
+    conta_id: uuid.UUID,
     empresa_id: uuid.UUID,
     agora: datetime,
     armazenamento: Armazenamento | None,
@@ -90,7 +91,7 @@ def apagar_uma(
     está vencida (restaurada ou apagada desde a listagem). Qualquer erro desfaz
     a transação e sobe."""
     try:
-        empresa = servico.travar_se_vencida(db, empresa_id, agora)
+        empresa = servico.travar_se_vencida(db, conta_id, empresa_id, agora)
         if empresa is None:
             db.rollback()
             return None
@@ -161,7 +162,7 @@ def main(
     for conta_id, empresa_id in vencidas:
         try:
             with criar_sessao() as db:
-                resultado = apagar_uma(db, empresa_id, momento, armazenamento)
+                resultado = apagar_uma(db, conta_id, empresa_id, momento, armazenamento)
         except Exception as exc:  # noqa: BLE001 - uma empresa não derruba as outras
             falhas += 1
             logger.error(

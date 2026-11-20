@@ -157,8 +157,17 @@ def criar_chave(
             )
         razao_social = empresa.razao_social
 
+    # As chaves de empresa removida não aparecem na lista (issue #215) e, pelo
+    # mesmo motivo, não contam no teto: ninguém é barrado por chave que não vê.
     ativas = db.scalar(
-        select(func.count()).where(ChaveApi.conta_id == conta_id, ChaveApi.revogada_em.is_(None))
+        select(func.count())
+        .select_from(ChaveApi)
+        .outerjoin(Empresa, Empresa.id == ChaveApi.empresa_id)
+        .where(
+            ChaveApi.conta_id == conta_id,
+            ChaveApi.revogada_em.is_(None),
+            or_(ChaveApi.empresa_id.is_(None), Empresa.id.is_not(None)),
+        )
     )
     if ativas >= MAXIMO_CHAVES_ATIVAS:
         logger.info("chave_api resultado=limite_de_ativas")

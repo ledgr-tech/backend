@@ -21,13 +21,14 @@ from conftest import cabecalhos
 from fastapi import HTTPException
 from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from test_assistente_dados import assistente  # noqa: F401 - fixture
 from test_links_relatorio import INVALIDO, _consultar, _criar, conta  # noqa: F401 - fixture
 from test_links_relatorio import _flag_ligada as _link_publico_ligado  # noqa: F401 - autouse
 from test_mcp_oauth import RECURSO, mcp  # noqa: F401 - fixture
 
 from app.api import admin
+from app.core import conta_inativa
 from app.core.auth import (
     CABECALHO_EMPRESA,
     PREFIXO_TOKEN_MCP,
@@ -41,6 +42,7 @@ from app.models import (
     ChaveApi,
     ClienteOAuth,
     ConexaoMcp,
+    Conta,
     Empresa,
     EmpresaFavorita,
     ExecucaoConciliacao,
@@ -165,13 +167,51 @@ def test_assistente_com_a_empresa_removida_da_404_e_nada_vai_ao_provedor(
     assert resposta.json() == NAO_ENCONTRADA
 
 
-def test_o_assistente_nao_conhece_o_nome_nem_a_situacao_da_empresa_removida(db_session, equipe):
+def test_o_nome_da_empresa_removida_continua_sendo_mascarado_para_o_provedor(db_session, equipe):
+    """Ao contrário das listas, aqui enxergar a removida é o comportamento
+    seguro: o histórico da conversa ainda pode citar o nome dela."""
     equipe.remover()
 
     nomes = consultas.nomes_das_empresas_da_conta(db_session, equipe.conta_id)
 
-    assert "Cliente Removida Ltda" not in nomes
-    assert len(nomes) == 1
+    assert "Cliente Removida Ltda" in nomes
+    assert len(nomes) == 2
+
+
+def test_conta_inativa_vale_tambem_para_a_empresa_removida(db_session, equipe):
+    cliente_id = equipe.cliente.id
+    equipe.remover()
+    db_session.execute(
+        update(Conta)
+        .where(Conta.id == equipe.conta_id)
+        .values(inativada_em=func.now(), motivo_inativacao="teste")
+    )
+    db_session.commit()
+
+    assert conta_inativa.conta_da_empresa_esta_inativa(db_session, cliente_id) is True
+
+
+def test_chave_de_empresa_removida_nao_conta_no_teto_de_chaves_que_o_usuario_ve(
+    db_session, equipe, monkeypatch
+):
+    from app.api import chaves_api
+
+    monkeypatch.setattr(chaves_api, "MAXIMO_CHAVES_ATIVAS", 2)
+    client.post(
+        "/chaves-api",
+        headers=equipe.headers,
+        json={"nome": "Da cliente", "empresa_id": str(equipe.cliente.id)},
+    )
+    client.post("/chaves-api", headers=equipe.headers, json={"nome": "Da conta"})
+    assert (
+        client.post("/chaves-api", headers=equipe.headers, json={"nome": "Mais"}).status_code == 409
+    )
+
+    equipe.remover()
+
+    assert (
+        client.post("/chaves-api", headers=equipe.headers, json={"nome": "Mais"}).status_code == 201
+    )
 
 
 # --- API pública (/v1) -----------------------------------------------------------------

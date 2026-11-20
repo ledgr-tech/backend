@@ -735,3 +735,24 @@ def test_o_log_nao_tem_cnpj_nem_razao_social(conta, caplog):
     assert "restaurar_empresa resultado=restaurada" in texto
     for proibido in (conta.cliente_a.cnpj, "Cliente A", "Nome Secreto", "Ana Admin"):
         assert proibido not in texto
+
+
+# --- limite de taxa --------------------------------------------------------------------
+
+
+def test_editar_remover_e_restaurar_tem_limite_por_usuario_para_nao_encher_a_caixa_do_admin(
+    conta, provedor
+):
+    from app.api import empresas
+    from app.core.rate_limit import limiter
+
+    limite = int(empresas.LIMITE_EMPRESA_ESCRITA_POR_USUARIO.split("/")[0])
+    for _ in range(limite):
+        assert _remover(conta.headers["admin"], conta.cliente_a.id).status_code == 200
+        assert _restaurar(conta.headers["admin"], conta.cliente_a.id).status_code == 200
+
+    # A 21ª remoção e a 21ª restauração são barradas, e nenhum e-mail a mais sai.
+    assert _remover(conta.headers["admin"], conta.cliente_a.id).status_code == 429
+    assert _restaurar(conta.headers["admin"], conta.cliente_a.id).status_code == 429
+    assert len(provedor.enviadas) == limite
+    limiter.reset()

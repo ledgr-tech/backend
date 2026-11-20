@@ -454,7 +454,7 @@ def test_empresa_restaurada_depois_da_listagem_e_pulada_sem_tocar_no_r2(db_sessi
     db_session.commit()
 
     with script.SessionLocal() as outra:
-        resultado = script.apagar_uma(outra, par[1], AGORA, memoria)
+        resultado = script.apagar_uma(outra, par[0], par[1], AGORA, memoria)
 
     assert resultado is None
     assert len(memoria.objetos) == 2

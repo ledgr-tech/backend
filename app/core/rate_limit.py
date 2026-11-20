@@ -130,6 +130,9 @@ LIMITE_CONSULTA_ME_POR_USUARIO = "60/minute"
 LIMITE_PREFERENCIAS_POR_USUARIO = "30/minute"
 # Favoritar e desfavoritar empresa (issue #157): um clique por empresa no seletor.
 LIMITE_FAVORITAS_POR_USUARIO = "30/minute"
+# Editar, remover e restaurar empresa (issue #215): cada remoção manda e-mail ao
+# admin, então o limite barra quem alterna remover e restaurar para encher a caixa.
+LIMITE_EMPRESA_ESCRITA_POR_USUARIO = "20/hour"
 # Busca do topo do app (issue #220): o front consulta enquanto a pessoa digita,
 # com espera entre as teclas; o limite só barra o abuso.
 LIMITE_BUSCA_POR_USUARIO = "120/minute"

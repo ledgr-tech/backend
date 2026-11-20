@@ -244,10 +244,16 @@ def empresas_vencidas(db: Session, agora: datetime) -> list[tuple[uuid.UUID, uui
     return [(conta_id, empresa_id) for conta_id, empresa_id in linhas]
 
 
-def travar_se_vencida(db: Session, empresa_id: uuid.UUID, agora: datetime) -> Empresa | None:
+def travar_se_vencida(
+    db: Session, conta_id: uuid.UUID, empresa_id: uuid.UUID, agora: datetime
+) -> Empresa | None:
     """A empresa removida e vencida, com a linha travada, ou `None` se ela foi
     restaurada ou apagada desde a listagem. Quem restaura trava a mesma linha:
-    com a trava aqui, restaurar e apagar nunca passam os dois."""
+    com a trava aqui, restaurar e apagar nunca passam os dois. A ordem das
+    travas é a de todas as rotas da empresa: a conta primeiro, depois a
+    empresa; na ordem inversa, o cron e um `restaurar` ao mesmo tempo
+    travariam um ao outro."""
+    db.execute(select(Conta.id).where(Conta.id == conta_id).with_for_update())
     return db.scalar(
         select(Empresa)
         .where(

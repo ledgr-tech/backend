@@ -115,7 +115,12 @@ from app.api.auth import (
 )
 from app.core.auth import exigir_papel, obter_usuario_autenticado
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_FAVORITAS_POR_USUARIO, chave_por_usuario, limiter
+from app.core.rate_limit import (
+    LIMITE_EMPRESA_ESCRITA_POR_USUARIO,
+    LIMITE_FAVORITAS_POR_USUARIO,
+    chave_por_usuario,
+    limiter,
+)
 from app.core.sem_acento import sem_acento, sem_acento_sql
 from app.models import (
     Configuracao,
@@ -525,13 +530,22 @@ def _empresa_travada(db: Session, empresa_id: uuid.UUID, conta_id: uuid.UUID) ->
 
 
 @router.patch("/{empresa_id}", response_model=EmpresaResponse)
+@limiter.limit(LIMITE_EMPRESA_ESCRITA_POR_USUARIO, key_func=chave_por_usuario)
 def editar_empresa(
+    request: Request,
     empresa_id: uuid.UUID,
     dados: EmpresaPatchRequest,
     usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
     db: Annotated[Session, Depends(get_db)],
 ) -> EmpresaResponse:
-    conta = usuario.conta
+    # A conta primeiro, depois a empresa: a ordem das travas de remover,
+    # restaurar e da limpeza (outra ordem travaria uma contra a outra).
+    conta = db.scalar(
+        select(Conta)
+        .where(Conta.id == usuario.conta_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     empresa = _empresa_travada(db, empresa_id, usuario.conta_id)
     campos = dados.model_fields_set
     if "razao_social" in campos:
@@ -548,7 +562,9 @@ def editar_empresa(
 
 
 @router.delete("/{empresa_id}", response_model=EmpresaRemovidaResponse)
+@limiter.limit(LIMITE_EMPRESA_ESCRITA_POR_USUARIO, key_func=chave_por_usuario)
 def remover_empresa(
+    request: Request,
     empresa_id: uuid.UUID,
     tarefas: BackgroundTasks,
     usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
@@ -612,7 +628,9 @@ def listar_removidas(
 
 
 @router.post("/{empresa_id}/restaurar", response_model=EmpresaResponse)
+@limiter.limit(LIMITE_EMPRESA_ESCRITA_POR_USUARIO, key_func=chave_por_usuario)
 def restaurar_empresa(
+    request: Request,
     empresa_id: uuid.UUID,
     usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
     db: Annotated[Session, Depends(get_db)],
