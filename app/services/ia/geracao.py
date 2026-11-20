@@ -429,6 +429,11 @@ def gerar_explicacoes_do_par(
         return resumo
     try:
         with sessao() as db:
+            # Empresa removida entre a conciliação e esta tarefa (issue #215):
+            # nada novo roda para ela, e o orçamento do provedor não é gasto.
+            if db.scalar(select(Empresa.id).where(Empresa.id == empresa_id)) is None:
+                logger.info("explicacao_automatica resultado=empresa_removida")
+                return resumo
             fatos_do_par = calcular_fatos_do_par(
                 db, empresa_id, extrato_banco_id, extrato_sistema_id
             )

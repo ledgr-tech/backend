@@ -86,6 +86,11 @@ para duas abas com clientes diferentes nunca gravarem no cliente errado.
 - Valor que não é UUID: 400.
 - UUID inexistente ou de outra conta: 404 "Empresa não encontrada.", a mesma
   mensagem nos dois casos.
+- Empresa removida (issue #215): o mesmo 404. A regra não está aqui: o filtro
+  de sessão de app/models/empresa.py esconde a empresa removida de toda
+  consulta, inclusive das de `_empresa_ativa`, e uma conta cuja única empresa
+  ativa é a que sobrou continua dispensando o cabeçalho. O front que tinha a
+  empresa removida salva recebe esse 404 e escolhe outra da `GET /empresas`.
 """
 
 import hashlib
@@ -534,6 +539,10 @@ def autenticar_token_mcp(db: Session, token: str | None) -> tuple[ConexaoAutenti
             TokenOAuth.revogado_em.is_(None),
             TokenOAuth.acesso_expira_em > _agora(),
             ConexaoMcp.revogada_em.is_(None),
+            # Empresa removida (issue #215): as conexões dela são revogadas na
+            # remoção; o join, filtrado pela sessão, garante o mesmo se uma
+            # escapar.
+            ConexaoMcp.empresa_id.in_(select(Empresa.id)),
         )
     ).first()
     if linha is None or linha[0].resource != recurso:
