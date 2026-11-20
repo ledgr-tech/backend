@@ -45,6 +45,14 @@ class DecisaoLinha(Base):
     o histórico). `rodada` e `extrato_sistema_id` registram em que rodada a
     decisão foi tomada, para auditoria.
 
+    `lote_id` (issue #237) liga as justificativas feitas juntas pelo
+    `POST /conciliacoes/{extrato_id}/decisoes/lote`: o mesmo uuid em todos os
+    eventos `justificada` daquele pedido, e nulo em todo o resto, inclusive na
+    `justificativa_aprovada` gravada junto com a flag de aprovação desligada.
+    O CHECK só aceita `lote_id` na `justificada`; o índice parcial acha as
+    linhas de um lote (o `lote_tamanho` da listagem e a aprovação por
+    `lote_id` em `POST /justificativas/lote`).
+
     Não usa o `TimestampMixin`: `em` é `timestamptz` (o mixin grava
     `DateTime` sem fuso), porque o front lê a hora com fuso. O default é
     `clock_timestamp()`, a hora real do INSERT, porque a decisão em vigor
@@ -64,12 +72,23 @@ class DecisaoLinha(Base):
             name="ck_decisoes_linha_texto_valido",
         ),
         CheckConstraint("rodada >= 1", name="ck_decisoes_linha_rodada_positiva"),
+        CheckConstraint(
+            "lote_id IS NULL OR tipo = 'justificada'",
+            name="ck_decisoes_linha_lote_so_na_justificada",
+        ),
         Index(
             "ix_decisoes_linha_empresa_id_extrato_banco_id_chave_em",
             "empresa_id",
             "extrato_banco_id",
             "chave",
             "em",
+        ),
+        Index(
+            "ix_decisoes_linha_empresa_id_extrato_banco_id_lote_id",
+            "empresa_id",
+            "extrato_banco_id",
+            "lote_id",
+            postgresql_where=text("lote_id IS NOT NULL"),
         ),
     )
 
@@ -97,3 +116,5 @@ class DecisaoLinha(Base):
     em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()")
     )
+    # Issue #237: o lote da justificativa feita em lote; nulo fora dele.
+    lote_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
