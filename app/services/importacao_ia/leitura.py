@@ -25,8 +25,10 @@ arquivo, ainda na versão "1", e vêm os dois ou nenhum (só um é erro de
 schema, no caminho do que falta). `saldo_final` tem o formato e o limite do
 `valor` do lançamento, mas aceita zero e negativo; `saldo_data`, o da `data`.
 Diferente da coluna `saldo` do CSV, saldo ilegível aqui é erro, não `None`:
-a IA escreveu o campo, e a pessoa precisa saber que ele não entrou. Os erros
-do saldo vêm depois dos dos lançamentos.
+a IA escreveu o campo, e a pessoa precisa saber que ele não entrou. `null`
+não é "sem saldo": é erro de formato (sem saldo, os dois campos ficam de
+fora). Os erros de valor e de data do saldo vêm depois dos dos lançamentos; o
+de campo repetido sai antes, com os outros do nível do arquivo.
 
 `ler_campos` (issue #159) valida um lançamento só, no corpo da correção ou
 da linha nova da revisão, com as mesmas regras e mensagens, e o caminho é o

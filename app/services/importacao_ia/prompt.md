@@ -2,8 +2,10 @@
 Prompt da importação via IA (issue #158, ADR-013). Servido por
 GET /importacoes-ia/prompt. versao_schema é a do JSON que o prompt pede
 (schema_v1.json); versao_prompt muda a cada mudança do texto, mesmo sem mudar
-o schema. Mudou o texto: suba versao_prompt. Mudou o schema: arquivo de
-schema novo e versao_schema nova.
+o schema. Mudou o texto: suba versao_prompt. Mudou o schema de um jeito que
+recusa arquivo antes aceito: arquivo de schema novo e versao_schema nova. Campo
+opcional novo, que não recusa nenhum arquivo antigo, fica na mesma versão
+(saldo_final e saldo_data, issue #238).
 
 versao_schema: 1
 versao_prompt: 2
@@ -27,4 +29,4 @@ Regras:
 6. Não inclua como lançamento: saldo anterior, saldo do dia, saldo final, subtotal, total, cabeçalho, rodapé ou número de página.
 7. Não invente, não complete e não corrija lançamentos. Copie data, valor e histórico como estão. Se não conseguir ler um lançamento com certeza, deixe-o de fora: a importação será conferida no Ledgr antes de entrar.
 8. No arquivo, use só os campos "versao", "lancamentos", "saldo_final" e "saldo_data"; em cada lançamento, só "data", "valor" e "descricao". "versao" é sempre "1".
-9. Se o relatório mostrar o saldo final da conta no período, inclua "saldo_final" e "saldo_data" (a data a que esse saldo se refere), no mesmo formato de valor e de data dos lançamentos. O saldo aceita zero e negativo. Se o relatório não mostrar esse saldo, não inclua os dois campos e não invente.
+9. Se o relatório mostrar o saldo final da conta no período, inclua "saldo_final" e "saldo_data" (a data a que esse saldo se refere), no mesmo formato de valor e de data dos lançamentos. O saldo aceita zero e negativo. Se o relatório não mostrar esse saldo, não inclua nenhum dos dois campos e não invente.

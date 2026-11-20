@@ -391,7 +391,7 @@ def test_prompt_registra_as_duas_versoes():
         'Valor entre parênteses, como (1.234,56), é saída: escreva "-1234.56"',
         "Sinal de menos depois do número, como 1.234,56-, também é saída",
         'inclua "saldo_final" e "saldo_data"',
-        "não inclua os dois campos e não invente",
+        "não inclua nenhum dos dois campos e não invente",
     ):
         assert trecho in prompt.texto
 
@@ -447,6 +447,7 @@ def test_saldo_exige_os_dois_campos(campos, faltante):
         ("1.234,56", "use número com ponto decimal e no máximo duas casas"),
         (1234.56, 'use o número entre aspas, como "-1234.56" (veio 1234.56, sem aspas)'),
         ("1234567890123", 'valor grande demais (veio "1234567890123")'),
+        (None, "(veio null)"),
     ],
 )
 def test_saldo_final_invalido(valor, trecho):
@@ -467,6 +468,22 @@ def test_saldo_data_invalida(data, mensagem):
     assert _erros({**VALIDO, "saldo_final": "0", "saldo_data": data}) == [
         ("saldo_data", None, mensagem)
     ]
+
+
+@pytest.mark.parametrize("data", [None, 20260930], ids=["null", "numero"])
+def test_saldo_data_que_nao_e_texto(data):
+    (erro,) = _erros({**VALIDO, "saldo_final": "0", "saldo_data": data})
+
+    assert erro[:2] == ("saldo_data", None)
+    assert 'use texto entre aspas no formato AAAA-MM-DD, como "2026-09-05"' in erro[2]
+
+
+def test_saldo_nulo_nao_e_sem_saldo():
+    # Decisão da #238: null nos dois é erro de formato, não "sem saldo".
+    erros = _erros({**VALIDO, "saldo_final": None, "saldo_data": None})
+
+    assert [(c, n) for c, n, _ in erros] == [("saldo_final", None), ("saldo_data", None)]
+    assert erros[0][2].endswith("(veio null)") and erros[1][2].endswith("(veio null)")
 
 
 def test_erros_do_saldo_depois_dos_lancamentos():

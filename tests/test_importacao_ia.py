@@ -102,7 +102,7 @@ def test_prompt_com_as_duas_versoes_e_o_schema(db_session, conta, criar_empresa)
     assert (corpo["versao_schema"], corpo["versao_prompt"]) == ("1", "2")
     assert corpo["prompt"].startswith("Você vai converter")
     assert 'inclua "saldo_final" e "saldo_data"' in corpo["prompt"]
-    assert "não inclua os dois campos e não invente" in corpo["prompt"]
+    assert "não inclua nenhum dos dois campos e não invente" in corpo["prompt"]
     assert corpo["schema"]["properties"]["versao"] == {"const": "1"}
     assert set(corpo["schema"]["properties"]) == {
         "versao",
