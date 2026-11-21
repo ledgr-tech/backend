@@ -108,6 +108,7 @@ from app.models import (
     AssinaturaStripe,
     ChaveApi,
     ConexaoMcp,
+    ConsumoEmpresaApagada,
     Conta,
     Convite,
     CupomEnviado,
@@ -479,18 +480,43 @@ def _uso(db: Session, conta_id: uuid.UUID, agora: datetime) -> UsoResponse:
     )
     mes = func.to_char(func.timezone(FUSO_DA_FRANQUIA.key, primeiras.c.primeira), "YYYY-MM")
     meses = _meses(agora)
-    por_mes = dict(db.execute(select(mes, func.count()).where(mes.in_(meses)).group_by(mes)).all())
+    # O uso conta as conciliações que aconteceram, inclusive as das empresas
+    # removidas (issue #215): remover não devolve a franquia do mês. As das já
+    # apagadas pela limpeza estão em `consumo_empresas_apagadas`.
+    por_mes = dict(
+        db.execute(
+            select(mes, func.count()).where(mes.in_(meses)).group_by(mes),
+            execution_options={"incluir_removidas": True},
+        ).all()
+    )
+    apagadas = dict(
+        db.execute(
+            select(ConsumoEmpresaApagada.mes, ConsumoEmpresaApagada.extratos_do_banco).where(
+                ConsumoEmpresaApagada.conta_id == conta_id, ConsumoEmpresaApagada.mes.in_(meses)
+            )
+        ).all()
+    )
+    execucoes_apagadas = db.scalar(
+        select(func.coalesce(func.sum(ConsumoEmpresaApagada.execucoes), 0)).where(
+            ConsumoEmpresaApagada.conta_id == conta_id
+        )
+    )
     return UsoResponse(
         empresas=contar(Empresa, Empresa.conta_id == conta_id),
         usuarios_ativos=contar(
             Usuario, Usuario.conta_id == conta_id, Usuario.removido_em.is_(None)
         ),
         convites_pendentes=contar(Convite, Convite.conta_id == conta_id, *condicoes_pendente()),
-        conciliacoes_total=contar(
-            ExecucaoConciliacao, ExecucaoConciliacao.empresa_id.in_(empresas)
-        ),
+        conciliacoes_total=db.scalar(
+            select(func.count())
+            .select_from(ExecucaoConciliacao)
+            .where(ExecucaoConciliacao.empresa_id.in_(empresas)),
+            execution_options={"incluir_removidas": True},
+        )
+        + execucoes_apagadas,
         extratos_do_banco_por_mes=[
-            UsoNoMesResponse(mes=m, extratos_do_banco=por_mes.get(m, 0)) for m in meses
+            UsoNoMesResponse(mes=m, extratos_do_banco=por_mes.get(m, 0) + apagadas.get(m, 0))
+            for m in meses
         ],
         chaves_api_ativas=contar(
             ChaveApi, ChaveApi.conta_id == conta_id, ChaveApi.revogada_em.is_(None)

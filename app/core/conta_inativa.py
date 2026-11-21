@@ -109,6 +109,8 @@ def conta_da_empresa_esta_inativa(db: Session, empresa_id: uuid.UUID) -> bool:
             select(Conta.inativada_em)
             .join(Empresa, Empresa.conta_id == Conta.id)
             .where(Empresa.id == empresa_id)
+            # Com a empresa removida (issue #215): a conta inativa para tudo.
+            .execution_options(incluir_removidas=True)
         )
         is not None
     )

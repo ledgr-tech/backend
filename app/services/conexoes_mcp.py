@@ -40,6 +40,14 @@ def revogar_conexao(
     _revogar(db, ConexaoMcp.id == conexao_id, revogada_por_id)
 
 
+def revogar_conexoes_da_empresa(
+    db: Session, empresa_id: uuid.UUID, revogada_por_id: uuid.UUID | None = None
+) -> None:
+    """As conexões de uma empresa removida (issue #215): o token para de valer
+    na hora, e restaurar a empresa não as devolve."""
+    _revogar(db, ConexaoMcp.empresa_id == empresa_id, revogada_por_id)
+
+
 def revogar_conexoes_do_criador(
     db: Session, usuario_id: uuid.UUID, revogada_por_id: uuid.UUID | None = None
 ) -> None:

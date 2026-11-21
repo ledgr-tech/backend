@@ -24,6 +24,13 @@ class RegistroExclusao(Base):
     originais apagados no bucket, em `arquivos_originais_r2` (issue #139).
     `executado_por` é o texto digitado por quem rodou o script.
 
+    Desde a issue #215, scripts/apagar_empresas_removidas.py também grava aqui,
+    uma linha por empresa cliente apagada depois dos 30 dias: `empresa_id` é o id
+    da EMPRESA, `cnpj_sha256` o hash do CNPJ dela, `contagens` traz `contas: 0` e
+    `executado_por` é `apagar_empresas_removidas`. Para distinguir os dois casos,
+    olhe `contagens["contas"]` (1 na exclusão da conta, 0 na de uma empresa): a
+    pergunta "a conta deste CNPJ foi excluída?" só vale para as linhas com 1.
+
     Sem `TimestampMixin`: a linha nunca é alterada, e `executado_em` é o único
     instante que importa.
     """

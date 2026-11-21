@@ -602,8 +602,16 @@ def _empresas_do_mes(
 
 def nomes_das_empresas_da_conta(db: Session, conta_id: uuid.UUID) -> tuple[str, ...]:
     """As razões sociais da conta, para a rota trocá-las por `[EMPRESA]` na
-    conversa antes de ela sair para o provedor."""
-    return tuple(db.scalars(select(Empresa.razao_social).where(Empresa.conta_id == conta_id)))
+    conversa antes de ela sair para o provedor. Com as removidas (issue #215):
+    o nome de uma empresa removida, ou restaurada depois, continua sendo dado
+    do cliente e nunca sai em claro."""
+    return tuple(
+        db.scalars(
+            select(Empresa.razao_social)
+            .where(Empresa.conta_id == conta_id)
+            .execution_options(incluir_removidas=True)
+        )
+    )
 
 
 def responder(

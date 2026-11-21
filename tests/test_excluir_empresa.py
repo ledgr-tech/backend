@@ -28,6 +28,7 @@ from app.models import (
     Conciliacao,
     ConexaoMcp,
     Configuracao,
+    ConsumoEmpresaApagada,
     Conta,
     Convite,
     CupomEnviado,
@@ -224,6 +225,9 @@ def _povoar_conexao_mcp(db_session, conta: Conta, empresa: Empresa, admin: Usuar
     return [pedido, conexao, codigo, token]
 
 
+MES_DO_CONSUMO_APAGADO = "2024-01"
+
+
 def _povoar(
     db_session, conta: Conta, empresas: list[Empresa]
 ) -> list[tuple[type[Base], uuid.UUID]]:
@@ -327,12 +331,19 @@ def _povoar(
     )
     db_session.add_all([assinatura, pagamento, cupom])
     linhas += [assinatura, pagamento, cupom]
+    # Consumo de uma empresa que a limpeza já apagou (issue #215), num mês
+    # antigo: não mexe na franquia nem no uso dos últimos meses.
+    consumo = ConsumoEmpresaApagada(
+        conta_id=conta.id, mes=MES_DO_CONSUMO_APAGADO, extratos_do_banco=1, execucoes=1
+    )
+    db_session.add(consumo)
     db_session.commit()
     return (
         [(Conta, conta.id)]
         + [(Empresa, empresa.id) for empresa in empresas]
         + [(type(linha), linha.id) for linha in linhas]
         + [(EmpresaFavorita, (f.usuario_id, f.empresa_id)) for f in favoritas]
+        + [(ConsumoEmpresaApagada, (consumo.conta_id, consumo.mes))]
     )
 
 

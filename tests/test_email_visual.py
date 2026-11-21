@@ -78,6 +78,12 @@ ESPERADO = {
         "titulo": ("Sua conta foi", "desativada."),
         "mascote": "neutro",
     },
+    "empresa_removida": {
+        "olho": "Empresas · removida",
+        "titulo": ("Empresa", "removida."),
+        "mascote": "neutro",
+        "ficha": [("Empresa", RAZAO_SOCIAL), ("Removida por", "Gil Gestor")],
+    },
     "confirmacao_troca_email": {
         "olho": "Conta · e-mail novo",
         "titulo": ("Confirme o seu", "e-mail novo."),
@@ -122,7 +128,14 @@ ESPERADO = {
     },
 }
 # Quem leva o nome da empresa no HTML.
-COM_RAZAO_SOCIAL = {"boas_vindas", "convite", "conta_desativada", "cupom", "alerta_admin"}
+COM_RAZAO_SOCIAL = {
+    "boas_vindas",
+    "convite",
+    "conta_desativada",
+    "cupom",
+    "alerta_admin",
+    "empresa_removida",
+}
 
 
 class _Linhas(HTMLParser):

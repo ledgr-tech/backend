@@ -28,7 +28,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import status as http_status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.auth import PREFIXO_CHAVE_API, exigir_papel, hash_da_chave_api
@@ -122,7 +122,14 @@ def listar_chaves(
 ) -> ChaveApiListaResponse:
     linhas = db.execute(
         _consulta_chaves()
-        .where(ChaveApi.conta_id == usuario.conta_id)
+        .where(
+            ChaveApi.conta_id == usuario.conta_id,
+            # Chave escopada a empresa removida (issue #215), já revogada na
+            # remoção, some da lista junto com ela e volta, revogada, na
+            # restauração; o join externo, filtrado pela sessão, deixa
+            # `Empresa.id` nulo nela.
+            or_(ChaveApi.empresa_id.is_(None), Empresa.id.is_not(None)),
+        )
         .order_by(ChaveApi.criado_em.desc(), ChaveApi.id)
     ).all()
     return ChaveApiListaResponse(itens=[ChaveApiResponse(**_resposta(*linha)) for linha in linhas])
@@ -151,6 +158,8 @@ def criar_chave(
             )
         razao_social = empresa.razao_social
 
+    # Toda chave não revogada conta. As de uma empresa removida (issue #215)
+    # são revogadas na remoção e não voltam na restauração.
     ativas = db.scalar(
         select(func.count()).where(ChaveApi.conta_id == conta_id, ChaveApi.revogada_em.is_(None))
     )

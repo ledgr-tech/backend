@@ -42,7 +42,7 @@ normalização do `/register`, alfanumérico inclusive. Regras, nesta ordem:
 
 - 429 com `Retry-After` depois de `LIMITE_EMPRESAS_POR_HORA` empresas criadas
   pela conta na última hora, contadas na tabela (a primeira, do cadastro,
-  inclusive). É uma trava contra abuso, separada do plano, e vale mesmo sem
+  inclusive, e as removidas também: remover não devolve a cota). É uma trava contra abuso, separada do plano, e vale mesmo sem
   limite de plano configurado. A linha da conta é lida com `FOR UPDATE`, o
   mesmo desenho do limite de convites por hora da #69;
 - 409 "Empresa já cadastrada nesta conta." quando o CNPJ já é de uma empresa
@@ -57,8 +57,34 @@ normalização do `/register`, alfanumérico inclusive. Regras, nesta ordem:
 
 A consulta à Receita (até 5 s) roda com a transação encerrada, sem a trava da
 conta. Por isso as três primeiras regras são conferidas de novo, com a trava,
-depois dela. A empresa nasce com a `Configuracao` padrão. Editar e excluir
-empresa ficam fora: a exclusão de uma empresa cliente é a #138.
+depois dela. A empresa nasce com a `Configuracao` padrão.
+
+Editar e remover (issue #215). A empresa removida some de toda consulta pelo
+filtro de sessão de app/models/empresa.py (listagem, `GET /me`, limite do
+plano, favoritas, busca, assistente, `/v1`, MCP, links públicos e o
+`X-Ledgr-Empresa`, que dá 404); nenhuma rota repete a regra.
+
+- `PATCH /empresas/{id}` muda a `razao_social` (aparada, não vazia). Admin e
+  gestor; analista 403; empresa de outra conta ou removida 404. O corpo recusa
+  campo desconhecido (422) e aceita só o que veio, para a #236 acrescentar o
+  nome de exibição sem quebrar. O CNPJ não muda. Na empresa principal (o mesmo
+  CNPJ da conta) a razão social da conta muda junto, na mesma transação;
+- `DELETE /empresas/{id}` remove: admin e gestor. A empresa sai na hora, as
+  conexões MCP dela são revogadas e os dados são apagados 30 dias depois
+  (`apagar_em`), se ninguém restaurar. Recusas, em 409 com `detail` e `codigo`:
+  `empresa_principal` (a do CNPJ da conta) e `ultima_empresa` (a última
+  ativa). Responde 200 com a empresa removida (`EmpresaRemovidaResponse`). Depois
+  do commit e da resposta, e-mail ao admin e a quem removeu; falha no envio não
+  desfaz nada;
+- `GET /empresas/removidas`: admin e gestor, as removidas que ainda dá para
+  restaurar, da remoção mais recente para a mais antiga;
+- `POST /empresas/{id}/restaurar`: admin e gestor, só antes de `apagar_em` (depois,
+  404) e dentro do limite de empresas do plano (402). Volta tudo como estava,
+  menos as conexões MCP;
+- o `POST /empresas` de um CNPJ removido e ainda não apagado dá 409 com `codigo`
+  `empresa_removida`, o `empresa_id` e o `apagar_em`, para o front oferecer
+  restaurar; se o prazo já passou e a limpeza ainda não apagou, `codigo`
+  `empresa_sendo_apagada`, sem oferta.
 
 Logs só com o resultado categorizado; nunca o CNPJ nem a razão social.
 """
@@ -70,9 +96,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import DateTime, and_, case, cast, delete, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
@@ -88,7 +115,12 @@ from app.api.auth import (
 )
 from app.core.auth import exigir_papel, obter_usuario_autenticado
 from app.core.database import get_db
-from app.core.rate_limit import LIMITE_FAVORITAS_POR_USUARIO, chave_por_usuario, limiter
+from app.core.rate_limit import (
+    LIMITE_EMPRESA_ESCRITA_POR_USUARIO,
+    LIMITE_FAVORITAS_POR_USUARIO,
+    chave_por_usuario,
+    limiter,
+)
 from app.core.sem_acento import sem_acento, sem_acento_sql
 from app.models import (
     Configuracao,
@@ -100,6 +132,10 @@ from app.models import (
     Fechamento,
     Usuario,
 )
+from app.models.empresa import INCLUIR_REMOVIDAS
+from app.services import empresas_removidas as remocao
+from app.services.email import ProvedorDeEmail
+from app.services.email.envio import obter_provedor_email_dependencia
 from app.services.plano import barrar_no_limite, empresas_usadas
 
 logger = logging.getLogger(__name__)
@@ -120,12 +156,55 @@ class EmpresaRequest(BaseModel):
     razao_social: TextoPreenchido
 
 
+class EmpresaPatchRequest(BaseModel):
+    """Só o que veio no corpo é gravado (`model_fields_set`); `null` explícito é
+    422, e o corpo sem campo nenhum também. Para o campo da #236 (nome de
+    exibição) bastar acrescentar uma linha aqui e outra em `editar_empresa`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    razao_social: TextoPreenchido = None
+
+    @model_validator(mode="after")
+    def _algum_campo(self) -> "EmpresaPatchRequest":
+        if not self.model_fields_set:
+            raise ValueError("Informe ao menos um campo para alterar.")
+        return self
+
+
 class EmpresaResponse(BaseModel):
     id: uuid.UUID
     razao_social: str
     cnpj: str
     cnpj_verificado_em: datetime | None
     criado_em: datetime
+
+
+class EmpresaRemovidaResponse(BaseModel):
+    id: uuid.UUID
+    razao_social: str
+    cnpj: str
+    removida_em: datetime
+    removida_por_nome: str
+    apagar_em: datetime
+
+
+class EmpresasRemovidasResponse(BaseModel):
+    itens: list[EmpresaRemovidaResponse]
+
+
+class ConflitoDeEmpresa(Exception):
+    """409 com o `detail` em texto, que o front mostra direto, e o `codigo` ao
+    lado, para ele decidir o que oferecer. `extra` entra no corpo (ex.:
+    `empresa_id`)."""
+
+    def __init__(self, detail: str, codigo: str, **extra) -> None:
+        self.corpo = {"detail": detail, "codigo": codigo, **extra}
+        super().__init__(detail)
+
+
+async def tratar_conflito(_request: Request, exc: ConflitoDeEmpresa) -> JSONResponse:
+    return JSONResponse(status_code=http_status.HTTP_409_CONFLICT, content=exc.corpo)
 
 
 class EmpresaItemResponse(EmpresaResponse):
@@ -326,6 +405,9 @@ def _conferir_com_a_conta_travada(db: Session, conta_id: uuid.UUID, cnpj: str) -
             Empresa.conta_id == conta_id,
             Empresa.criado_em >= func.now() - timedelta(hours=1),
         )
+        # Com as removidas (issue #215): senão cadastrar, remover e cadastrar de
+        # novo furaria a trava contra abuso.
+        .execution_options(**{INCLUIR_REMOVIDAS: True})
     ).one()
     if criadas >= LIMITE_EMPRESAS_POR_HORA:
         logger.info("cadastro_empresa resultado=limite_por_hora")
@@ -335,9 +417,13 @@ def _conferir_com_a_conta_travada(db: Session, conta_id: uuid.UUID, cnpj: str) -
             headers={"Retry-After": str(max(1, math.ceil(segundos_ate_liberar)))},
         )
 
-    if db.scalar(select(Empresa.id).where(Empresa.conta_id == conta_id, Empresa.cnpj == cnpj)):
-        logger.info("cadastro_empresa resultado=cnpj_na_conta")
-        raise _ja_cadastrada()
+    existente = db.scalar(
+        select(Empresa)
+        .where(Empresa.conta_id == conta_id, Empresa.cnpj == cnpj)
+        .execution_options(**{INCLUIR_REMOVIDAS: True})
+    )
+    if existente is not None:
+        _barrar_cnpj_ja_na_conta(existente)
 
     try:
         barrar_no_limite(conta, "empresas", empresas_usadas(db, conta_id))
@@ -345,6 +431,28 @@ def _conferir_com_a_conta_travada(db: Session, conta_id: uuid.UUID, cnpj: str) -
         logger.info("cadastro_empresa resultado=limite_do_plano")
         raise
     return conta
+
+
+def _barrar_cnpj_ja_na_conta(existente: Empresa) -> None:
+    """409 do CNPJ que já é de uma empresa da conta. Se ela está removida e
+    ainda não foi apagada, o `codigo` diz isso para o front oferecer restaurar
+    (issue #215); a `UNIQUE (conta_id, cnpj)` continua valendo."""
+    if existente.removida_em is None:
+        logger.info("cadastro_empresa resultado=cnpj_na_conta")
+        raise _ja_cadastrada()
+    if remocao.venceu(existente):
+        logger.info("cadastro_empresa resultado=cnpj_sendo_apagado")
+        raise ConflitoDeEmpresa(
+            "Esta empresa foi removida e está sendo apagada. Tente cadastrá-la de novo mais tarde.",
+            "empresa_sendo_apagada",
+        )
+    logger.info("cadastro_empresa resultado=cnpj_removido")
+    raise ConflitoDeEmpresa(
+        "Esta empresa foi removida da conta e ainda pode ser restaurada.",
+        "empresa_removida",
+        empresa_id=str(existente.id),
+        apagar_em=existente.apagar_em.isoformat(),
+    )
 
 
 def _ja_cadastrada() -> HTTPException:
@@ -386,4 +494,177 @@ def cadastrar_empresa(
         raise _ja_cadastrada() from exc
     db.refresh(empresa)
     logger.info("cadastro_empresa resultado=cadastrada")
+    return _resposta(empresa)
+
+
+# --- editar, remover e restaurar (issue #215) -----------------------------------------
+
+obter_admin_ou_gestor = exigir_papel("admin", "gestor")
+
+
+def _removida(empresa: Empresa) -> EmpresaRemovidaResponse:
+    return EmpresaRemovidaResponse(
+        id=empresa.id,
+        razao_social=empresa.razao_social,
+        cnpj=empresa.cnpj,
+        removida_em=empresa.removida_em,
+        removida_por_nome=empresa.removida_por_nome,
+        apagar_em=empresa.apagar_em,
+    )
+
+
+def _empresa_travada(db: Session, empresa_id: uuid.UUID, conta_id: uuid.UUID) -> Empresa:
+    """A empresa ativa da conta, com a linha travada, ou 404. O filtro de
+    sessão já esconde a removida."""
+    empresa = db.scalar(
+        select(Empresa)
+        .where(Empresa.id == empresa_id, Empresa.conta_id == conta_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if empresa is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Empresa não encontrada."
+        )
+    return empresa
+
+
+@router.patch("/{empresa_id}", response_model=EmpresaResponse)
+@limiter.limit(LIMITE_EMPRESA_ESCRITA_POR_USUARIO, key_func=chave_por_usuario)
+def editar_empresa(
+    request: Request,
+    empresa_id: uuid.UUID,
+    dados: EmpresaPatchRequest,
+    usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
+    db: Annotated[Session, Depends(get_db)],
+) -> EmpresaResponse:
+    # A conta primeiro, depois a empresa: a ordem das travas de remover,
+    # restaurar e da limpeza (outra ordem travaria uma contra a outra).
+    conta = db.scalar(
+        select(Conta)
+        .where(Conta.id == usuario.conta_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    empresa = _empresa_travada(db, empresa_id, usuario.conta_id)
+    campos = dados.model_fields_set
+    if "razao_social" in campos:
+        empresa.razao_social = dados.razao_social
+        # A empresa principal é a da conta: as duas razões sociais andam juntas.
+        if remocao.eh_principal(empresa, conta):
+            conta.razao_social = dados.razao_social
+    db.commit()
+    db.refresh(empresa)
+    logger.info(
+        "editar_empresa resultado=editada principal=%s", remocao.eh_principal(empresa, conta)
+    )
+    return _resposta(empresa)
+
+
+@router.delete("/{empresa_id}", response_model=EmpresaRemovidaResponse)
+@limiter.limit(LIMITE_EMPRESA_ESCRITA_POR_USUARIO, key_func=chave_por_usuario)
+def remover_empresa(
+    request: Request,
+    empresa_id: uuid.UUID,
+    tarefas: BackgroundTasks,
+    usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
+    db: Annotated[Session, Depends(get_db)],
+    provedor: Annotated[ProvedorDeEmail | None, Depends(obter_provedor_email_dependencia)],
+) -> EmpresaRemovidaResponse:
+    conta_id = usuario.conta_id
+    # A trava da conta serializa duas remoções ao mesmo tempo: sem ela, as duas
+    # contariam duas empresas ativas e levariam as duas embora.
+    conta = db.scalar(
+        select(Conta)
+        .where(Conta.id == conta_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    empresa = _empresa_travada(db, empresa_id, conta_id)
+    if remocao.eh_principal(empresa, conta):
+        db.rollback()
+        logger.info("remover_empresa resultado=principal")
+        raise ConflitoDeEmpresa(remocao.MENSAGEM_PRINCIPAL, remocao.CODIGO_PRINCIPAL)
+    if empresas_usadas(db, conta_id) <= 1:
+        db.rollback()
+        logger.info("remover_empresa resultado=ultima")
+        raise ConflitoDeEmpresa(remocao.MENSAGEM_ULTIMA, remocao.CODIGO_ULTIMA)
+
+    destinatarios = remocao.destinatarios_do_aviso(db, conta_id, usuario)
+    feita = remocao.remover(db, empresa, usuario)
+    resposta = EmpresaRemovidaResponse(
+        id=feita.empresa_id,
+        razao_social=feita.razao_social,
+        cnpj=feita.cnpj,
+        removida_em=feita.removida_em,
+        removida_por_nome=feita.removida_por_nome,
+        apagar_em=feita.apagar_em,
+    )
+    db.commit()
+    logger.info("remover_empresa resultado=removida")
+    # Depois do commit e da resposta: o envio nunca desfaz a remoção.
+    remocao.agendar_aviso(tarefas, provedor, feita, destinatarios)
+    return resposta
+
+
+@router.get("/removidas", response_model=EmpresasRemovidasResponse)
+def listar_removidas(
+    usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
+    db: Annotated[Session, Depends(get_db)],
+) -> EmpresasRemovidasResponse:
+    """As empresas que ainda dá para restaurar. As de prazo vencido esperam só a
+    limpeza e não aparecem."""
+    empresas = db.scalars(
+        select(Empresa)
+        .where(
+            Empresa.conta_id == usuario.conta_id,
+            Empresa.removida_em.is_not(None),
+            Empresa.apagar_em > remocao.agora(),
+        )
+        .order_by(Empresa.removida_em.desc(), Empresa.id)
+        .execution_options(**{INCLUIR_REMOVIDAS: True})
+    )
+    return EmpresasRemovidasResponse(itens=[_removida(empresa) for empresa in empresas])
+
+
+@router.post("/{empresa_id}/restaurar", response_model=EmpresaResponse)
+@limiter.limit(LIMITE_EMPRESA_ESCRITA_POR_USUARIO, key_func=chave_por_usuario)
+def restaurar_empresa(
+    request: Request,
+    empresa_id: uuid.UUID,
+    usuario: Annotated[Usuario, Depends(obter_admin_ou_gestor)],
+    db: Annotated[Session, Depends(get_db)],
+) -> EmpresaResponse:
+    conta_id = usuario.conta_id
+    conta = db.scalar(
+        select(Conta)
+        .where(Conta.id == conta_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    empresa = db.scalar(
+        select(Empresa)
+        .where(
+            Empresa.id == empresa_id,
+            Empresa.conta_id == conta_id,
+            Empresa.removida_em.is_not(None),
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True, **{INCLUIR_REMOVIDAS: True})
+    )
+    if empresa is None or remocao.venceu(empresa):
+        db.rollback()
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Empresa não encontrada."
+        )
+    try:
+        barrar_no_limite(conta, "empresas", empresas_usadas(db, conta_id))
+    except HTTPException:
+        db.rollback()
+        logger.info("restaurar_empresa resultado=limite_do_plano")
+        raise
+    remocao.restaurar(empresa)
+    db.commit()
+    db.refresh(empresa)
+    logger.info("restaurar_empresa resultado=restaurada")
     return _resposta(empresa)

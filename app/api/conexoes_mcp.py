@@ -193,12 +193,19 @@ def aprovar_pedido(
 ) -> RedirecionamentoResponse:
     conta_id, usuario_id = usuario.conta_id, usuario.id
     encontrado = _pedido_pendente(db, pedido)
-    empresa = db.get(Empresa, dados.empresa_id)
-    if empresa is None or empresa.conta_id != conta_id:
+    # A conta primeiro, depois a empresa (issue #215): a remoção trava a conta e
+    # revoga as conexões da empresa. Lida antes da trava, a empresa podia estar
+    # removida quando a conexão nascesse, e a restauração a faria valer.
+    conta = db.scalar(select(Conta).where(Conta.id == conta_id).with_for_update())
+    empresa = db.scalar(
+        select(Empresa)
+        .where(Empresa.id == dados.empresa_id, Empresa.conta_id == conta_id)
+        .execution_options(populate_existing=True)
+    )
+    if empresa is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND, detail="Empresa não encontrada."
         )
-    conta = db.scalar(select(Conta).where(Conta.id == conta_id).with_for_update())
     if not mcp_liberado(conta):  # sempre liberado no MVP
         raise HTTPException(
             status_code=http_status.HTTP_402_PAYMENT_REQUIRED,

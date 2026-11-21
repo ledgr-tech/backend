@@ -2,7 +2,8 @@
 e limites de empresas e usuários por plano (issue #133, ADR-019).
 
 Limites: `empresas_usadas` e `usuarios_usados` são a única conta do que a conta
-usa, para o 402 do `POST /empresas` e do `POST /empresa/convites` e para os
+usa (empresa removida não conta: o filtro de sessão de app/models/empresa.py a
+esconde, issue #215; restaurar confere o limite de novo), para o 402 do `POST /empresas` e do `POST /empresa/convites` e para os
 `limites` do `GET /me` nunca divergirem. Usuários são os ativos mais os
 convites pendentes: o convite pendente já ocupa a vaga, e o aceite não é
 barrado pelo limite. `barrar_no_limite` levanta o 402, igual para todos os
@@ -48,7 +49,14 @@ from app.core.plano import (
     limite_da_conta,
     situacao_da_conta,
 )
-from app.models import Conta, Convite, Empresa, ExecucaoConciliacao, Usuario
+from app.models import (
+    ConsumoEmpresaApagada,
+    Conta,
+    Convite,
+    Empresa,
+    ExecucaoConciliacao,
+    Usuario,
+)
 from app.services.convites import condicoes_pendente
 
 FUSO_DA_FRANQUIA = ZoneInfo("America/Sao_Paulo")
@@ -93,11 +101,23 @@ def mes_civil_de_sao_paulo(instante: datetime) -> tuple[datetime, datetime]:
     return inicio.astimezone(UTC), seguinte.astimezone(UTC)
 
 
+def mes_da_franquia(instante: datetime) -> str:
+    """O mês civil de São Paulo de `instante`, como `AAAA-MM`."""
+    return instante.astimezone(FUSO_DA_FRANQUIA).strftime("%Y-%m")
+
+
+def mes_da_franquia_sql(coluna):
+    """O mesmo `AAAA-MM` de `mes_da_franquia`, calculado no banco."""
+    return func.to_char(func.timezone(FUSO_DA_FRANQUIA.key, coluna), "YYYY-MM")
+
+
 def conciliacoes_no_mes(db: Session, conta_id: uuid.UUID, instante: datetime | None = None) -> int:
     """Quantos extratos do banco da conta (todas as empresas) tiveram a PRIMEIRA
     execução no mês civil de São Paulo de `instante`: a unidade da franquia, a
-    mesma do bloqueio e do uso do `/admin`."""
-    inicio, fim = mes_civil_de_sao_paulo(instante or agora())
+    mesma do bloqueio e do uso do `/admin`. Soma o que as empresas já apagadas
+    pela limpeza consumiram no mês (`consumo_empresas_apagadas`, issue #215)."""
+    instante = instante or agora()
+    inicio, fim = mes_civil_de_sao_paulo(instante)
     primeiras = (
         select(func.min(ExecucaoConciliacao.criado_em).label("primeira"))
         .where(
@@ -108,11 +128,21 @@ def conciliacoes_no_mes(db: Session, conta_id: uuid.UUID, instante: datetime | N
         .group_by(ExecucaoConciliacao.extrato_banco_id)
         .subquery()
     )
-    return db.scalar(
+    # Com as empresas removidas (issue #215): a conciliação já aconteceu, e
+    # remover a empresa não devolve a franquia do mês.
+    vivas = db.scalar(
         select(func.count())
         .select_from(primeiras)
-        .where(primeiras.c.primeira >= inicio, primeiras.c.primeira < fim)
+        .where(primeiras.c.primeira >= inicio, primeiras.c.primeira < fim),
+        execution_options={"incluir_removidas": True},
     )
+    apagadas = db.scalar(
+        select(ConsumoEmpresaApagada.extratos_do_banco).where(
+            ConsumoEmpresaApagada.conta_id == conta_id,
+            ConsumoEmpresaApagada.mes == mes_da_franquia(instante),
+        )
+    )
+    return vivas + (apagadas or 0)
 
 
 def barrar_no_limite(conta: Conta, recurso: Recurso, usados: int) -> None:
