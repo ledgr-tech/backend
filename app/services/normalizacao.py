@@ -71,6 +71,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.core.logging import resumo_do_erro
 from app.models import Extrato, Lancamento, LinhaInvalida
 from app.parsers.csv import CSVInvalidoError, parse_csv
 from app.parsers.ofx import OFXInvalidoError, parse_ofx
@@ -128,17 +129,6 @@ def _marcar_erro(db: Session, extrato_id: uuid.UUID) -> None:
     if extrato is not None:
         extrato.status = "erro"
         db.commit()
-
-
-def _resumo_do_erro(exc: Exception) -> str:
-    """Classe e código SQLSTATE do erro, sem a mensagem (regra da issue #34).
-
-    A mensagem de um erro de banco traz os parâmetros do INSERT ou o
-    "Failing row contains (...)" do Postgres, com a descrição dos lançamentos.
-    O SQLSTATE (ex.: 23505, 57014) diz o tipo de falha sem carregar dado.
-    """
-    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
-    return f"classe={type(exc).__name__} sqlstate={sqlstate}"
 
 
 def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> None:
@@ -252,10 +242,13 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
         # extrato nunca fica preso em "processando" por um erro que os
         # except específicos acima não previram (ex: falha de conexão no
         # meio do insert).
+        # A mensagem de um erro de banco traz os parâmetros do INSERT ou o
+        # "Failing row contains (...)" do Postgres, com a descrição dos
+        # lançamentos: vai só o resumo (regra da issue #34).
         logger.error(
             "normalizar_extrato: falha inesperada processando extrato %s %s",
             extrato_id,
-            _resumo_do_erro(exc),
+            resumo_do_erro(exc),
         )
         db.rollback()
         try:
@@ -264,7 +257,7 @@ def normalizar_extrato(extrato_id: uuid.UUID, formato: str, conteudo: bytes) -> 
             logger.error(
                 "normalizar_extrato: falha ao marcar extrato %s como erro %s",
                 extrato_id,
-                _resumo_do_erro(exc_marcar),
+                resumo_do_erro(exc_marcar),
             )
             db.rollback()
     finally:

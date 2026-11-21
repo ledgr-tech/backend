@@ -7,13 +7,19 @@ pytest a captura de stderr e o conftest (que religa a propagação para o
 `caplog`) mudariam justamente o que está sendo testado.
 """
 
+import json
 import logging
 import os
 import subprocess
 import sys
+import textwrap
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
+from app.core import logging as logs_app
+from app.core.database import engine
 from app.core.logging import SemQueryNoAcesso, configurar_logs
 from app.services import normalizacao
 
@@ -175,3 +181,157 @@ def test_linha_de_acesso_sem_a_busca_no_stderr():
     assert processo.returncode == 0, processo.stderr
     assert "pessoa" not in processo.stderr + processo.stdout
     assert '1.2.3.4:5 - "GET /admin/contas HTTP/1.1" 401' in processo.stderr + processo.stdout
+
+
+# --- erro não tratado sem a mensagem nem o traceback (issue #34) ---------------------
+
+# Como o Postgres e o SQLAlchemy põem o dado na mensagem do erro: o DETAIL de
+# uma violação de unicidade ou de NOT NULL e a linha `[parameters: ...]`.
+MENSAGEM_COM_DADO = f"Failing row contains ({DADO_PESSOAL})"
+
+
+def _falhar_com(exc: BaseException):
+    raise exc
+
+
+def _ler_json(texto: str):
+    return json.loads(texto)
+
+
+def _info_da_excecao(funcao, *args):
+    try:
+        funcao(*args)
+    except Exception:  # noqa: BLE001 - o teste quer a exceção que vier
+        return sys.exc_info()
+    raise AssertionError("a função deveria ter falhado")
+
+
+def _registro_de_erro(exc_info, msg="Exception in ASGI application\n") -> logging.LogRecord:
+    """Como o uvicorn registra uma exceção da aplicação: `logger.error(msg,
+    exc_info=exc)` no `uvicorn.error`."""
+    return logging.LogRecord("uvicorn.error", logging.ERROR, __file__, 0, msg, (), exc_info)
+
+
+def test_erro_nao_tratado_sai_sem_a_mensagem_nem_o_traceback():
+    registro = _registro_de_erro(_info_da_excecao(_falhar_com, RuntimeError(MENSAGEM_COM_DADO)))
+
+    assert logs_app.SemDetalheNoErro().filter(registro) is True
+
+    linha = logging.Formatter().format(registro)
+    assert DADO_PESSOAL not in linha
+    assert "Traceback" not in linha
+    assert registro.exc_info is None
+    assert registro.getMessage().startswith("erro_nao_tratado classe=RuntimeError ")
+
+
+def test_onde_e_a_ultima_linha_do_projeto_e_pula_a_biblioteca():
+    """O `json.loads` falha dentro da biblioteca padrão; o `onde` é a linha
+    do projeto que a chamou."""
+    linha_do_loads = _ler_json.__code__.co_firstlineno + 1
+    registro = _registro_de_erro(_info_da_excecao(_ler_json, "{" + DADO_PESSOAL))
+
+    logs_app.SemDetalheNoErro().filter(registro)
+
+    mensagem = registro.getMessage()
+    assert "classe=JSONDecodeError" in mensagem
+    assert mensagem.endswith(f"onde=tests/test_logging.py:{linha_do_loads} em _ler_json")
+
+
+def test_traceback_ja_formatado_por_outro_handler_tambem_sai():
+    registro = _registro_de_erro(_info_da_excecao(_falhar_com, RuntimeError(MENSAGEM_COM_DADO)))
+    logging.Formatter().format(registro)  # guarda o traceback em `exc_text`
+    assert DADO_PESSOAL in registro.exc_text
+
+    logs_app.SemDetalheNoErro().filter(registro)
+
+    assert DADO_PESSOAL not in logging.Formatter().format(registro)
+
+
+def test_causa_do_erro_vai_pelo_nome_da_classe():
+    def _converter():
+        try:
+            _falhar_com(KeyError(DADO_PESSOAL))
+        except KeyError as erro:
+            raise ValueError("conversão falhou") from erro
+
+    registro = _registro_de_erro(_info_da_excecao(_converter))
+
+    logs_app.SemDetalheNoErro().filter(registro)
+
+    mensagem = registro.getMessage()
+    assert "classe=ValueError causa=KeyError " in mensagem
+    assert DADO_PESSOAL not in logging.Formatter().format(registro)
+
+
+def test_registro_sem_excecao_passa_como_veio():
+    registro = logging.LogRecord(
+        "uvicorn.error", logging.INFO, __file__, 0, "Started server process [%d]", (123,), None
+    )
+
+    assert logs_app.SemDetalheNoErro().filter(registro) is True
+
+    assert registro.getMessage() == "Started server process [123]"
+
+
+def _erro_do_banco_com_o_dado() -> DBAPIError:
+    with engine.connect() as conexao:
+        try:
+            conexao.execute(
+                text("select 1 / 0 where cast(:dado as text) is not null"), {"dado": DADO_PESSOAL}
+            )
+        except DBAPIError as erro:
+            return erro
+    raise AssertionError("a consulta deveria ter falhado")
+
+
+def test_erro_do_banco_sai_com_classe_causa_e_sqlstate(db_session):
+    erro = _erro_do_banco_com_o_dado()
+    registro = _registro_de_erro((type(erro), erro, erro.__traceback__))
+
+    logs_app.SemDetalheNoErro().filter(registro)
+
+    mensagem = registro.getMessage()
+    assert "classe=DataError causa=DivisionByZero sqlstate=22012 " in mensagem
+    assert DADO_PESSOAL not in logging.Formatter().format(registro)
+
+
+def test_erro_do_banco_nao_traz_os_parametros_na_mensagem(db_session):
+    """Defesa a mais (`hide_parameters`): sem ela, a mensagem do SQLAlchemy
+    termina com `[parameters: {'dado': ...}]`, e qualquer `str(exc)` leva o
+    dado."""
+    assert DADO_PESSOAL not in str(_erro_do_banco_com_o_dado())
+
+
+def test_erro_nao_tratado_no_stderr_como_o_uvicorn():
+    """Como o uvicorn: ele configura os loggers dele com o `LOGGING_CONFIG`
+    antes de importar o app, e registra a exceção no `uvicorn.error`."""
+    processo = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(f"""
+                import logging, logging.config
+                import uvicorn.config
+                logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+                import main
+                try:
+                    raise RuntimeError({MENSAGEM_COM_DADO!r})
+                except RuntimeError as exc:
+                    logging.getLogger("uvicorn.error").error(
+                        "Exception in ASGI application\\n", exc_info=exc
+                    )
+                """),
+        ],
+        cwd=RAIZ,
+        env={k: v for k, v in os.environ.items() if k != "LOG_LEVEL"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    saida = processo.stderr + processo.stdout
+    assert processo.returncode == 0, saida
+    assert DADO_PESSOAL not in saida
+    assert "Traceback" not in saida
+    assert "erro_nao_tratado classe=RuntimeError" in saida

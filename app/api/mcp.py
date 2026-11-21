@@ -168,17 +168,22 @@ def _conexao(ctx: Context) -> ConexaoAutenticada:
     return ctx.request_context.request.state.conexao_mcp
 
 
-def _erro(nome: str, conexao: ConexaoAutenticada, mensagem: str, resultado: str) -> CallToolResult:
+def _erro(
+    ferramenta: str, conexao: ConexaoAutenticada, mensagem: str, resultado: str
+) -> CallToolResult:
     logger.info(
-        "mcp_ferramenta nome=%s conexao_id=%s resultado=%s", nome, conexao.conexao_id, resultado
+        "mcp_ferramenta nome=%s conexao_id=%s resultado=%s",
+        ferramenta,
+        conexao.conexao_id,
+        resultado,
     )
     return CallToolResult(content=[TextContent(type="text", text=mensagem)], is_error=True)
 
 
 def _sucesso(
-    nome: str, conexao: ConexaoAutenticada, modelo: BaseModel, texto: str
+    ferramenta: str, conexao: ConexaoAutenticada, modelo: BaseModel, texto: str
 ) -> CallToolResult:
-    logger.info("mcp_ferramenta nome=%s conexao_id=%s resultado=ok", nome, conexao.conexao_id)
+    logger.info("mcp_ferramenta nome=%s conexao_id=%s resultado=ok", ferramenta, conexao.conexao_id)
     return CallToolResult(
         content=[TextContent(type="text", text=texto)],
         structured_content=modelo.model_dump(mode="json"),
