@@ -11,6 +11,8 @@ import base64
 import hashlib
 import logging
 import secrets
+import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -25,7 +27,9 @@ from sqlalchemy import func, select, text, update
 from app.core import auth, conta_inativa
 from app.core.auth import ConexaoAutenticada, obter_conexao_mcp
 from app.core.config import settings
-from app.models import ClienteOAuth, CodigoOAuth, ConexaoMcp, TokenOAuth
+from app.core.database import SessionLocal
+from app.models import ClienteOAuth, CodigoOAuth, ConexaoMcp, Conta, Empresa, TokenOAuth
+from app.models.empresa import PRAZO_PARA_APAGAR
 from main import app
 
 client = TestClient(app)
@@ -576,6 +580,50 @@ def test_empresa_de_outra_conta_da_404(mcp, conta):
 
     assert resposta.status_code == 404 and resposta.json() == {"detail": "Empresa não encontrada."}
     assert c.aprovar(pedido).status_code == 200  # o pedido continua valendo
+
+
+def test_aprovacao_junto_com_a_remocao_da_empresa_da_404_e_nao_cria_conexao(mcp, conta, db_session):
+    """Issue #215: a remoção trava a conta, revoga as conexões da empresa e faz
+    o commit. A aprovação que leu a empresa antes dessa trava gravaria, depois
+    dela, uma conexão ativa para a empresa removida, que a restauração faria
+    valer de novo. A aprovação só lê a empresa com a conta travada."""
+    c = conta()
+    segunda = c.outra_empresa()
+    _, _, pedido = c.pedido()
+    respostas = {}
+
+    trava = SessionLocal()
+    trava.execute(select(Conta.id).where(Conta.id == c.admin.conta_id).with_for_update())
+    thread = threading.Thread(
+        target=lambda: respostas.update(aprovar=c.aprovar(pedido, empresa=segunda))
+    )
+    try:
+        thread.start()
+        time.sleep(1.5)  # a aprovação chega à trava da conta
+        assert respostas == {}
+        agora = datetime.now(UTC)
+        trava.execute(
+            update(Empresa)
+            .where(Empresa.id == segunda)
+            .values(
+                removida_em=agora,
+                removida_por_nome="Ana Admin",
+                apagar_em=agora + PRAZO_PARA_APAGAR,
+            )
+        )
+        trava.commit()
+    finally:
+        trava.close()
+    thread.join(timeout=30)
+
+    assert respostas["aprovar"].status_code == 404
+    assert respostas["aprovar"].json() == {"detail": "Empresa não encontrada."}
+    assert (
+        db_session.scalar(
+            select(func.count()).select_from(ConexaoMcp).where(ConexaoMcp.empresa_id == segunda)
+        )
+        == 0
+    )
 
 
 def test_recusar_volta_com_access_denied(mcp, conta):
