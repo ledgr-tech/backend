@@ -24,8 +24,10 @@ from test_excluir_empresa import (  # noqa: F401 - fixtures e helpers
     registros,
 )
 
+from app.api import admin
 from app.models import Base, Empresa, Extrato, LinhaInvalida, RegistroExclusao
 from app.services import exclusao as servico
+from app.services import plano
 from app.services.arquivo_original import chave_do_objeto, prefixo_da_empresa
 from app.services.exclusao import ETAPAS, Escopo
 from main import app
@@ -125,7 +127,13 @@ def test_apaga_a_empresa_vencida_e_o_que_e_dela_e_nada_do_resto(
     # só perdeu as linhas da empresa.
     depois_da_conta = _contagens(db_session, conta.id)
     for tabela, quantidade in antes_da_conta.items():
-        assert depois_da_conta[tabela] == quantidade - antes_da_vencida[tabela], tabela
+        if tabela != "consumo_empresas_apagadas":
+            assert depois_da_conta[tabela] == quantidade - antes_da_vencida[tabela], tabela
+    # O consumo da vencida ficou guardado: uma linha a mais, a do mês dela.
+    assert (
+        depois_da_conta["consumo_empresas_apagadas"]
+        == antes_da_conta["consumo_empresas_apagadas"] + 1
+    )
     assert depois_da_conta["contas"] == 1 and depois_da_conta["usuarios"] == 2
     assert [e.id for e in _empresas(db_session, conta.id)] == [ativa.id]
 
@@ -239,6 +247,7 @@ def test_a_empresa_leva_o_mesmo_que_a_exclusao_da_conta_leva_dela(db_session, co
         "operadores_ledgr",
         "usuarios",
         "usos_assistente",
+        "consumo_empresas_apagadas",
         "contas",
     }
     for tabela in levadas:
@@ -495,6 +504,32 @@ def test_falha_no_banco_desfaz_so_aquela_empresa(
 
 
 # --- ponta a ponta com a API -----------------------------------------------------------
+
+
+def test_apagar_nao_devolve_a_franquia_nem_encolhe_o_uso_do_painel(
+    db_session, conta_povoada, limpar_registros
+):
+    """A franquia do mês e o uso do `/admin` contam as execuções de conciliação.
+    Apagadas as empresas, a contagem delas fica guardada por conta e mês, e os
+    números não caem. Duas empresas no mesmo mês somam na mesma linha."""
+    conta, _ = conta_povoada()
+    empresas = _empresas(db_session, conta.id)
+    agora = datetime.now(UTC)
+    franquia = plano.conciliacoes_no_mes(db_session, conta.id, agora)
+    uso = admin._uso(db_session, conta.id, agora)
+    assert franquia == len(empresas) == 2
+    for empresa in empresas:
+        limpar_registros(empresa.id)
+        _remover(db_session, empresa.id)
+
+    assert _rodar() == 0
+
+    db_session.rollback()
+    assert _empresas(db_session, conta.id) == []
+    assert plano.conciliacoes_no_mes(db_session, conta.id, agora) == franquia
+    depois = admin._uso(db_session, conta.id, agora)
+    assert depois.conciliacoes_total == uso.conciliacoes_total
+    assert depois.extratos_do_banco_por_mes == uso.extratos_do_banco_por_mes
 
 
 def test_empresa_removida_pela_api_e_apagada_depois_dos_30_dias(

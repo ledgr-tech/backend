@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import ColumnElement, delete, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -31,6 +32,7 @@ from app.models import (
     Conciliacao,
     ConexaoMcp,
     Configuracao,
+    ConsumoEmpresaApagada,
     Conta,
     Convite,
     CupomEnviado,
@@ -55,6 +57,7 @@ from app.models import (
     Usuario,
 )
 from app.models.empresa import INCLUIR_REMOVIDAS
+from app.services.plano import mes_da_franquia_sql
 
 COM_REMOVIDAS = {INCLUIR_REMOVIDAS: True}
 
@@ -115,6 +118,7 @@ def _so_da_conta(condicao: Condicao) -> Condicao:
 # `cupons_enviados` (issue #169), `eventos_conta` e `operadores_ledgr` (issue
 # #156), antes dos usuários; `empresas` aponta para `usuarios` (quem removeu,
 # issue #215), então sai antes deles;
+# `consumo_empresas_apagadas` (issue #215) é da conta e sai só com ela;
 # `assinaturas_stripe` e `pagamentos_stripe` (issues #166 e #167), antes da
 # conta. Apagar a conta não cancela nada na Stripe: o script recusa a conta com
 # assinatura em andamento. O
@@ -164,6 +168,10 @@ ETAPAS: tuple[tuple[type[Base], Condicao], ...] = (
     (Empresa, lambda e: Empresa.id.in_(e.empresas())),
     (Usuario, _so_da_conta(lambda e: Usuario.conta_id == e.conta_id)),
     (UsoAssistente, _so_da_conta(lambda e: UsoAssistente.conta_id == e.conta_id)),
+    (
+        ConsumoEmpresaApagada,
+        _so_da_conta(lambda e: ConsumoEmpresaApagada.conta_id == e.conta_id),
+    ),
     (Conta, _so_da_conta(lambda e: Conta.id == e.conta_id)),
 )
 
@@ -266,6 +274,48 @@ def travar_se_vencida(
     )
 
 
+def guardar_consumo(db: Session, escopo: Escopo) -> None:
+    """Antes de apagar as execuções de conciliação de uma empresa, soma em
+    `consumo_empresas_apagadas` o que elas contam para a conta, por mês civil de
+    São Paulo: os extratos do banco com a primeira execução no mês (a unidade
+    da franquia) e as execuções do mês. Sem isso, a franquia do mês e o uso do
+    `/admin` cairiam quando a limpeza apagasse a empresa (issue #215)."""
+    da_empresa = ExecucaoConciliacao.empresa_id == escopo.empresa_id
+    primeiras = (
+        select(func.min(ExecucaoConciliacao.criado_em).label("primeira"))
+        .where(da_empresa)
+        .group_by(ExecucaoConciliacao.extrato_banco_id)
+        .subquery()
+    )
+    mes_da_primeira = mes_da_franquia_sql(primeiras.c.primeira)
+    extratos = dict(
+        db.execute(select(mes_da_primeira, func.count()).group_by(mes_da_primeira)).all()
+    )
+    mes_da_execucao = mes_da_franquia_sql(ExecucaoConciliacao.criado_em)
+    execucoes = dict(
+        db.execute(
+            select(mes_da_execucao, func.count()).where(da_empresa).group_by(mes_da_execucao)
+        ).all()
+    )
+    for mes in sorted(extratos.keys() | execucoes.keys()):
+        novo = insert(ConsumoEmpresaApagada).values(
+            conta_id=escopo.conta_id,
+            mes=mes,
+            extratos_do_banco=extratos.get(mes, 0),
+            execucoes=execucoes.get(mes, 0),
+        )
+        db.execute(
+            novo.on_conflict_do_update(
+                index_elements=[ConsumoEmpresaApagada.conta_id, ConsumoEmpresaApagada.mes],
+                set_={
+                    "extratos_do_banco": ConsumoEmpresaApagada.extratos_do_banco
+                    + novo.excluded.extratos_do_banco,
+                    "execucoes": ConsumoEmpresaApagada.execucoes + novo.excluded.execucoes,
+                },
+            )
+        )
+
+
 def apagar_empresa(
     db: Session,
     empresa: Empresa,
@@ -281,7 +331,9 @@ def apagar_empresa(
     conta); a contagem de `contas` é 0."""
     if empresa.removida_em is None:
         raise ValueError("a empresa não está removida")
-    contagens = apagar_linhas(db, Escopo(empresa.conta_id, empresa.id))
+    escopo = Escopo(empresa.conta_id, empresa.id)
+    guardar_consumo(db, escopo)
+    contagens = apagar_linhas(db, escopo)
     if arquivos_originais is not None:
         contagens[CHAVE_CONTAGEM_ARQUIVOS] = arquivos_originais
     registro_id = uuid.uuid4()

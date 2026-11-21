@@ -62,6 +62,7 @@ from app.models import (
     Conciliacao,
     ConexaoMcp,
     Configuracao,
+    ConsumoEmpresaApagada,
     Conta,
     Convite,
     CupomEnviado,
@@ -583,6 +584,8 @@ def criar_conta(db_session):
         ).delete(synchronize_session=False)
         db_session.query(Usuario).filter_by(conta_id=conta_id).delete()
         db_session.query(UsoAssistente).filter_by(conta_id=conta_id).delete()
+        # Consumo das empresas apagadas pela limpeza (issue #215).
+        db_session.query(ConsumoEmpresaApagada).filter_by(conta_id=conta_id).delete()
         db_session.query(Conta).filter_by(id=conta_id).delete()
     db_session.commit()
 

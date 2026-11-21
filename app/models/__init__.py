@@ -10,6 +10,7 @@ from app.models.base import Base
 from app.models.chave_api import ChaveApi
 from app.models.conciliacao import Conciliacao
 from app.models.configuracao import Configuracao
+from app.models.consumo_empresa_apagada import ConsumoEmpresaApagada
 from app.models.conta import Conta
 from app.models.convite import Convite
 from app.models.decisao_linha import DecisaoLinha
@@ -43,6 +44,7 @@ __all__ = [
     "Conciliacao",
     "ConexaoMcp",
     "Configuracao",
+    "ConsumoEmpresaApagada",
     "Conta",
     "Convite",
     "CupomEnviado",
