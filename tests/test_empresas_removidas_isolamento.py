@@ -191,7 +191,7 @@ def test_conta_inativa_vale_tambem_para_a_empresa_removida(db_session, equipe):
     assert conta_inativa.conta_da_empresa_esta_inativa(db_session, cliente_id) is True
 
 
-def test_chave_de_empresa_removida_nao_conta_no_teto_de_chaves_que_o_usuario_ve(
+def test_chave_de_empresa_removida_e_revogada_e_sai_do_teto_de_chaves_ativas(
     db_session, equipe, monkeypatch
 ):
     from app.api import chaves_api
@@ -243,7 +243,7 @@ def test_v1_da_404_na_empresa_removida_e_nao_a_lista(equipe):
     assert _v1(token, f"/empresas/{equipe.cliente.id}/fechamentos").status_code == 200
 
 
-def test_chave_de_api_da_empresa_removida_nao_lista_nem_enxerga_nada(equipe):
+def test_chave_de_api_da_empresa_removida_e_revogada_e_nao_lista(equipe):
     criada = client.post(
         "/chaves-api",
         headers=equipe.headers,
@@ -256,8 +256,8 @@ def test_chave_de_api_da_empresa_removida_nao_lista_nem_enxerga_nada(equipe):
 
     itens = client.get("/chaves-api", headers=equipe.headers).json()["itens"]
     assert [i["id"] for i in itens] == [da_conta["id"]]
-    assert _v1(criada["chave"], "/empresas").json() == {"itens": []}
-    assert _v1(criada["chave"], f"/empresas/{equipe.cliente.id}/fechamentos").status_code == 404
+    assert _v1(criada["chave"], "/empresas").status_code == 401
+    assert _v1(da_conta["chave"], "/empresas").status_code == 200
     nova = client.post(
         "/chaves-api",
         headers=equipe.headers,
@@ -265,11 +265,13 @@ def test_chave_de_api_da_empresa_removida_nao_lista_nem_enxerga_nada(equipe):
     )
     assert nova.status_code == 404
 
+    # Volta para a lista revogada: quem usava cria outra.
     equipe.restaurar()
-    assert {i["id"] for i in client.get("/chaves-api", headers=equipe.headers).json()["itens"]} == {
-        criada["id"],
-        da_conta["id"],
-    }
+    itens = {i["id"]: i for i in client.get("/chaves-api", headers=equipe.headers).json()["itens"]}
+    assert set(itens) == {criada["id"], da_conta["id"]}
+    assert itens[criada["id"]]["revogada_em"] is not None
+    assert itens[da_conta["id"]]["revogada_em"] is None
+    assert _v1(criada["chave"], "/empresas").status_code == 401
     assert db_chave(criada["id"]) is not None
 
 

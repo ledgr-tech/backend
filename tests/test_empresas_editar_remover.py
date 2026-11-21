@@ -17,11 +17,13 @@ from conftest import ProvedorEmailFalso, _gerar_cnpj, cabecalhos
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 
+from app.api.chaves_api import MAXIMO_CHAVES_ATIVAS
 from app.api.senha import obter_provedor_email_dependencia
 from app.core.auth import CABECALHO_EMPRESA
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models import (
+    ChaveApi,
     ClienteOAuth,
     ConexaoMcp,
     Conta,
@@ -447,6 +449,62 @@ def test_as_conexoes_mcp_da_empresa_sao_revogadas_na_hora_e_as_outras_ficam(db_s
     assert _revogada(db_session, da_outra) == (False, False)
     db_session.expire_all()
     assert db_session.get(ConexaoMcp, da_empresa.id).revogada_por_id == conta.usuarios["admin"].id
+
+
+# --- chaves de API ---------------------------------------------------------------------
+
+
+def _criar_chave(headers, empresa=None) -> dict:
+    corpo = {"nome": "Integração"}
+    if empresa is not None:
+        corpo["empresa_id"] = str(empresa.id)
+    resposta = client.post("/chaves-api", headers=headers, json=corpo)
+    assert resposta.status_code == 201, resposta.text
+    return resposta.json()
+
+
+def _chave(db_session, criada) -> ChaveApi:
+    db_session.expire_all()
+    return db_session.get(ChaveApi, uuid.UUID(criada["id"]))
+
+
+def test_as_chaves_de_api_da_empresa_sao_revogadas_na_remocao_e_as_outras_ficam(db_session, conta):
+    headers = conta.headers["gestor"]
+    da_empresa = _criar_chave(headers, conta.cliente_a)
+    da_outra = _criar_chave(headers, conta.cliente_b)
+    da_conta = _criar_chave(headers)
+
+    _remover(headers, conta.cliente_a.id)
+
+    revogada = _chave(db_session, da_empresa)
+    assert revogada.revogada_em is not None
+    assert revogada.revogada_por_id == conta.usuarios["gestor"].id
+    assert _chave(db_session, da_outra).revogada_em is None
+    assert _chave(db_session, da_conta).revogada_em is None
+    v1 = client.get("/v1/empresas", headers={"Authorization": f"Bearer {da_empresa['chave']}"})
+    assert v1.status_code == 401
+
+
+def test_restaurar_nao_devolve_as_chaves_nem_passa_do_teto_de_ativas(db_session, conta):
+    """Sem a revogação, remover tirava as chaves da empresa do teto, a conta
+    criava outras e restaurar devolvia as antigas: o teto passava de 10."""
+    headers = conta.headers["admin"]
+    antigas = [_criar_chave(headers, conta.cliente_a) for _ in range(MAXIMO_CHAVES_ATIVAS)]
+    _remover(headers, conta.cliente_a.id)
+    for _ in range(MAXIMO_CHAVES_ATIVAS):
+        _criar_chave(headers)
+
+    assert _restaurar(headers, conta.cliente_a.id).status_code == 200
+
+    ativas = db_session.scalar(
+        select(func.count())
+        .select_from(ChaveApi)
+        .where(ChaveApi.conta_id == conta.id, ChaveApi.revogada_em.is_(None))
+    )
+    assert ativas == MAXIMO_CHAVES_ATIVAS
+    assert all(_chave(db_session, c).revogada_em is not None for c in antigas)
+    v1 = client.get("/v1/empresas", headers={"Authorization": f"Bearer {antigas[0]['chave']}"})
+    assert v1.status_code == 401
 
 
 # --- GET /empresas/removidas -----------------------------------------------------------

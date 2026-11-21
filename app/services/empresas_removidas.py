@@ -18,10 +18,10 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.models import Conta, Empresa, Usuario
+from app.models import ChaveApi, Conta, Empresa, Usuario
 from app.models.empresa import INCLUIR_REMOVIDAS, PRAZO_PARA_APAGAR
 from app.services.conexoes_mcp import revogar_conexoes_da_empresa
 from app.services.email import ProvedorDeEmail
@@ -68,15 +68,28 @@ class Remocao:
     apagar_em: datetime
 
 
+def _revogar_chaves_da_empresa(db: Session, empresa_id: uuid.UUID, usuario_id: uuid.UUID) -> None:
+    """As chaves de API escopadas à empresa param de valer na hora. Sem isso,
+    elas sairiam do teto de 10 chaves ativas enquanto a empresa está removida e
+    voltariam na restauração, por cima das criadas no intervalo."""
+    db.execute(
+        update(ChaveApi)
+        .where(ChaveApi.empresa_id == empresa_id, ChaveApi.revogada_em.is_(None))
+        .values(revogada_em=func.now(), revogada_por_id=usuario_id)
+    )
+
+
 def remover(db: Session, empresa: Empresa, usuario: Usuario) -> Remocao:
-    """Marca a empresa como removida por `usuario` e revoga as conexões MCP
-    dela, sem commit. As regras (principal, última, papel) são de quem chama."""
+    """Marca a empresa como removida por `usuario` e revoga as conexões MCP e as
+    chaves de API dela, sem commit. Restaurar não devolve nenhuma das duas. As
+    regras (principal, última, papel) são de quem chama."""
     momento = agora()
     empresa.removida_em = momento
     empresa.removida_por_id = usuario.id
     empresa.removida_por_nome = usuario.nome
     empresa.apagar_em = momento + PRAZO_PARA_APAGAR
     revogar_conexoes_da_empresa(db, empresa.id, usuario.id)
+    _revogar_chaves_da_empresa(db, empresa.id, usuario.id)
     return Remocao(
         empresa_id=empresa.id,
         razao_social=empresa.razao_social,
@@ -88,8 +101,8 @@ def remover(db: Session, empresa: Empresa, usuario: Usuario) -> Remocao:
 
 
 def restaurar(empresa: Empresa) -> None:
-    """Volta a empresa ao que era, sem commit. As conexões MCP revogadas na
-    remoção não voltam: quem usa conecta de novo."""
+    """Volta a empresa ao que era, sem commit. As conexões MCP e as chaves de
+    API revogadas na remoção não voltam: quem usa conecta ou cria de novo."""
     empresa.removida_em = None
     empresa.removida_por_id = None
     empresa.removida_por_nome = None

@@ -124,9 +124,10 @@ def listar_chaves(
         _consulta_chaves()
         .where(
             ChaveApi.conta_id == usuario.conta_id,
-            # Chave escopada a empresa removida (issue #215) some da lista junto
-            # com ela e volta na restauração; o join externo, filtrado pela
-            # sessão, deixa `Empresa.id` nulo nela.
+            # Chave escopada a empresa removida (issue #215), já revogada na
+            # remoção, some da lista junto com ela e volta, revogada, na
+            # restauração; o join externo, filtrado pela sessão, deixa
+            # `Empresa.id` nulo nela.
             or_(ChaveApi.empresa_id.is_(None), Empresa.id.is_not(None)),
         )
         .order_by(ChaveApi.criado_em.desc(), ChaveApi.id)
@@ -157,17 +158,10 @@ def criar_chave(
             )
         razao_social = empresa.razao_social
 
-    # As chaves de empresa removida não aparecem na lista (issue #215) e, pelo
-    # mesmo motivo, não contam no teto: ninguém é barrado por chave que não vê.
+    # Toda chave não revogada conta. As de uma empresa removida (issue #215)
+    # são revogadas na remoção e não voltam na restauração.
     ativas = db.scalar(
-        select(func.count())
-        .select_from(ChaveApi)
-        .outerjoin(Empresa, Empresa.id == ChaveApi.empresa_id)
-        .where(
-            ChaveApi.conta_id == conta_id,
-            ChaveApi.revogada_em.is_(None),
-            or_(ChaveApi.empresa_id.is_(None), Empresa.id.is_not(None)),
-        )
+        select(func.count()).where(ChaveApi.conta_id == conta_id, ChaveApi.revogada_em.is_(None))
     )
     if ativas >= MAXIMO_CHAVES_ATIVAS:
         logger.info("chave_api resultado=limite_de_ativas")
