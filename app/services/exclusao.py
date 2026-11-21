@@ -206,8 +206,16 @@ def apagar_linhas(db: Session, escopo: Escopo, etapas=ETAPAS) -> dict[str, int]:
     A linha da conta e as das empresas do escopo são travadas antes de tudo: as
     tabelas com `empresa_id` têm FK para a empresa, e usuários, convites e
     empresas, para a conta, então um upload ou cadastro simultâneo espera e
-    depois falha pela FK, em vez de deixar linha órfã."""
-    conta = db.scalar(select(Conta).where(Conta.id == escopo.conta_id).with_for_update())
+    depois falha pela FK, em vez de deixar linha órfã.
+
+    No escopo de uma empresa, a conta continua viva: a trava dela é
+    `FOR NO KEY UPDATE` (a de `travar_se_vencida`), que não segura os inserts
+    com FK para `contas`."""
+    conta = db.scalar(
+        select(Conta)
+        .where(Conta.id == escopo.conta_id)
+        .with_for_update(key_share=not escopo.da_conta_inteira)
+    )
     if conta is None:
         raise LookupError("conta não encontrada")
     db.execute(escopo.empresas().with_for_update(), execution_options=COM_REMOVIDAS)
@@ -260,8 +268,13 @@ def travar_se_vencida(
     com a trava aqui, restaurar e apagar nunca passam os dois. A ordem das
     travas é a de todas as rotas da empresa: a conta primeiro, depois a
     empresa; na ordem inversa, o cron e um `restaurar` ao mesmo tempo
-    travariam um ao outro."""
-    db.execute(select(Conta.id).where(Conta.id == conta_id).with_for_update())
+    travariam um ao outro.
+
+    A da conta é `FOR NO KEY UPDATE`: ainda espera o `FOR UPDATE` de remover e
+    restaurar, mas não segura os inserts com FK para `contas` (assistente,
+    eventos, chaves, conexões, empresas) da conta, que continua viva, durante o
+    R2 e os deletes."""
+    db.execute(select(Conta.id).where(Conta.id == conta_id).with_for_update(key_share=True))
     return db.scalar(
         select(Empresa)
         .where(

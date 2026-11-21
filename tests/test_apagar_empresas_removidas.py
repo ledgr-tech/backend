@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import ArmazenamentoEmMemoria, cabecalhos
 from fastapi.testclient import TestClient
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from test_excluir_empresa import (  # noqa: F401 - fixtures e helpers
     NOME_ADMIN,
     _existentes,
@@ -25,7 +25,8 @@ from test_excluir_empresa import (  # noqa: F401 - fixtures e helpers
 )
 
 from app.api import admin
-from app.models import Base, Empresa, Extrato, LinhaInvalida, RegistroExclusao
+from app.core.database import SessionLocal
+from app.models import Base, Empresa, Extrato, LinhaInvalida, RegistroExclusao, UsoAssistente
 from app.services import exclusao as servico
 from app.services import plano
 from app.services.arquivo_original import chave_do_objeto, prefixo_da_empresa
@@ -504,6 +505,26 @@ def test_falha_no_banco_desfaz_so_aquela_empresa(
 
 
 # --- ponta a ponta com a API -----------------------------------------------------------
+
+
+def test_a_limpeza_nao_trava_as_insercoes_da_conta_que_continua_ativa(db_session, conta_povoada):
+    """A limpeza trava a linha da conta contra um `restaurar` ao mesmo tempo, e
+    segura a trava durante o R2 e os deletes. Com `FOR UPDATE`, todo insert com
+    FK para `contas` (assistente, eventos, chaves, conexões, empresas) esperaria
+    esse tempo; com `FOR NO KEY UPDATE`, passa."""
+    conta, _ = conta_povoada()
+    vencida, _ = _empresas(db_session, conta.id)
+    _remover(db_session, vencida.id)
+
+    with SessionLocal() as limpeza, SessionLocal() as outra:
+        assert servico.travar_se_vencida(limpeza, conta.id, vencida.id, AGORA) is not None
+        servico.apagar_linhas(limpeza, Escopo(conta.id, vencida.id))
+        try:
+            outra.execute(text("SET LOCAL lock_timeout = '1s'"))
+            outra.add(UsoAssistente(conta_id=conta.id))
+            outra.commit()
+        finally:
+            limpeza.rollback()
 
 
 def test_apagar_nao_devolve_a_franquia_nem_encolhe_o_uso_do_painel(
