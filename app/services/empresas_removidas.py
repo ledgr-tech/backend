@@ -114,8 +114,10 @@ def venceu(empresa: Empresa, momento: datetime | None = None) -> bool:
     return empresa.apagar_em is not None and empresa.apagar_em <= (momento or agora())
 
 
-def _data(momento: datetime) -> str:
-    return momento.astimezone(FUSO).strftime("%d/%m/%Y")
+def _data_e_hora(momento: datetime) -> str:
+    """Data e hora de Brasília: o prazo vence na hora da remoção, e só a data
+    faria parecer que o último dia vale inteiro."""
+    return momento.astimezone(FUSO).strftime("%d/%m/%Y, às %H:%M (horário de Brasília)")
 
 
 @dataclass(frozen=True)
@@ -144,7 +146,7 @@ def mensagens_do_aviso(remocao: Remocao, destinatarios: list[Destinatario]) -> l
             nome=d.nome,
             razao_social=remocao.razao_social,
             removida_por=remocao.removida_por_nome,
-            restaurar_ate=_data(remocao.apagar_em),
+            restaurar_ate=_data_e_hora(remocao.apagar_em),
             chave_idempotencia=(
                 f"empresa-removida/{remocao.empresa_id}/"
                 f"{int(remocao.removida_em.timestamp())}/{i}"

@@ -43,7 +43,7 @@ CASOS = {
         nome=nome,
         razao_social=razao,
         removida_por="Gil Gestor",
-        restaurar_ate="20/12/2026",
+        restaurar_ate="20/12/2026, às 15:00 (horário de Brasília)",
         chave_idempotencia="empresa-removida-teste",
     ),
     "confirmacao_troca_email": lambda nome=NOME, razao=RAZAO_SOCIAL: (

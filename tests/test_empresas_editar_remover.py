@@ -742,7 +742,8 @@ def test_o_gestor_que_remove_avisa_o_admin_e_a_si_depois_do_commit(db_session, c
     )
     for mensagem in provedor.enviadas:
         assert "Cliente A Ltda" in mensagem.texto and "Gil Gestor" in mensagem.texto
-        assert apagar_em.strftime("%d/%m/%Y") in mensagem.texto
+        # O prazo vence na hora da remoção, não no fim do dia: o e-mail diz a hora.
+        assert apagar_em.strftime("%d/%m/%Y, às %H:%M (horário de Brasília)") in mensagem.texto
         assert "Cliente A Ltda" in mensagem.html
         assert conta.cliente_a.cnpj not in mensagem.texto + mensagem.html
     assert len({m.chave_idempotencia for m in provedor.enviadas}) == 2
