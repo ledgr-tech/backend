@@ -48,13 +48,14 @@ class Empresa(Base, TimestampMixin):
     Remoção (issue #215, ADR-019): `DELETE /empresas/{id}` não apaga a linha, só
     desativa. `removida_em` é o momento, `removida_por_id` e `removida_por_nome`
     dizem quem (o nome é a cópia do momento, como em `fechamentos`) e
-    `apagar_em` é `removida_em` + `PRAZO_PARA_APAGAR`: passado esse dia, a
+    `apagar_em` é `removida_em` + `PRAZO_PARA_APAGAR`: passado esse instante, a
     limpeza (scripts/apagar_empresas_removidas.py) apaga os dados de vez. Tudo
     nulo é empresa ativa; o CHECK obriga os campos a virem juntos. A empresa
-    removida some de toda consulta ORM por uma regra só, em
-    app/core/empresas_removidas.py; quem precisa enxergá-la (restaurar, listar
-    as removidas, o cadastro do mesmo CNPJ, a limpeza) pede com
-    `execution_options(incluir_removidas=True)`."""
+    removida some de toda consulta ORM por uma regra só, o listener
+    `esconder_empresas_removidas` no fim deste arquivo; remover e restaurar
+    ficam em app/services/empresas_removidas.py. Quem precisa enxergá-la
+    (restaurar, listar as removidas, o cadastro do mesmo CNPJ, a limpeza) pede
+    com `execution_options(incluir_removidas=True)`."""
 
     __tablename__ = "empresas"
     __table_args__ = (

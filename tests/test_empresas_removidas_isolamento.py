@@ -526,6 +526,27 @@ def test_o_uso_do_painel_conta_a_conciliacao_da_empresa_removida_mas_nao_a_empre
     assert depois.extratos_do_banco_por_mes == antes.extratos_do_banco_por_mes
 
 
+def test_as_chaves_ativas_do_painel_batem_com_as_que_o_cliente_ve(db_session, equipe):
+    """As chaves da empresa removida são revogadas na remoção: o `/admin` e a
+    lista do cliente contam as mesmas ativas."""
+    for nome in ("Da conta 1", "Da conta 2", "Da conta 3"):
+        client.post("/chaves-api", headers=equipe.headers, json={"nome": nome})
+    for nome in ("Da cliente 1", "Da cliente 2"):
+        client.post(
+            "/chaves-api",
+            headers=equipe.headers,
+            json={"nome": nome, "empresa_id": str(equipe.cliente.id)},
+        )
+
+    equipe.remover()
+
+    db_session.rollback()
+    itens = client.get("/chaves-api", headers=equipe.headers).json()["itens"]
+    ativas_na_lista = [i for i in itens if i["revogada_em"] is None]
+    uso = admin._uso(db_session, equipe.conta_id, datetime.now(UTC))
+    assert len(ativas_na_lista) == uso.chaves_api_ativas == 3
+
+
 def test_remover_a_empresa_nao_zera_o_limite_diario_de_explicacoes_da_conta(
     db_session, equipe, monkeypatch
 ):
