@@ -755,6 +755,28 @@ def test_o_admin_que_remove_recebe_um_aviso_so(conta, provedor):
     assert [m.para for m in provedor.enviadas] == [conta.usuarios["admin"].email]
 
 
+def test_remover_de_novo_no_mesmo_segundo_nao_repete_a_chave_de_idempotencia():
+    """Remover, restaurar e remover de novo dentro de um segundo (clique duplo,
+    script): com a chave no segundo, o provedor descartaria o segundo aviso como
+    repetido."""
+    primeira = datetime(2026, 11, 21, 15, 0, 0, 100_000, tzinfo=UTC)
+    destinatarios = [empresas_removidas.Destinatario(email="a@x.com", nome="Ana")]
+
+    def chave(removida_em):
+        remocao = empresas_removidas.Remocao(
+            empresa_id=uuid.UUID(int=1),
+            razao_social="Cliente A Ltda",
+            cnpj="12345678000199",
+            removida_em=removida_em,
+            removida_por_nome="Ana",
+            apagar_em=removida_em + PRAZO_PARA_APAGAR,
+        )
+        return empresas_removidas.mensagens_do_aviso(remocao, destinatarios)[0].chave_idempotencia
+
+    assert chave(primeira) != chave(primeira + timedelta(milliseconds=500))
+    assert chave(primeira) == chave(primeira)
+
+
 def test_falha_no_envio_nao_desfaz_a_remocao(db_session, conta):
     falho = ProvedorEmailFalso(falha=RuntimeError("provedor fora do ar"))
     app.dependency_overrides[obter_provedor_email_dependencia] = lambda: falho

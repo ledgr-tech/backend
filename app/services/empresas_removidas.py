@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks
@@ -139,6 +139,13 @@ def destinatarios_do_aviso(db: Session, conta_id: uuid.UUID, quem_removeu: Usuar
     return [Destinatario(email=p.email, nome=p.nome) for p in pessoas]
 
 
+def _microssegundos(momento: datetime) -> int:
+    """O instante exato, em microssegundos: com a chave no segundo, remover,
+    restaurar e remover de novo no mesmo segundo repetiria a chave, e o
+    provedor descartaria o segundo aviso."""
+    return (momento - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+
+
 def mensagens_do_aviso(remocao: Remocao, destinatarios: list[Destinatario]) -> list[MensagemEmail]:
     return [
         mensagem_empresa_removida(
@@ -149,7 +156,7 @@ def mensagens_do_aviso(remocao: Remocao, destinatarios: list[Destinatario]) -> l
             restaurar_ate=_data_e_hora(remocao.apagar_em),
             chave_idempotencia=(
                 f"empresa-removida/{remocao.empresa_id}/"
-                f"{int(remocao.removida_em.timestamp())}/{i}"
+                f"{_microssegundos(remocao.removida_em)}/{i}"
             ),
         )
         for i, d in enumerate(destinatarios)
